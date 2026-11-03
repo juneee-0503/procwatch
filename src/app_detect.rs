@@ -108,7 +108,6 @@ impl App {
         if self.ir.det.sigma.is_empty() {
             return;
         }
-        let me = std::process::id();
         let alive: HashSet<ProcKey> = self.tree.nodes.values().map(|n| ProcKey { pid: n.info.pid, start: n.info.start_time_secs }).collect();
         self.ir.det.sigma_seen.retain(|k, _| alive.contains(k));
         self.ir.det.sigma_hits.retain(|pid, (start, _)| alive.contains(&ProcKey { pid: *pid, start: *start }));
@@ -123,7 +122,7 @@ impl App {
                 _ => {}
             }
             self.ir.det.sigma_seen.insert(key, hashed);
-            if n.info.ppid == Some(me) || *pid == me {
+            if self.is_own_helper(&n.info) {
                 continue;
             }
             let parent = n.info.ppid.and_then(|p| self.tree.get(p)).map(|p| &p.info);
@@ -164,11 +163,10 @@ impl App {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let empty = Vec::new();
         let mut scores: HashMap<u32, crate::triage::Assessment> = HashMap::with_capacity(self.tree.nodes.len());
-        let me = std::process::id();
         let mut host_hits: Vec<(u32, u64, RuleHit)> = Vec::new();
         for (pid, n) in &self.tree.nodes {
             // Our own helper processes (codesign, lsof…) aren't suspects.
-            if n.info.ppid == Some(me) || *pid == me {
+            if self.is_own_helper(&n.info) {
                 scores.insert(*pid, Default::default());
                 continue;
             }
@@ -215,11 +213,10 @@ impl App {
         if self.ir.det.sigma.is_empty() || opened.is_empty() {
             return;
         }
-        let me = std::process::id();
         let t = Local::now();
         for (pid, c) in opened {
             let Some(n) = self.tree.get(*pid) else { continue };
-            if *pid == me || n.info.ppid == Some(me) {
+            if self.is_own_helper(&n.info) {
                 continue;
             }
             let image = n.info.exe_path.clone().unwrap_or_else(|| n.info.name.clone());

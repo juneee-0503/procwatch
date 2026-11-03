@@ -339,3 +339,23 @@ pub fn find_results(frame: &mut Frame, app: &mut App, area: Rect) {
         Rect { y: inner.bottom().saturating_sub(1), height: 1, ..inner },
     );
 }
+
+/// `--run` confirmation: this executes the program for real.
+pub fn launch_confirm(frame: &mut Frame, app: &mut App, screen: Rect) {
+    let crate::app::Mode::LaunchConfirm(argv) = &app.mode else { return };
+    let rect = centered(screen, 84, 13);
+    frame.render_widget(Clear, rect);
+    let lines = vec![
+        Line::default(),
+        Line::from(Span::styled("  This will RUN the program on this computer:", Style::new().add_modifier(Modifier::BOLD))),
+        Line::default(),
+        Line::from(Span::styled(format!("    {}", truncate(&argv.join(" "), 76)), Style::new().fg(WARN))),
+        Line::default(),
+        Line::from("  Only do this inside an isolated analysis VM or sandbox you can reset."),
+        Line::from("  procwatch observes it from its first instruction; it does not contain it."),
+        Line::from(muted("  Output goes to a log in a new case; every step is in the custody log.")),
+        Line::default(),
+        Line::from(vec![Span::styled("  y", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)), Span::raw(" run under trace    "), Span::styled("esc", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)), Span::raw(" cancel")]),
+    ];
+    frame.render_widget(Paragraph::new(lines).block(frame_block("Launch and trace", BAD)), rect);
+}

@@ -273,6 +273,9 @@ pub struct Ir {
     last_profile: Option<Instant>,
     last_profile_save: Option<Instant>,
     pub state_scroll: usize,
+    /// Processes started by `--run` (watched although they're our children).
+    pub launched: HashSet<u32>,
+    pub launch_logs: Vec<(u32, PathBuf)>,
 }
 
 /// An autostart entry that appeared, changed or disappeared between scans.
@@ -385,6 +388,8 @@ impl Ir {
             last_profile: None,
             last_profile_save: None,
             state_scroll: 0,
+            launched: HashSet::new(),
+            launch_logs: Vec::new(),
         }
     }
 }
@@ -680,7 +685,6 @@ impl App {
         self.ir.last_profile = Some(Instant::now());
         let elapsed = elapsed.unwrap_or(0);
         let intel = self.ir.intel.snapshot();
-        let me = std::process::id();
         let now = Local::now();
         let alive: HashSet<ProcKey> = self.tree.nodes.values().map(|n| ProcKey { pid: n.info.pid, start: n.info.start_time_secs }).collect();
         self.ir.profile_runs.retain(|k, _| alive.contains(k));
@@ -691,7 +695,7 @@ impl App {
         };
         for n in self.tree.nodes.values() {
             let i = &n.info;
-            if i.pid == me || i.ppid == Some(me) {
+            if self.is_own_helper(i) {
                 continue;
             }
             let Some(exe) = i.exe_path.as_deref() else { continue };
@@ -786,6 +790,7 @@ impl App {
         self.response_on_snapshot();
         self.deep_auto_enroll();
         self.deep_tick();
+        self.launch_tick();
         self.update_profiles();
         if self.mode == Mode::Workspace {
             self.refresh_workspace();

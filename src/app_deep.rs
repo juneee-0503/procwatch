@@ -5,6 +5,7 @@
 //! events. A child module of `app`.
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local};
@@ -107,7 +108,7 @@ impl App {
             return;
         }
         let me = std::process::id();
-        if pid == me || self.tree.get(pid).is_some_and(|n| n.info.ppid == Some(me)) {
+        if pid == me || self.tree.get(pid).is_some_and(|n| self.is_own_helper(&n.info)) {
             return;
         }
         let root = self.proc_key(pid);
@@ -143,6 +144,60 @@ impl App {
             }
         }
         self.set_status(StatusLevel::Info, format!("Deep trace stopped for {} ({pid})", self.name_of(pid)));
+    }
+
+    /// `--run`: start a program held at its first instruction, attach deep
+    /// trace, then let it run. Output goes to a log in the case.
+    pub fn launch_and_trace(&mut self, argv: Vec<String>) {
+        let Some(case) = self.ensure_case().cloned() else { return };
+        let log = case.dir.join("evidence").join(format!("run-{}.log", Local::now().format("%Y%m%d-%H%M%S")));
+        let launched = match crate::launch::start(&argv, Some(&log)) {
+            Ok(l) => l,
+            Err(e) => {
+                self.set_status(StatusLevel::Error, format!("Couldn't start {}: {e}", argv.join(" ")));
+                return;
+            }
+        };
+        let pid = launched.pid;
+        let key = ProcKey { pid, start: crate::process::native::start_time(pid).unwrap_or(0) };
+        self.ir.launched.insert(pid);
+        let attached = self.deep_watcher().map(|w| w.watch_sync(pid)).unwrap_or(false);
+        self.ir.deep.enrolled.insert(key, Enrolled { reason: "launched by procwatch --run".into(), since: Local::now(), root: key, auto: false, ended: None });
+        let sha = crate::fileinfo::sha256_file(Path::new(&launched.program)).unwrap_or_default();
+        let _ = case.log(
+            "program launched for analysis",
+            &format!("{} (pid {pid}) sha256={sha} · trace attached before start: {attached} · output → {}", argv.join(" "), case.rel(&log)),
+        );
+        if let Err(e) = crate::launch::resume(&launched) {
+            self.set_status(StatusLevel::Error, format!("Couldn't resume {}: {e}", launched.program));
+            return;
+        }
+        self.ir.launch_logs.push((pid, log));
+        self.request_refresh();
+        self.set_status(
+            if attached { StatusLevel::Success } else { StatusLevel::Error },
+            if attached { format!("Running {} as pid {pid} under deep trace from its first instruction", argv.join(" ")) } else { format!("Running {} as pid {pid} — trace could NOT attach before start", argv.join(" ")) },
+        );
+        self.open_workspace_for(key);
+    }
+
+    /// Reap launched programs that exited; register their output logs.
+    pub(super) fn launch_tick(&mut self) {
+        let mut done = Vec::new();
+        for (pid, log) in &self.ir.launch_logs {
+            if let Some(code) = crate::launch::reap(*pid) {
+                done.push((*pid, log.clone(), code));
+            }
+        }
+        for (pid, log, code) in done {
+            self.ir.launch_logs.retain(|(p, _)| *p != pid);
+            if let Some(c) = &self.ir.case {
+                let prov = crate::case::Provenance::live("stdout/stderr of the launched program").subject(format!("process:{pid}"));
+                let _ = c.register_existing(&log, prov);
+                let _ = c.log("launched program exited", &format!("pid {pid} exit status {code}"));
+            }
+            self.set_status(StatusLevel::Info, format!("Launched program (pid {pid}) exited with status {code}; its descendants are still traced"));
+        }
     }
 
     pub fn toggle_deep(&mut self, pid: u32) {

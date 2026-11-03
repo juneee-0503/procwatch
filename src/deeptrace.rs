@@ -61,6 +61,8 @@ fn ser_time<S: serde::Serializer>(t: &DateTime<Local>, s: S) -> Result<S::Ok, S:
 
 pub enum Cmd {
     Watch(u32),
+    /// Watch and confirm (true = registered) before returning.
+    WatchSync(u32, Sender<bool>),
     Unwatch(u32),
 }
 
@@ -89,6 +91,16 @@ impl Watcher {
 
     pub fn watch(&self, pid: u32) {
         let _ = self.tx.send(Cmd::Watch(pid));
+    }
+
+    /// Watch `pid` and wait until the watcher has it (used before letting
+    /// a stopped, freshly launched program continue).
+    pub fn watch_sync(&self, pid: u32) -> bool {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if self.tx.send(Cmd::WatchSync(pid, tx)).is_err() {
+            return false;
+        }
+        rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap_or(false)
     }
 
     pub fn unwatch(&self, pid: u32) {
@@ -211,6 +223,13 @@ mod imp {
                         watched.remove(&pid);
                     }
                 }
+                Cmd::WatchSync(pid, reply) => {
+                    let ok = register(kq, pid);
+                    if ok {
+                        watched.insert(pid);
+                    }
+                    let _ = reply.send(ok);
+                }
                 Cmd::Unwatch(pid) => {
                     watched.remove(&pid);
                 }
@@ -299,6 +318,11 @@ mod imp {
                     b.watched.insert(pid);
                     b.exe.insert(pid, exe(pid));
                 }
+                Cmd::WatchSync(pid, reply) => {
+                    b.watched.insert(pid);
+                    b.exe.insert(pid, exe(pid));
+                    let _ = reply.send(true);
+                }
                 Cmd::Unwatch(pid) => {
                     b.watched.remove(&pid);
                 }
@@ -382,6 +406,10 @@ mod imp {
             let alive = drain(&rx, |c| match c {
                 Cmd::Watch(pid) => {
                     watched.insert(pid, crate::process::native::start_time(pid).unwrap_or(0));
+                }
+                Cmd::WatchSync(pid, reply) => {
+                    watched.insert(pid, crate::process::native::start_time(pid).unwrap_or(0));
+                    let _ = reply.send(true);
                 }
                 Cmd::Unwatch(pid) => {
                     watched.remove(&pid);

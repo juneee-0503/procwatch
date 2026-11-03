@@ -21,6 +21,7 @@ mod gpu;
 mod health;
 mod inspect;
 mod intel;
+mod launch;
 mod ioc;
 mod logs;
 mod memory;
@@ -79,6 +80,9 @@ Usage:
   procwatch --diff FILE [--json]    compare now with a baseline; exit status 1 if anything changed
   procwatch --case DIR              resume an existing investigation case
   procwatch --sigma DIR             use Sigma rules from DIR (default: sigma/ next to the settings file)
+  procwatch --run -- PROGRAM [ARGS…]
+                                    ANALYSIS VMs ONLY: start PROGRAM held at its first instruction, attach
+                                    deep trace, then run it; output and evidence go to a new case
   procwatch --replay [PATH] [--from WHEN] [--to WHEN]
                                     open a recorded session (event history folder, a case folder or an
                                     events.jsonl file; default: this machine's history) without touching
@@ -145,6 +149,12 @@ fn main() -> anyhow::Result<()> {
         }
         Some("--case" | "--sigma") if args.len() >= 2 => {}
         Some("--replay") => {}
+        Some("--run") => {
+            if args.len() < 2 {
+                eprintln!("--run needs a program: procwatch --run -- PROGRAM [ARGS…]\n\n{USAGE}");
+                std::process::exit(2);
+            }
+        }
         Some("--offline") => {
             let Some(dir) = args.get(1) else {
                 eprintln!("--offline needs a case folder\n\n{USAGE}");
@@ -427,6 +437,12 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::Resu
             app.set_status(app::StatusLevel::Error, format!("{} Sigma rule(s) rejected — run procwatch --check-rules {dir}", app.ir.det.sigma_errors.len()));
         }
     }
+    if let Some(i) = args.iter().position(|a| a == "--run") {
+        let rest: Vec<String> = args[i + 1..].iter().skip_while(|a| *a == "--").cloned().collect();
+        if !rest.is_empty() {
+            app.mode = Mode::LaunchConfirm(rest);
+        }
+    }
     if let Some(dir) = args.iter().position(|a| a == "--case").and_then(|i| args.get(i + 1)) {
         match case::Case::open(std::path::Path::new(dir)) {
             Ok(c) => {
@@ -601,6 +617,17 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         }
         Mode::Health => app.mode = Mode::Normal,
         Mode::Workspace => workspace_key(app, key),
+        Mode::LaunchConfirm(argv) => match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                app.mode = Mode::Normal;
+                app.launch_and_trace(argv);
+            }
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('q') => {
+                app.mode = Mode::Normal;
+                app.set_status(StatusLevel::Info, "Nothing was run.".into());
+            }
+            _ => {}
+        },
         Mode::StateAt => match key.code {
             KeyCode::Down | KeyCode::Char('j') => app.ir.state_scroll += 1,
             KeyCode::Up | KeyCode::Char('k') => app.ir.state_scroll = app.ir.state_scroll.saturating_sub(1),

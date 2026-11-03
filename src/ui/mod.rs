@@ -82,6 +82,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Mode::Health => pivot::health(frame, app, size),
         Mode::StateAt => pivot::state_at(frame, app, size),
         Mode::Workspace => workspace::draw(frame, app, size),
+        Mode::LaunchConfirm(_) => overlays::launch_confirm(frame, app, size),
         _ => {}
     }
 }
@@ -190,6 +191,7 @@ fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
         Mode::Graph => vec![h("↑↓", "select"), h("enter →", "pivot"), h("←", "back"), h("t", "timeline of this"), h("g", "go to page"), h("esc", "close")],
         Mode::Clusters => vec![h("↑↓", "select"), h("enter", "show cluster in timeline"), h("esc", "close")],
         Mode::Health => vec![h("any key", "close")],
+        Mode::LaunchConfirm(_) => vec![h("y", "run it under trace"), h("esc", "cancel")],
         Mode::StateAt => vec![h("↑↓ PgUp PgDn", "scroll"), h("esc", "close")],
         Mode::Workspace if app.ir.ws.tab == 1 => vec![h("←→", "step"), h("PgUp PgDn", "×10"), h("tab 1-6", "views"), h("D", "deep trace"), h("e", "quick report"), h("esc", "close")],
         Mode::Workspace => vec![h("tab 1-6", "views"), h("↑↓", "scroll"), h("D", "deep trace"), h("e", "quick report"), h("r", "refresh"), h("esc", "close")],

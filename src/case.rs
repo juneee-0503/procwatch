@@ -455,6 +455,14 @@ impl Case {
         Ok(dest)
     }
 
+    /// Register a file that was written into the case by other means
+    /// (e.g. the output log of a launched program).
+    pub fn register_existing(&self, path: &Path, prov: Provenance) -> anyhow::Result<EvidenceItem> {
+        let item = self.enter(Some(path), &prov, Status::Complete)?;
+        self.log("collected", &format!("{} {} [{}] sha256={}", item.id, item.path, prov.class.label(), item.sha256))?;
+        Ok(item)
+    }
+
     /// Register a quarantined file (called by `contain`).
     pub fn register_quarantine(&self, stored: &Path, original: &str) -> anyhow::Result<EvidenceItem> {
         let prov = Provenance {

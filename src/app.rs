@@ -368,6 +368,8 @@ pub enum Mode {
     StateAt,
     /// Process Investigation Workspace.
     Workspace,
+    /// Confirm running a program for analysis (`--run`).
+    LaunchConfirm(Vec<String>),
     /// IOC sweep results overlay.
     Sweep,
     Help,
@@ -753,6 +755,14 @@ impl App {
         }
     }
 
+    /// procwatch itself and the helpers it runs (codesign, lsof, vmmap…)
+    /// are not activity on the system under investigation — except
+    /// programs started for analysis with `--run`.
+    pub fn is_own_helper(&self, i: &ProcessInfo) -> bool {
+        let me = std::process::id();
+        i.pid == me || (i.ppid == Some(me) && !self.ir.launched.contains(&i.pid))
+    }
+
     pub fn name_of(&self, pid: u32) -> String {
         if let Some(n) = self.tree.get(pid) {
             return n.info.name.clone();
@@ -966,12 +976,11 @@ impl App {
         };
         // procwatch's own helpers (codesign, lsof, vmmap…) are not activity
         // on the system under investigation.
-        let me = Some(std::process::id());
         let mut started: Vec<&ProcessInfo> = self
             .tree
             .nodes
             .values()
-            .filter(|n| n.info.ppid != me)
+            .filter(|n| !self.is_own_helper(&n.info))
             .filter(|n| old.get(n.info.pid).is_none_or(|o| o.info.start_time_secs != n.info.start_time_secs))
             .map(|n| &n.info)
             .collect();
@@ -979,7 +988,7 @@ impl App {
         let mut exited: Vec<&ProcessInfo> = old
             .nodes
             .values()
-            .filter(|n| n.info.ppid != me)
+            .filter(|n| !self.is_own_helper(&n.info))
             .filter(|n| self.tree.get(n.info.pid).is_none_or(|c| c.info.start_time_secs != n.info.start_time_secs))
             .map(|n| &n.info)
             .collect();
