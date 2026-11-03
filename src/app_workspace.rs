@@ -303,7 +303,7 @@ impl App {
         for ep in by.values_mut() {
             let ip = crate::filter::split_endpoint(&ep.remote).0;
             ep.public = !ep.remote.starts_with("listening") && !crate::triage::is_private(&ip);
-            ep.host = self.ir.resolver.known().into_iter().find(|(a, _)| *a == ip).map(|(_, h)| h);
+            ep.host = self.host_for(&ip, family.iter().next().copied());
             ep.beacon = self.ir.remotes.iter().find(|r| r.ip == ip).and_then(|r| r.beacon);
             if let Some(v) = durations.get(&ep.remote) {
                 ep.avg_open_secs = Some(v.iter().sum::<f64>() / v.len() as f64);

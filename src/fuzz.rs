@@ -227,10 +227,8 @@ fn fuzz_evtx() {
     seed[4096..4104].copy_from_slice(b"ElfChnk\0");
     run("evtx", &[seed], iterations(5_000), |d| {
         if let Ok(mut p) = evtx::EvtxParser::from_buffer(d.to_vec()) {
-            for r in p.records_json_value().take(50) {
-                if let Ok(rec) = r {
-                    let _ = crate::artifacts::evtx::from_json(&rec.data, None, 0);
-                }
+            for rec in p.records_json_value().take(50).flatten() {
+                let _ = crate::artifacts::evtx::from_json(&rec.data, None, 0);
             }
         }
     });

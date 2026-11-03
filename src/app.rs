@@ -675,6 +675,13 @@ impl App {
             file_offset: 0,
             ir: {
                 let mut ir = ir::Ir::new(tx.clone(), &cfg.watch);
+                #[cfg(target_os = "linux")]
+                if crate::fsattr::unavailable_reason().is_none() && !cfg!(test) {
+                    ir.deep.attribution = match crate::fsattr::start_fanotify(&ir.watch_paths, tx.clone()) {
+                        Ok(()) => "fanotify on watched folders' mounts".into(),
+                        Err(e) => format!("fanotify unavailable: {e}"),
+                    };
+                }
                 if cfg.history && !cfg!(test) {
                     ir.profiles = Some(crate::profile::Profiles::load());
                     ir.store = crate::store::default_dir().map(crate::store::Writer::open);

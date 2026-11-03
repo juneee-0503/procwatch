@@ -617,6 +617,21 @@ impl App {
                 None => format!("idle — starts automatically for priority ≥ {} or with D on a process", super::deep::AUTO_PRIORITY),
             },
         ));
+        v.push(if self.ir.dns_obs.is_empty() {
+            Source::new(
+                "DNS queries",
+                Status::NotUsed,
+                "no per-process DNS records: host names come from reverse lookups (Windows: install Sysmon and read logs, or import EVTX with event 22)",
+            )
+        } else {
+            Source::new("DNS queries", Status::Available, format!("{} queries with the querying process (Sysmon 22), matched to connections by answer address", self.ir.dns_obs.len()))
+        });
+        v.push(match (crate::fsattr::unavailable_reason(), self.ir.deep.attribution.as_str()) {
+            (Some(why), _) => Source::new("File attribution", Status::Partial, format!("file changes carry no process: {why}; deep trace infers it from open-file snapshots")),
+            (None, "") => Source::new("File attribution", Status::NotLoaded, "ready — starts with deep trace (macOS fs_usage) / at launch (Linux fanotify)"),
+            (None, how) if how.contains("unavailable") => Source::new("File attribution", Status::Denied, how.to_string()),
+            (None, how) => Source::new("File attribution", Status::Available, how.to_string()),
+        });
         v.push(match (&self.ir.store, &self.ir.replay) {
             (_, Some(r)) => Source::new("Event history", Status::Available, format!("replaying a recording: {r}")),
             (Some(st), None) => Source::new(

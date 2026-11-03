@@ -147,10 +147,8 @@ impl Writer {
         let cutoff = (Local::now() - chrono::Duration::days(MAX_DAYS)).format("%Y%m%d").to_string();
         let mut total: u64 = files.iter().map(|f| f.1).sum();
         for (path, size, day) in &files {
-            if (*day < cutoff || total > MAX_BYTES) && *day != self.day {
-                if fs::remove_file(path).is_ok() {
-                    total -= size;
-                }
+            if (*day < cutoff || total > MAX_BYTES) && *day != self.day && fs::remove_file(path).is_ok() {
+                total -= size;
             }
         }
     }

@@ -366,7 +366,74 @@ mod imp {
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
     use windows_sys::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION};
 
-    pub const METHOD: &str = "process snapshots every 100 ms";
+    pub const METHOD: &str = "ETW Kernel-Process events (administrator) or process snapshots every 100 ms";
+
+    /// Real-time ETW session on Microsoft-Windows-Kernel-Process: exact
+    /// start/stop events for every process. Needs administrator rights.
+    mod etw {
+        use ferrisetw::parser::Parser;
+        use ferrisetw::provider::Provider;
+        use ferrisetw::schema_locator::SchemaLocator;
+        use ferrisetw::trace::UserTrace;
+        use ferrisetw::EventRecord;
+        use std::sync::mpsc::Sender;
+        use std::sync::Mutex;
+
+        pub enum Ev {
+            Start { pid: u32, ppid: u32, image: String },
+            Stop { pid: u32 },
+        }
+
+        const KERNEL_PROCESS: &str = "22FB2CD6-0E7B-422B-A0C7-2FAD1FD0E716";
+        const KEYWORD_PROCESS: u64 = 0x10;
+
+        pub fn start(tx: Sender<Ev>) -> Option<UserTrace> {
+            let tx = Mutex::new(tx);
+            let provider = Provider::by_guid(KERNEL_PROCESS)
+                .any(KEYWORD_PROCESS)
+                .add_callback(move |r: &EventRecord, sl: &SchemaLocator| {
+                    let id = r.event_id();
+                    if id != 1 && id != 2 {
+                        return;
+                    }
+                    let Ok(schema) = sl.event_schema(r) else { return };
+                    let p = Parser::create(r, &schema);
+                    let pid: u32 = p.try_parse("ProcessID").unwrap_or(0);
+                    let ev = if id == 1 {
+                        Ev::Start { pid, ppid: p.try_parse("ParentProcessID").unwrap_or(0), image: p.try_parse("ImageName").unwrap_or_default() }
+                    } else {
+                        Ev::Stop { pid }
+                    };
+                    if let Ok(t) = tx.lock() {
+                        let _ = t.send(ev);
+                    }
+                })
+                .build();
+            // A stale session from a crashed run would block the name.
+            let _ = ferrisetw::trace::stop_trace_by_name("procwatch-deeptrace");
+            UserTrace::new().named("procwatch-deeptrace".into()).enable(provider).start_and_process().ok()
+        }
+    }
+
+    /// ETW image names are NT device paths; map the volume to a drive.
+    fn dos_path(nt: &str) -> String {
+        use windows_sys::Win32::Storage::FileSystem::QueryDosDeviceW;
+        if !nt.starts_with("\\Device\\") {
+            return nt.to_string();
+        }
+        for letter in b'A'..=b'Z' {
+            let drive: Vec<u16> = format!("{}:", letter as char).encode_utf16().chain(std::iter::once(0)).collect();
+            let mut buf = [0u16; 512];
+            let n = unsafe { QueryDosDeviceW(drive.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
+            if n > 0 {
+                let dev = String::from_utf16_lossy(&buf[..buf.iter().position(|c| *c == 0).unwrap_or(0)]);
+                if !dev.is_empty() && nt.starts_with(&dev) {
+                    return format!("{}:{}", letter as char, &nt[dev.len()..]);
+                }
+            }
+        }
+        nt.to_string()
+    }
 
     fn path(pid: u32) -> Option<String> {
         let h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
@@ -402,6 +469,52 @@ mod imp {
         let mut watched: HashMap<u32, u64> = HashMap::new();
         let mut parent: HashMap<u32, u32> = HashMap::new();
         let mut batch = Vec::new();
+        let (etx, erx) = std::sync::mpsc::channel();
+        if let Some(_trace) = etw::start(etx) {
+            // Event-driven: exact starts/stops; _trace stops on drop.
+            loop {
+                let alive = drain(&rx, |c| match c {
+                    Cmd::Watch(pid) => {
+                        watched.insert(pid, 0);
+                    }
+                    Cmd::WatchSync(pid, reply) => {
+                        watched.insert(pid, 0);
+                        let _ = reply.send(true);
+                    }
+                    Cmd::Unwatch(pid) => {
+                        watched.remove(&pid);
+                    }
+                });
+                if !alive {
+                    return;
+                }
+                while let Ok(ev) = erx.recv_timeout(Duration::from_millis(20)) {
+                    match ev {
+                        etw::Ev::Start { pid, ppid, image } if watched.contains_key(&ppid) => {
+                            watched.insert(pid, 0);
+                            parent.insert(pid, ppid);
+                            batch.push(DtEvent {
+                                at: Local::now(),
+                                kind: DtKind::Spawn,
+                                pid,
+                                ppid: Some(ppid),
+                                start: crate::process::native::start_time(pid).unwrap_or(0),
+                                path: Some(dos_path(&image)),
+                                args: None,
+                                via: "ETW",
+                            });
+                        }
+                        etw::Ev::Stop { pid } if watched.remove(&pid).is_some() => {
+                            batch.push(DtEvent { at: Local::now(), kind: DtKind::Exit, pid, ppid: parent.remove(&pid), start: 0, path: None, args: None, via: "ETW" });
+                        }
+                        _ => {}
+                    }
+                }
+                if !send(out, &mut batch) {
+                    return;
+                }
+            }
+        }
         loop {
             let alive = drain(&rx, |c| match c {
                 Cmd::Watch(pid) => {

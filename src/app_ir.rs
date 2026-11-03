@@ -276,6 +276,8 @@ pub struct Ir {
     /// Processes started by `--run` (watched although they're our children).
     pub launched: HashSet<u32>,
     pub launch_logs: Vec<(u32, PathBuf)>,
+    /// DNS queries with the process that made them (Sysmon 22).
+    pub dns_obs: VecDeque<dns::DnsObs>,
 }
 
 /// An autostart entry that appeared, changed or disappeared between scans.
@@ -390,6 +392,7 @@ impl Ir {
             state_scroll: 0,
             launched: HashSet::new(),
             launch_logs: Vec::new(),
+            dns_obs: VecDeque::new(),
         }
     }
 }
@@ -648,7 +651,7 @@ impl App {
             .into_iter()
             .map(|(ip, a)| {
                 let beacon = beacon_by_ip.get(&ip).copied();
-                let host = self.ir.resolver.name(&ip);
+                let host = self.host_for(&ip, None);
                 let public = !matches!(ip.parse::<std::net::IpAddr>(), Ok(addr) if match addr {
                     std::net::IpAddr::V4(v) => v.is_private() || v.is_loopback() || v.is_link_local(),
                     std::net::IpAddr::V6(v) => v.is_loopback() || (v.segments()[0] & 0xffc0) == 0xfe80 || (v.segments()[0] & 0xfe00) == 0xfc00,
@@ -905,6 +908,13 @@ impl App {
                 self.ir.logs = Some(Loaded { pending: false, fetched: Instant::now(), result });
                 self.ir.log_selected = 0;
                 self.sigma_on_logs();
+                let found: Vec<dns::DnsObs> = self
+                    .log_entries()
+                    .iter()
+                    .filter(|e| e.event_id == Some(22) && e.source.to_lowercase().contains("sysmon"))
+                    .filter_map(|e| dns::from_sysmon_message(e.time, &e.message))
+                    .collect();
+                self.add_dns_obs(found);
                 self.ir.timeline_dirty = true;
             }
             WorkerMsg::Artifacts { from, scan } => {
@@ -912,6 +922,13 @@ impl App {
                 let events: Vec<(crate::sigma::Event, DateTime<Local>, String)> =
                     scan.records.iter().map(|r| (r.sigma_event(), r.time, format!("{} {} on {}", r.channel, r.event_id, r.computer))).collect();
                 let hits = self.sigma_on_events(&events);
+                let found: Vec<dns::DnsObs> = scan
+                    .records
+                    .iter()
+                    .filter(|r| r.event_id == 22 && crate::sigma::map::service_of(&r.channel) == "sysmon")
+                    .filter_map(|r| dns::from_sysmon_fields(r.time, &r.data))
+                    .collect();
+                self.add_dns_obs(found);
                 let msg = format!(
                     "{} artifacts{}{}",
                     scan.items.len(),
@@ -1055,6 +1072,32 @@ impl App {
         }
         self.set_status(StatusLevel::Info, format!("Reading artifacts in {}…", p.display()));
         sampler::spawn_artifacts(self.tx.clone(), Some(p));
+    }
+
+    fn add_dns_obs(&mut self, mut found: Vec<dns::DnsObs>) {
+        if found.is_empty() {
+            return;
+        }
+        found.sort_by_key(|o| o.time);
+        for o in found {
+            let dup = self.ir.dns_obs.iter().rev().take(64).any(|x| x.time == o.time && x.name == o.name && x.pid == o.pid);
+            if !dup {
+                if self.ir.dns_obs.len() >= 20_000 {
+                    self.ir.dns_obs.pop_front();
+                }
+                self.ir.dns_obs.push_back(o);
+            }
+        }
+        self.ir.dns_obs.make_contiguous().sort_by_key(|o| o.time);
+    }
+
+    /// Host name for a remote address: the DNS query that produced it if
+    /// recorded, else the reverse lookup (labelled as such).
+    pub fn host_for(&self, ip: &str, pid: Option<u32>) -> Option<String> {
+        if let Some((name, same)) = dns::name_for(&self.ir.dns_obs, ip, pid, Local::now()) {
+            return Some(if same { format!("{name} (queried by this process)") } else { format!("{name} (queried)") });
+        }
+        self.ir.resolver.cached(ip).map(|h| format!("{h} (reverse lookup)"))
     }
 
     pub fn visible_remotes(&self) -> Vec<usize> {
@@ -1363,8 +1406,9 @@ impl App {
             );
         }
         for e in &self.ir.fs_events {
-            // Attribute to a deep-traced process that had the file open.
-            let owner = self.file_owner_near(&e.path, e.time);
+            // The source's own process (fanotify / fs_usage), else a
+            // deep-traced process that had the file open.
+            let owner = e.pid.map(|p| self.proc_key(p)).or_else(|| self.file_owner_near(&e.path, e.time));
             let mut item = TimelineItem::new(e.time, Basis::Observed, "file", e.kind, owner.map(|k| k.pid), owner.map(|k| self.name_of(k.pid)).unwrap_or_default(), e.path.clone())
                 .about(Entity::File(e.path.clone()));
             if let Some(k) = owner {

@@ -91,6 +91,34 @@ pub struct DeepState {
     /// Enroll suspicious processes without being asked.
     pub auto: bool,
     pub dropped: usize,
+    /// macOS: fs_usage restricted to traced pids (root only).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fs_usage: Helper,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fs_usage_pids: Vec<u32>,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fs_usage_at: Option<Instant>,
+    /// How file operations are attributed to processes right now.
+    pub attribution: String,
+}
+
+/// A helper process stopped when procwatch exits.
+#[derive(Default)]
+pub struct Helper(pub Option<std::process::Child>);
+
+impl Helper {
+    pub fn stop(&mut self) {
+        if let Some(mut c) = self.0.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+}
+
+impl Drop for Helper {
+    fn drop(&mut self) {
+        self.stop();
+    }
 }
 
 impl App {
@@ -277,8 +305,31 @@ impl App {
         self.ir.timeline_dirty = true;
     }
 
+    /// macOS + root: keep fs_usage following the live traced processes.
+    fn deep_fs_usage(&mut self) {
+        #[cfg(target_os = "macos")]
+        {
+            if crate::fsattr::unavailable_reason().is_some() || self.replaying() {
+                return;
+            }
+            let mut pids: Vec<u32> = self.ir.deep.enrolled.iter().filter(|(_, e)| e.ended.is_none()).map(|(k, _)| k.pid).collect();
+            pids.sort_unstable();
+            pids.truncate(64);
+            let recent = self.ir.deep.fs_usage_at.is_some_and(|t| t.elapsed() < Duration::from_secs(5));
+            if pids == self.ir.deep.fs_usage_pids || recent {
+                return;
+            }
+            self.ir.deep.fs_usage.stop();
+            self.ir.deep.fs_usage = Helper(crate::fsattr::start_fs_usage(&pids, self.tx.clone()));
+            self.ir.deep.attribution = if self.ir.deep.fs_usage.0.is_some() { format!("fs_usage on {} traced processes", pids.len()) } else { String::new() };
+            self.ir.deep.fs_usage_pids = pids;
+            self.ir.deep.fs_usage_at = Some(Instant::now());
+        }
+    }
+
     /// Ask for module / open-file snapshots of live enrolled processes.
     pub(super) fn deep_tick(&mut self) {
+        self.deep_fs_usage();
         let now = Instant::now();
         let mut due: Vec<(ProcKey, bool, bool)> = Vec::new();
         for (k, e) in &self.ir.deep.enrolled {

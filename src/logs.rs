@@ -206,7 +206,10 @@ foreach ($log in $logs) {{
     $f = @{{LogName=$log; StartTime=(Get-Date).AddMinutes(-{minutes})}}
     if ($log -in @('System','Application')) {{ {filter} }}
     Get-WinEvent -FilterHashtable $f -MaxEvents 2000 -ErrorAction Stop | ForEach-Object {{
-      $m = (($_.Message -split "`r?`n") | Where-Object {{ $_.Trim() }} | Select-Object -First 3) -join ' '
+      $lines = ($_.Message -split "`r?`n") | Where-Object {{ $_.Trim() }}
+      # Sysmon fields are needed whole (DNS queries, hashes); others: first lines.
+      if ($log -like '*Sysmon*') {{ $m = ($lines -join ' | ') }} else {{ $m = ($lines | Select-Object -First 3) -join ' ' }}
+      if ($m.Length -gt 2000) {{ $m = $m.Substring(0, 2000) }}
       Write-Output ("{{0}}`t{{1}}`t{{2}}`t{{3}}`t{{4}}`t{{5}}`t{{6}}" -f $_.TimeCreated.ToString('o'), $log, $_.LevelDisplayName, $_.ProviderName, $_.ProcessId, $_.Id, $m)
     }}
   }} catch {{

@@ -49,6 +49,12 @@ impl Resolver {
         None
     }
 
+    /// Cached name without queueing a lookup.
+    pub fn cached(&self, ip: &str) -> Option<String> {
+        let ip: IpAddr = ip.trim_matches(['[', ']']).parse().ok()?;
+        self.cache.lock().ok()?.get(&ip).cloned().flatten()
+    }
+
     /// Every resolved (ip, name) pair so far.
     pub fn known(&self) -> Vec<(String, String)> {
         let mut v: Vec<(String, String)> = self
@@ -115,5 +121,92 @@ pub fn client_cache() -> Result<Vec<(String, String)>, String> {
     #[cfg(not(target_os = "windows"))]
     {
         Err("this OS doesn't expose its DNS cache; names below come from reverse lookups of connected addresses".into())
+    }
+}
+
+/// A DNS query a process made and the addresses it got back (Sysmon
+/// event 22, live or from an EVTX file).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DnsObs {
+    #[serde(serialize_with = "ser_local")]
+    pub time: chrono::DateTime<chrono::Local>,
+    pub pid: Option<u32>,
+    pub image: String,
+    pub name: String,
+    pub ips: Vec<String>,
+}
+
+fn ser_local<S: serde::Serializer>(t: &chrono::DateTime<chrono::Local>, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&t.to_rfc3339())
+}
+
+/// Addresses from Sysmon's QueryResults ("type: 5 cdn.x;::ffff:1.2.3.4;…").
+pub fn sysmon_results(r: &str) -> Vec<String> {
+    r.split(';')
+        .map(str::trim)
+        .filter(|t| !t.is_empty() && !t.starts_with("type:"))
+        .map(|t| t.trim_start_matches("::ffff:").to_string())
+        .filter(|t| t.parse::<std::net::IpAddr>().is_ok())
+        .collect()
+}
+
+/// From structured Sysmon 22 fields (EVTX).
+pub fn from_sysmon_fields(time: chrono::DateTime<chrono::Local>, d: &std::collections::BTreeMap<String, String>) -> Option<DnsObs> {
+    let name = d.get("QueryName")?.trim().trim_end_matches('.').to_lowercase();
+    Some(DnsObs {
+        time,
+        pid: d.get("ProcessId").and_then(|p| p.parse().ok()),
+        image: d.get("Image").cloned().unwrap_or_default(),
+        ips: d.get("QueryResults").map(|r| sysmon_results(r)).unwrap_or_default(),
+        name,
+    })
+}
+
+/// From a live Sysmon message flattened to "Key: value | Key: value".
+pub fn from_sysmon_message(time: chrono::DateTime<chrono::Local>, msg: &str) -> Option<DnsObs> {
+    let field = |k: &str| msg.split(" | ").find_map(|p| p.trim().strip_prefix(&format!("{k}:")).map(|v| v.trim().to_string()));
+    let mut d = std::collections::BTreeMap::new();
+    for k in ["QueryName", "QueryResults", "ProcessId", "Image"] {
+        if let Some(v) = field(k) {
+            d.insert(k.to_string(), v);
+        }
+    }
+    from_sysmon_fields(time, &d)
+}
+
+/// The name a connection's address was resolved from: the most recent
+/// query (within an hour before `at`) whose answers include `ip`,
+/// preferring the same process. Returns (name, same process?).
+pub fn name_for(obs: &std::collections::VecDeque<DnsObs>, ip: &str, pid: Option<u32>, at: chrono::DateTime<chrono::Local>) -> Option<(String, bool)> {
+    let window = chrono::Duration::hours(1);
+    let candidates = obs.iter().rev().filter(|o| o.time <= at + chrono::Duration::seconds(5) && at - o.time <= window && o.ips.iter().any(|x| x == ip));
+    let mut any = None;
+    for o in candidates {
+        if pid.is_some() && o.pid == pid {
+            return Some((o.name.clone(), true));
+        }
+        any.get_or_insert((o.name.clone(), false));
+    }
+    any
+}
+
+#[cfg(test)]
+mod dns_obs_tests {
+    use super::*;
+
+    #[test]
+    fn sysmon_parsing_and_correlation() {
+        let now = chrono::Local::now();
+        let msg = "Dns query: | RuleName: - | ProcessId: 4242 | QueryName: evil.example | QueryStatus: 0 | QueryResults: type: 5 cdn.evil.example;::ffff:203.0.113.9;::ffff:203.0.113.10; | Image: C:\\Users\\a\\x.exe";
+        let o = from_sysmon_message(now - chrono::Duration::seconds(30), msg).unwrap();
+        assert_eq!(o.name, "evil.example");
+        assert_eq!(o.ips, vec!["203.0.113.9", "203.0.113.10"]);
+        assert_eq!(o.pid, Some(4242));
+        let mut q = std::collections::VecDeque::new();
+        q.push_back(DnsObs { time: now - chrono::Duration::seconds(60), pid: Some(1), image: String::new(), name: "shared.example".into(), ips: vec!["203.0.113.9".into()] });
+        q.push_back(o);
+        assert_eq!(name_for(&q, "203.0.113.9", Some(4242), now), Some(("evil.example".into(), true)));
+        assert_eq!(name_for(&q, "203.0.113.9", Some(77), now).map(|x| x.1), Some(false));
+        assert!(name_for(&q, "203.0.113.9", Some(4242), now - chrono::Duration::hours(2)).is_none(), "query after the connection doesn't count");
     }
 }

@@ -97,7 +97,7 @@ impl App {
                 }
                 Rec::File { kind, path } => {
                     counts[2] += 1;
-                    self.ir.fs_events.push_back(crate::fswatch::FsEvent { time: t, kind: static_str(&kind, &["created", "modified", "deleted", "renamed", "changed"], "changed"), path });
+                    self.ir.fs_events.push_back(crate::fswatch::FsEvent { time: t, kind: static_str(&kind, &["created", "modified", "deleted", "renamed", "changed"], "changed"), path, pid: None });
                 }
                 Rec::Deep { kind, pid, ppid, start, path, args, .. } => {
                     let kind = match kind.as_str() {

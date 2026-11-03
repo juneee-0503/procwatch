@@ -14,6 +14,7 @@ mod dns;
 mod export;
 mod filter;
 mod fileinfo;
+mod fsattr;
 mod fswatch;
 #[cfg(test)]
 mod fuzz;

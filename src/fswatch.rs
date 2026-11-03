@@ -17,6 +17,10 @@ pub struct FsEvent {
     pub time: DateTime<Local>,
     pub kind: &'static str,
     pub path: String,
+    /// The process that did it, when the source knows (fanotify,
+    /// fs_usage); plain change notifications don't carry one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
 }
 
 fn ser_time<S: serde::Serializer>(t: &DateTime<Local>, s: S) -> Result<S::Ok, S::Error> {
@@ -70,7 +74,7 @@ pub fn start(paths: &[String], tx: Sender<WorkerMsg>) -> (Option<notify::Recomme
             _ => return,
         };
         for p in ev.paths {
-            let _ = tx.send(WorkerMsg::Fs(FsEvent { time: Local::now(), kind, path: p.display().to_string() }));
+            let _ = tx.send(WorkerMsg::Fs(FsEvent { time: Local::now(), kind, path: p.display().to_string(), pid: None }));
         }
     };
     let mut watcher = match notify::recommended_watcher(handler) {
