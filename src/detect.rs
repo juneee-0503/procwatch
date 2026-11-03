@@ -271,6 +271,10 @@ pub struct State {
     pub suppressions: Vec<Suppression>,
     pub sigma: Vec<crate::sigma::Rule>,
     pub sigma_errors: Vec<String>,
+    /// Behaviour-sequence rules and the matches already recorded.
+    pub behavior: Vec<crate::behave::Rule>,
+    pub behavior_errors: Vec<String>,
+    pub behavior_seen: std::collections::HashSet<(String, String)>,
     pub sigma_dir: Option<PathBuf>,
     /// Process instances already run through Sigma, and whether their
     /// executable hash was known at the time (re-run once it is).
@@ -291,6 +295,7 @@ impl State {
         let mut s = State { suppressions: load(), focus: true, ..Default::default() };
         s.sigma_dir = sigma_dir.or_else(crate::sigma::default_dir);
         s.reload_sigma();
+        (s.behavior, s.behavior_errors) = crate::behave::load();
         s
     }
 

@@ -1,0 +1,107 @@
+# procwatch built-in behaviour-sequence rules (written for procwatch).
+# Add your own as behavior/*.yml next to the settings file.
+id: pw-seq-001
+title: File written, then executed
+description: A file appeared or changed and the same path was started shortly after — the typical download/drop-then-run step.
+level: high
+confidence: medium
+technique: T1204.002
+within: 600s
+scope: any
+steps:
+  - event: file_write
+    capture: { file: path }
+  - event: process_start
+    where: { image: "{file}" }
+---
+id: pw-seq-002
+title: Download tool, then a program from a temp or download folder
+description: curl/wget/PowerShell/certutil ran and a program then started from a temporary or downloads folder in the same process tree.
+level: high
+confidence: medium
+technique: T1105
+within: 300s
+scope: tree
+steps:
+  - event: process_start
+    where:
+      name: [curl, wget, certutil.exe, bitsadmin.exe, powershell.exe, pwsh, pwsh.exe]
+  - event: process_start
+    where:
+      image|contains: [/tmp/, /private/tmp/, /downloads/, /var/tmp/, "\\appdata\\local\\temp\\", "\\downloads\\", /dev/shm/]
+---
+id: pw-seq-003
+title: Gatekeeper quarantine removed, then a program started
+description: xattr removed com.apple.quarantine and another program started in the same tree shortly after.
+level: medium
+confidence: medium
+technique: T1553.001
+within: 120s
+scope: tree
+steps:
+  - event: process_start
+    where: { cmd|contains: com.apple.quarantine }
+  - event: process_start
+---
+id: pw-seq-004
+title: New autostart entry whose program then connects out
+description: An autostart entry was added or changed, the program it launches started, and that program connected to the network.
+level: high
+confidence: medium
+technique: T1547
+within: 3600s
+scope: any
+steps:
+  - event: persistence_change
+    capture: { target: target }
+  - event: process_start
+    where: { image: "{target}" }
+    capture: { pid: pid }
+  - event: net_connect
+    where: { pid: "{pid}", public: "true" }
+---
+id: pw-seq-005
+title: Burst of discovery commands
+description: Five different system-discovery commands ran within a minute in one process tree, typical of hands-on-keyboard reconnaissance or a script surveying the host.
+level: medium
+confidence: low
+technique: T1082
+within: 60s
+scope: tree
+steps:
+  - event: process_start
+    where:
+      name: [whoami, id, uname, hostname, ifconfig, ipconfig, ipconfig.exe, netstat, ps, sw_vers, systeminfo, systeminfo.exe, arp, route, dscl, groups, ip, w, who, net.exe, nltest.exe, csrutil, system_profiler]
+    count: 5
+    distinct: name
+---
+id: pw-seq-006
+title: Shell started, then an internet connection from the same tree
+description: A shell or script interpreter started and a process in its tree connected to a public address shortly after.
+level: low
+confidence: low
+technique: T1059
+within: 120s
+scope: tree
+steps:
+  - event: process_start
+    where:
+      name: [sh, bash, zsh, dash, cmd.exe, powershell.exe, pwsh, osascript, python, python3, perl, ruby]
+  - event: net_connect
+    where: { public: "true" }
+---
+id: pw-seq-007
+title: Script written, then run by an interpreter
+description: A script file appeared or changed and an interpreter was started with it shortly after.
+level: medium
+confidence: medium
+technique: T1059
+within: 600s
+scope: any
+steps:
+  - event: file_write
+    where:
+      path|endswith: [.sh, .py, .pl, .rb, .ps1, .bat, .cmd, .vbs, .js, .command, .scpt, .applescript]
+    capture: { file: path }
+  - event: process_start
+    where: { cmd|contains: "{file}" }

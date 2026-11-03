@@ -47,6 +47,14 @@ pub fn default_paths() -> Vec<String> {
     v.into_iter().filter(|p| p.is_dir()).map(|p| p.display().to_string()).collect()
 }
 
+/// True for paths inside folders that define autostart entries.
+pub fn autostart_location(path: &str) -> bool {
+    let p = path.to_lowercase().replace('\\', "/");
+    ["/launchagents/", "/launchdaemons/", "/etc/systemd/system/", "/etc/cron.", "/var/spool/cron", "/.config/autostart/", "/start menu/programs/startup/", "/etc/init.d/", "/etc/rc.local"]
+        .iter()
+        .any(|k| p.contains(k))
+}
+
 /// Start watching; the returned watcher must be kept alive. Paths that
 /// can't be watched are reported back in the error list.
 pub fn start(paths: &[String], tx: Sender<WorkerMsg>) -> (Option<notify::RecommendedWatcher>, Vec<String>) {

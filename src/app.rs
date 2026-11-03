@@ -674,6 +674,7 @@ impl App {
             ir: {
                 let mut ir = ir::Ir::new(tx.clone(), &cfg.watch);
                 if cfg.history && !cfg!(test) {
+                    ir.profiles = Some(crate::profile::Profiles::load());
                     ir.store = crate::store::default_dir().map(crate::store::Writer::open);
                     if let Some(s) = ir.store.as_mut() {
                         s.write(chrono::Local::now(), crate::store::Rec::Session {
@@ -753,7 +754,20 @@ impl App {
     }
 
     pub fn name_of(&self, pid: u32) -> String {
-        self.tree.get(pid).map(|n| n.info.name.clone()).unwrap_or_else(|| format!("pid {pid}"))
+        if let Some(n) = self.tree.get(pid) {
+            return n.info.name.clone();
+        }
+        // Exited: the name it was recorded under.
+        self.events
+            .iter()
+            .find(|e| e.pid == pid)
+            .map(|e| e.name.clone())
+            .or_else(|| {
+                self.ir.deep.events.iter().rev().filter(|e| e.pid == pid).find_map(|e| {
+                    e.args.as_deref().and_then(|a| a.split_whitespace().next()).or(e.path.as_deref()).map(|p| p.rsplit(['/', '\\']).next().unwrap_or(p).to_string())
+                })
+            })
+            .unwrap_or_else(|| format!("pid {pid}"))
     }
 
     // ── worker messages ────────────────────────────────────────────────

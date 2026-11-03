@@ -40,6 +40,7 @@ pub enum Rec {
     Deep { kind: String, pid: u32, ppid: Option<u32>, start: u64, path: Option<String>, args: Option<String>, via: String },
     Change { pid: u32, start: u64, kind: String, path: String },
     Detection { rule: String, name: String, severity: String, confidence: String, technique: String, subject: String, pid: Option<u32>, evidence: String },
+    Persist { kind: String, category: String, name: String, location: String, target: Option<String>, writer: Option<String> },
     /// Full process table, periodically, so replay has a tree.
     Snapshot { processes: Vec<ProcRec> },
     /// Session marker.

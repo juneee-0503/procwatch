@@ -144,6 +144,19 @@ impl App {
                         active: false,
                     });
                 }
+                Rec::Persist { kind, category, name, location, target, writer } => {
+                    self.ir.persist_changes.push_back(super::ir::PersistChange {
+                        time: t,
+                        kind: static_str(&kind, &["added", "changed", "removed"], "changed"),
+                        category,
+                        name,
+                        command: target.clone().unwrap_or_default(),
+                        location,
+                        target,
+                        writer,
+                        writer_key: None,
+                    });
+                }
                 Rec::Snapshot { processes } => snapshot = Some(processes),
                 Rec::Session { .. } => {}
             }

@@ -68,6 +68,10 @@ pub static RULES: &[RuleDef] = &[
         "Runs as root/SYSTEM from a location an ordinary user can write to."),
     rule!("PW-016", "Regular reconnects (beaconing)", Medium, Medium, "T1071.001",
         "Connects to the same remote service again and again at a near-constant interval."),
+    rule!("PW-018", "Behaves differently from its own history", Low, Medium, "",
+        "This program has an established behaviour profile on this machine and just did something it never did before (new destination, child program, module or listening port)."),
+    rule!("PW-019", "Autostart entry added or changed", Medium, High, "T1547",
+        "An autostart entry appeared or its command/target changed while procwatch was watching. The writer is named when a deep-traced process had the file open."),
     rule!("PW-017", "Relaunched after termination", Medium, Medium, "T1543",
         "A program ended by procwatch started again. Autostart entries pointing at it are listed as candidates, not proven causes."),
 ];

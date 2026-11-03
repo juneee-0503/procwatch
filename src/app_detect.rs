@@ -90,7 +90,12 @@ impl App {
     }
 
     pub(super) fn record_detection_pub(&mut self, hit: &RuleHit, subject: Entity, label: String, pid: Option<u32>, engine: &'static str) {
-        self.record_detection(hit, subject, label, pid, engine, Local::now());
+        let mut hit = hit.clone();
+        if hit.suppressed.is_none() {
+            let hint = if let Entity::File(p) = &subject { p.clone() } else { String::new() };
+            hit.suppressed = self.suppression_for(pid, &hit.id, &hint);
+        }
+        self.record_detection(&hit, subject, label, pid, engine, Local::now());
     }
 
     fn label(&self, pid: u32) -> String {

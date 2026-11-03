@@ -1,6 +1,7 @@
 mod app;
 mod artifacts;
 mod baseline;
+mod behave;
 mod binfmt;
 mod case;
 mod columns;
@@ -33,6 +34,7 @@ mod yara;
 mod triage;
 mod persistence;
 mod process;
+mod profile;
 mod sampler;
 mod selftest;
 mod soak;

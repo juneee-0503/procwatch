@@ -205,6 +205,14 @@ pub struct Ir {
     pub watch_errors: Vec<String>,
     pub persistence: Option<Loaded<Scan>>,
     pub persist_selected: usize,
+    /// Live persistence monitoring: last scan's items, when to rescan,
+    /// writers seen for changed definition files, and the changes found.
+    persist_prev: Option<Vec<PersistItem>>,
+    persist_rescan_at: Option<Instant>,
+    persist_last_scan: Option<Instant>,
+    persist_writers: Vec<(String, DateTime<Local>, Option<ProcKey>)>,
+    persist_auto: bool,
+    pub persist_changes: VecDeque<PersistChange>,
     pub persist_offset: usize,
     pub persist_changes_view: bool,
     pub logs: Option<Loaded<Vec<logs::Entry>>>,
@@ -259,7 +267,31 @@ pub struct Ir {
     last_store_snapshot: Option<Instant>,
     /// Set when showing a recorded session instead of the live system.
     pub replay: Option<String>,
+    /// Per-executable behaviour baselines (None when history is off).
+    pub profiles: Option<crate::profile::Profiles>,
+    profile_runs: HashMap<ProcKey, String>,
+    last_profile: Option<Instant>,
+    last_profile_save: Option<Instant>,
     pub state_scroll: usize,
+}
+
+/// An autostart entry that appeared, changed or disappeared between scans.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PersistChange {
+    #[serde(serialize_with = "ser_local")]
+    pub time: DateTime<Local>,
+    pub kind: &'static str,
+    pub category: String,
+    pub name: String,
+    pub location: String,
+    pub target: Option<String>,
+    pub command: String,
+    pub writer: Option<String>,
+    pub writer_key: Option<ProcKey>,
+}
+
+fn ser_local<S: serde::Serializer>(t: &DateTime<Local>, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&t.to_rfc3339())
 }
 
 pub struct SweepState {
@@ -293,6 +325,12 @@ impl Ir {
             watch_errors,
             persistence: None,
             persist_selected: 0,
+            persist_prev: None,
+            persist_rescan_at: None,
+            persist_last_scan: None,
+            persist_writers: Vec::new(),
+            persist_auto: false,
+            persist_changes: VecDeque::new(),
             persist_offset: 0,
             persist_changes_view: false,
             logs: None,
@@ -342,6 +380,10 @@ impl Ir {
             store: None,
             last_store_snapshot: None,
             replay: None,
+            profiles: None,
+            profile_runs: HashMap::new(),
+            last_profile: None,
+            last_profile_save: None,
             state_scroll: 0,
         }
     }
@@ -449,6 +491,62 @@ impl Filterable for FsEvent {
     fn text(&self) -> String {
         format!("{} {}", self.kind, self.path)
     }
+}
+
+/// The timeline as behaviour-rule events, oldest first.
+fn behaviour_events(tl: &[TimelineItem]) -> Vec<crate::behave::Ev> {
+    let mut out: Vec<crate::behave::Ev> = Vec::with_capacity(tl.len());
+    for e in tl.iter().rev() {
+        let kind: &'static str = match (e.source, e.kind.as_str()) {
+            ("process", "started") | ("deep", "spawn") | ("deep", "exec") => "process_start",
+            ("process", "exited") | ("deep", "exit") => "process_exit",
+            ("file", "created" | "modified" | "renamed" | "changed") => "file_write",
+            ("deep", "file open") => "file_open",
+            ("deep", "module load") => "module_load",
+            ("network", "connect") => "net_connect",
+            ("network", "listen") => "net_listen",
+            ("persist", "added" | "changed" | "written") => "persistence_change",
+            ("detect", _) => "detection",
+            _ => continue,
+        };
+        let mut f: std::collections::BTreeMap<&'static str, String> = std::collections::BTreeMap::new();
+        if let Some(p) = e.pid {
+            f.insert("pid", p.to_string());
+        }
+        let name = e.name.rsplit(['/', '\\']).next().unwrap_or(&e.name).to_lowercase();
+        f.insert("name", name);
+        match kind {
+            "process_start" => {
+                if let Some(img) = e.links.iter().find_map(|(r, x)| if *r == Rel::Executes { if let Entity::File(p) = x { Some(p.clone()) } else { None } } else { None }) {
+                    f.insert("image", img);
+                }
+                f.insert("cmd", e.detail.clone());
+            }
+            "file_write" | "file_open" | "module_load" => {
+                let path = e.entities().find_map(|x| if let Entity::File(p) = x { Some(p.clone()) } else { None }).unwrap_or_else(|| e.detail.clone());
+                f.insert("path", path);
+            }
+            "net_connect" | "net_listen" => {
+                let ep = e.detail.split_whitespace().nth(3).unwrap_or("");
+                let (ip, port) = split_endpoint(ep);
+                f.insert("public", (!crate::triage::is_private(&ip)).to_string());
+                f.insert("remote_ip", ip);
+                f.insert("remote_port", port);
+            }
+            "persistence_change" => {
+                if let Some(t) = e.links.iter().find_map(|(r, x)| if *r == Rel::Launches { if let Entity::File(p) = x { Some(p.clone()) } else { None } } else { None }) {
+                    f.insert("target", t);
+                }
+            }
+            "detection" => {
+                f.insert("rule", e.kind.clone());
+            }
+            _ => {}
+        }
+        out.push(crate::behave::Ev { time: e.time, id: short_id(e.id), kind, pid: e.pid, lineage: e.lineage.clone(), fields: f });
+    }
+    out.sort_by_key(|e| e.time);
+    out
 }
 
 fn parse_severity(text: &str) -> (&'static str, String) {
@@ -569,6 +667,87 @@ impl App {
         self.ir.beacons = beacons;
     }
 
+    /// Learn per-executable behaviour and report what's new to a program
+    /// with an established profile.
+    fn update_profiles(&mut self) {
+        if self.ir.profiles.is_none() || self.replaying() {
+            return;
+        }
+        let elapsed = self.ir.last_profile.map(|t| t.elapsed().as_secs());
+        if elapsed.is_some_and(|e| e < 5) {
+            return;
+        }
+        self.ir.last_profile = Some(Instant::now());
+        let elapsed = elapsed.unwrap_or(0);
+        let intel = self.ir.intel.snapshot();
+        let me = std::process::id();
+        let now = Local::now();
+        let alive: HashSet<ProcKey> = self.tree.nodes.values().map(|n| ProcKey { pid: n.info.pid, start: n.info.start_time_secs }).collect();
+        self.ir.profile_runs.retain(|k, _| alive.contains(k));
+        let mut found: Vec<(u32, Vec<crate::profile::Novelty>)> = Vec::new();
+        let system = |p: &str| {
+            let l = p.to_lowercase();
+            l.starts_with("/usr/lib") || l.starts_with("/system/") || l.starts_with("/lib") || l.contains("\\windows\\")
+        };
+        for n in self.tree.nodes.values() {
+            let i = &n.info;
+            if i.pid == me || i.ppid == Some(me) {
+                continue;
+            }
+            let Some(exe) = i.exe_path.as_deref() else { continue };
+            let sha = intel.get(exe).and_then(|x| x.sha256.clone());
+            let key = match &sha {
+                Some(h) => format!("sha:{h}"),
+                None => format!("path:{exe}"),
+            };
+            let pk = ProcKey { pid: i.pid, start: i.start_time_secs };
+            let profiles = self.ir.profiles.as_mut().unwrap();
+            if self.ir.profile_runs.get(&pk) != Some(&key) {
+                profiles.new_run(&key, exe, sha.as_deref(), now);
+                self.ir.profile_runs.insert(pk, key.clone());
+            }
+            let conns = self.connections.get(&i.pid);
+            let listen_ports: HashSet<String> =
+                conns.into_iter().flatten().filter(|c| c.state == ConnState::Listen).map(|c| split_endpoint(&c.local).1).collect();
+            let mut obs = crate::profile::Observation::default();
+            for c in conns.into_iter().flatten() {
+                if c.state == ConnState::Listen {
+                    obs.listens.push(format!("{}/{}", c.protocol, split_endpoint(&c.local).1));
+                } else if c.remote != "*:*" && !listen_ports.contains(&split_endpoint(&c.local).1) {
+                    obs.destinations.push(c.remote.clone());
+                }
+            }
+            for ch in &n.children {
+                if let Some(cn) = self.tree.get(*ch) {
+                    obs.children.push(cn.info.exe_path.as_deref().and_then(|p| p.rsplit(['/', '\\']).next()).unwrap_or(&cn.info.name).to_string());
+                }
+            }
+            if let Some(m) = self.ir.deep.snaps.get(&pk).and_then(|s| s.modules.as_ref()) {
+                obs.modules.extend(m.iter().filter(|p| !system(p)).cloned());
+            }
+            let new = profiles.observe(&key, &obs, elapsed, now);
+            if !new.is_empty() {
+                found.push((i.pid, new));
+            }
+        }
+        for (pid, new) in found {
+            let key = self.ir.profile_runs.get(&self.proc_key(pid)).cloned().unwrap_or_default();
+            let (runs, since) = self.ir.profiles.as_ref().and_then(|p| p.by_key.get(&key)).map(|p| (p.runs, p.first_seen.get(..10).unwrap_or("").to_string())).unwrap_or_default();
+            let what: Vec<String> = new.iter().map(|n| n.describe()).collect();
+            let hit = crate::triage::RuleHit::from_def(
+                crate::triage::rule("PW-018").expect("rule"),
+                format!("first time in {runs} runs since {since}: {}", what.join("; ")),
+            );
+            self.record_detection_pub(&hit, Entity::Process(self.proc_key(pid)), format!("{} ({pid})", self.name_of(pid)), Some(pid), "baseline");
+        }
+        if self.ir.last_profile_save.is_none_or(|t| t.elapsed().as_secs() >= 60) {
+            self.ir.last_profile_save = Some(Instant::now());
+            if let Some(p) = self.ir.profiles.as_mut() {
+                let _ = p.save();
+            }
+        }
+    }
+
     /// Process table into the history every 10 minutes (for replay).
     fn store_snapshot(&mut self) {
         let due = self.ir.last_store_snapshot.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(600));
@@ -607,6 +786,7 @@ impl App {
         self.response_on_snapshot();
         self.deep_auto_enroll();
         self.deep_tick();
+        self.update_profiles();
         if self.mode == Mode::Workspace {
             self.refresh_workspace();
         }
@@ -688,6 +868,12 @@ impl App {
                     self.ir.fs_events.pop_front();
                 }
                 self.sigma_on_fs(&e);
+                if crate::fswatch::autostart_location(&e.path) && !self.replaying() {
+                    let owner = self.file_owner_near(&e.path, e.time);
+                    self.ir.persist_writers.push((e.path.clone(), e.time, owner));
+                    self.ir.persist_writers.truncate(200);
+                    self.ir.persist_rescan_at = Some(Instant::now() + std::time::Duration::from_secs(3));
+                }
                 if let Some(st) = self.ir.store.as_mut() {
                     st.write(e.time, crate::store::Rec::File { kind: e.kind.into(), path: e.path.clone() });
                 }
@@ -696,10 +882,18 @@ impl App {
             }
             WorkerMsg::Persistence(scan) => {
                 let flagged = scan.items.iter().filter(|i| i.suspicious()).count();
-                self.set_status(
-                    StatusLevel::Info,
-                    format!("Persistence scan: {} entries, {flagged} flagged for review", scan.items.len()),
-                );
+                let changes = self.persistence_diff(&scan.items);
+                if !self.ir.persist_auto || changes > 0 {
+                    self.set_status(
+                        if changes > 0 { StatusLevel::Error } else { StatusLevel::Info },
+                        format!(
+                            "Persistence scan: {} entries, {flagged} flagged for review{}",
+                            scan.items.len(),
+                            if changes > 0 { format!(" · {changes} added/changed/removed since the last scan — see Detect") } else { String::new() }
+                        ),
+                    );
+                }
+                self.ir.persist_auto = false;
                 self.ir.persistence = Some(Loaded { pending: false, fetched: Instant::now(), result: Ok(scan) });
             }
             WorkerMsg::Logs(result) => {
@@ -779,6 +973,18 @@ impl App {
                 return true;
             }
             return false;
+        }
+        // Live persistence monitoring: a first scan shortly after start,
+        // then after changes in autostart folders and every 15 minutes.
+        let scanning = self.ir.persistence.as_ref().is_some_and(|p| p.pending);
+        let due = match (self.ir.persist_rescan_at, self.ir.persist_last_scan) {
+            (Some(at), _) => Instant::now() >= at,
+            (None, None) => (Local::now() - self.ir.watch_start).num_seconds() >= 30,
+            (None, Some(last)) => last.elapsed() >= std::time::Duration::from_secs(900),
+        };
+        if due && !scanning && self.tab != Tab::Persistence {
+            self.ir.persist_auto = true;
+            self.scan_persistence();
         }
         match self.tab {
             Tab::Persistence if self.ir.persistence.is_none() => {
@@ -871,12 +1077,88 @@ impl App {
             self.set_status(StatusLevel::Info, "Not available while replaying a recording — this would act on the live system".into());
             return;
         }
+        self.ir.persist_rescan_at = None;
+        self.ir.persist_last_scan = Some(Instant::now());
         if self.ir.persistence.as_ref().is_some_and(|p| p.pending) {
             return;
         }
         let prev = self.ir.persistence.take().map(|p| p.result).unwrap_or(Err(String::new()));
         self.ir.persistence = Some(Loaded { pending: true, fetched: Instant::now(), result: prev });
         sampler::spawn_persistence(self.tx.clone(), self.ir.intel.snapshot());
+    }
+
+    /// Compare a fresh scan with the previous one; record what changed.
+    /// Returns the number of changes.
+    fn persistence_diff(&mut self, items: &[PersistItem]) -> usize {
+        let key = |i: &PersistItem| format!("{}|{}|{}", i.category, i.name, i.location);
+        let Some(prev) = self.ir.persist_prev.replace(items.to_vec()) else { return 0 };
+        let old: HashMap<String, &PersistItem> = prev.iter().map(|i| (key(i), i)).collect();
+        let new: HashMap<String, &PersistItem> = items.iter().map(|i| (key(i), i)).collect();
+        let now = Local::now();
+        let mut changes: Vec<(&'static str, PersistItem)> = Vec::new();
+        for (k, i) in &new {
+            match old.get(k) {
+                None => changes.push(("added", (*i).clone())),
+                Some(o) if o.command != i.command || o.target != i.target || o.sha256 != i.sha256 => changes.push(("changed", (*i).clone())),
+                _ => {}
+            }
+        }
+        for (k, i) in &old {
+            if !new.contains_key(k) {
+                changes.push(("removed", (*i).clone()));
+            }
+        }
+        let n = changes.len();
+        for (kind, it) in changes {
+            // The writer: a deep-traced process that had the definition
+            // file open around the change notification.
+            let w = self.ir.persist_writers.iter().rev().find(|(p, _, _)| *p == it.location).cloned();
+            let writer_key = w.as_ref().and_then(|x| x.2);
+            let time = w.as_ref().map(|x| x.1).unwrap_or(now);
+            let writer = writer_key.map(|k| format!("{} ({})", self.name_of(k.pid), k.pid));
+            let change = PersistChange {
+                time,
+                kind,
+                category: it.category.clone(),
+                name: it.name.clone(),
+                location: it.location.clone(),
+                target: it.target.clone(),
+                command: it.command.clone(),
+                writer: writer.clone(),
+                writer_key,
+            };
+            if let Some(st) = self.ir.store.as_mut() {
+                st.write(time, crate::store::Rec::Persist { kind: kind.into(), category: it.category.clone(), name: it.name.clone(), location: it.location.clone(), target: it.target.clone(), writer: writer.clone() });
+            }
+            if kind != "removed" {
+                let mut hit = crate::triage::RuleHit::from_def(
+                    crate::triage::rule("PW-019").expect("rule"),
+                    format!(
+                        "{kind}: {} {} → {} · {}{}",
+                        it.category,
+                        it.name,
+                        it.command,
+                        writer.as_deref().map(|w| format!("written by {w}")).unwrap_or_else(|| "writer unknown (not deep-traced)".into()),
+                        if it.flags.is_empty() { String::new() } else { format!(" · ⚑ {}", it.flags.join("; ")) }
+                    ),
+                );
+                if it.flags.is_empty() && it.signature.as_deref().is_some_and(|s| s.starts_with("valid")) {
+                    hit.severity = crate::model::Severity::Low;
+                }
+                let (subject, label, pid) = match writer_key {
+                    Some(k) => (Entity::Process(k), format!("{} ({})", self.name_of(k.pid), k.pid), Some(k.pid)),
+                    None => (Entity::Persistence(format!("{}|{}|{}", it.category, it.name, it.location)), format!("{}: {}", it.category, it.name), None),
+                };
+                self.record_detection_pub(&hit, subject, label, pid, "persistence");
+            }
+            if self.ir.persist_changes.len() >= 1000 {
+                self.ir.persist_changes.pop_front();
+            }
+            self.ir.persist_changes.push_back(change);
+        }
+        self.ir.persist_writers.clear();
+        self.ir.timeline_dirty = true;
+        n
     }
 
     pub fn persist_items(&self) -> &[PersistItem] {
@@ -1008,11 +1290,11 @@ impl App {
         }
         for d in &self.ir.deep.events {
             let image = final_image.get(&d.pid);
-            let name = image
-                .map(|(p, _)| p.as_str())
-                .or(d.path.as_deref())
-                .and_then(|p| p.rsplit(['/', '\\']).next())
-                .map(str::to_string)
+            // The invoked name (argv[0]) — hard links like macOS `id` →
+            // whoami share an image but are different commands.
+            let argv0 = image.and_then(|(_, a)| a.as_deref()).and_then(|a| a.split_whitespace().next()).map(|a| a.rsplit(['/', '\\']).next().unwrap_or(a).to_string());
+            let name = argv0
+                .or_else(|| image.map(|(p, _)| p.as_str()).or(d.path.as_deref()).and_then(|p| p.rsplit(['/', '\\']).next()).map(str::to_string))
                 .unwrap_or_else(|| self.name_of(d.pid));
             let detail = match d.kind {
                 crate::deeptrace::DtKind::Exit => format!("exited (noticed via {})", d.via),
@@ -1140,6 +1422,25 @@ impl App {
             }
             v.push(item);
         }
+        for c in &self.ir.persist_changes {
+            let mut item = TimelineItem::new(
+                c.time,
+                Basis::Observed,
+                "persist",
+                c.kind,
+                c.writer_key.map(|k| k.pid),
+                c.writer.clone().unwrap_or_else(|| c.name.clone()),
+                format!("{}: {} → {} ({})", c.category, c.name, c.command, c.location),
+            )
+            .about(Entity::Persistence(format!("{}|{}|{}", c.category, c.name, c.location)));
+            if let Some(t) = &c.target {
+                item = item.link(Rel::Launches, Entity::File(t.clone()));
+            }
+            if let Some(k) = c.writer_key {
+                item = item.link(Rel::Changed, Entity::Process(k));
+            }
+            v.push(item);
+        }
         for a in &self.ir.artifacts {
             if let Some(t) = a.time {
                 let mut item = TimelineItem::new(t, Basis::Event, "artifact", a.kind, None, a.user.clone().unwrap_or_default(), format!("{} — {}", a.subject, a.detail));
@@ -1221,9 +1522,36 @@ impl App {
                 v[*i].cluster = Some(c.id);
             }
         }
+        let behaviour = if self.ir.det.behavior.is_empty() { Vec::new() } else { crate::behave::evaluate(&self.ir.det.behavior, &behaviour_events(&v)) };
         self.ir.timeline = v;
         self.ir.clusters = clusters;
         self.ir.timeline_dirty = false;
+        let mut recorded = false;
+        for m in behaviour {
+            let first = m.events.first().cloned().unwrap_or_default();
+            if !self.ir.det.behavior_seen.insert((m.rule.clone(), first)) {
+                continue;
+            }
+            let hit = crate::triage::RuleHit {
+                id: m.rule.clone(),
+                name: m.title.clone(),
+                severity: m.level,
+                confidence: m.confidence,
+                technique: m.technique.clone(),
+                evidence: m.evidence.clone(),
+                suppressed: None,
+            };
+            let (subject, label) = match m.pid {
+                Some(p) => (Entity::Process(self.proc_key(p)), format!("{} ({p})", self.name_of(p))),
+                None => (Entity::Host(String::new()), "this host".into()),
+            };
+            self.record_detection_pub(&hit, subject, label, m.pid, "behavior");
+            recorded = true;
+        }
+        // New detections appear in the timeline on the next rebuild.
+        if recorded {
+            self.ir.timeline_dirty = true;
+        }
         if let Some(id) = anchor {
             if let Some(pos) = self.visible_timeline().iter().position(|i| self.ir.timeline[*i].id == id) {
                 let shift = pos as isize - self.ir.tl_selected as isize;
@@ -2076,5 +2404,34 @@ mod net_tests {
         app.connections.insert(1, vec![c.clone()]);
         app.ir_on_snapshot();
         assert!(app.ir.conn_first_seen.contains_key(&(1, c)), "{:?}", app.ir.conn_first_seen.keys().collect::<Vec<_>>());
+    }
+}
+
+#[cfg(test)]
+mod persist_tests {
+    use super::*;
+
+    fn item(name: &str, cmd: &str) -> PersistItem {
+        let mut i = PersistItem::test("Launch agent", name, cmd, &format!("/Users/a/Library/LaunchAgents/{name}.plist"));
+        i.target = Some(cmd.to_string());
+        i
+    }
+
+    #[test]
+    fn diff_reports_added_changed_removed_with_writer() {
+        let mut app = crate::app::tests_support::app();
+        assert_eq!(app.persistence_diff(&[item("a", "/bin/a"), item("b", "/bin/b")]), 0, "first scan is the baseline");
+        // A deep-traced process had b's plist open when it changed.
+        let writer = ProcKey { pid: 4242, start: 7 };
+        app.ir.persist_writers.push(("/Users/a/Library/LaunchAgents/b.plist".into(), Local::now(), Some(writer)));
+        let n = app.persistence_diff(&[item("b", "/tmp/evil"), item("c", "/bin/c")]);
+        assert_eq!(n, 3);
+        let kinds: Vec<&str> = app.ir.persist_changes.iter().map(|c| c.kind).collect();
+        assert!(kinds.contains(&"added") && kinds.contains(&"changed") && kinds.contains(&"removed"));
+        let changed = app.ir.persist_changes.iter().find(|c| c.kind == "changed").unwrap();
+        assert_eq!(changed.writer_key, Some(writer));
+        let dets: Vec<&crate::detect::Detection> = app.ir.det.store.items.iter().filter(|d| d.rule_id == "PW-019").collect();
+        assert_eq!(dets.len(), 2, "added + changed, not removed");
+        assert!(dets.iter().any(|d| d.subject == Entity::Process(writer)));
     }
 }

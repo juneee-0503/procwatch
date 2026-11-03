@@ -56,6 +56,11 @@ impl Item {
         }
     }
 
+    #[cfg(test)]
+    pub fn test(category: &str, name: &str, command: &str, location: &str) -> Self {
+        Item::new(category, name, command, location, "user")
+    }
+
     pub fn suspicious(&self) -> bool {
         !self.flags.is_empty()
     }

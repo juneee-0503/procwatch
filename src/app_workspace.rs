@@ -460,6 +460,23 @@ impl App {
         if !d.persistence.is_empty() {
             s.push(Statement { text: format!("Autostart entries point at its executable: {}", d.persistence.join("; ")), basis: "inferred", refs: vec![] });
         }
+        if let Some(p) = self.ir.profiles.as_ref().and_then(|ps| {
+            let sha = d.path.as_deref().and_then(|e| self.ir.intel.get(e)).and_then(|x| x.sha256);
+            sha.map(|h| format!("sha:{h}")).or(d.path.as_ref().map(|e| format!("path:{e}"))).and_then(|k| ps.by_key.get(&k))
+        }) {
+            s.push(Statement {
+                text: format!(
+                    "History on this machine: {} runs since {}, {} destinations, {} child programs — profile {}",
+                    p.runs,
+                    p.first_seen.get(..10).unwrap_or(""),
+                    p.destinations.len(),
+                    p.children.len(),
+                    if p.established() { "established (new behaviour is reported as PW-018)" } else { "still learning" }
+                ),
+                basis: "observed",
+                refs: vec![],
+            });
+        }
         if s.is_empty() {
             s.push(Statement { text: "No notable activity recorded for this process.".into(), basis: "observed", refs: vec![] });
         }
