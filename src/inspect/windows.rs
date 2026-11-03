@@ -38,6 +38,12 @@ try {{
         Write-Output ("SIGD=Issuer|" + $s.SignerCertificate.Issuer)
         Write-Output ("SIGD=Thumbprint|" + $s.SignerCertificate.Thumbprint)
         Write-Output ("SIGD=Valid until|" + $s.SignerCertificate.NotAfter)
+        Write-Output ("SIGD=Signature type|" + $s.SignatureType)
+        $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
+        $chain.ChainPolicy.RevocationMode = 'Online'
+        $chain.ChainPolicy.UrlRetrievalTimeout = [TimeSpan]::FromSeconds(5)
+        $ok = $chain.Build($s.SignerCertificate)
+        Write-Output ("SIGD=Chain and revocation|" + $(if ($ok) {{ 'valid' }} else {{ ($chain.ChainStatus | ForEach-Object {{ $_.StatusInformation.Trim() }}) -join '; ' }}))
     }}
     if ($s.TimeStamperCertificate) {{ Write-Output ("SIGD=Timestamped by|" + $s.TimeStamperCertificate.Subject) }}
 }} catch {{ Write-Output ("NOTE=signature: " + $_.Exception.Message) }}"#,
@@ -120,6 +126,7 @@ if ($s.SignerCertificate) {{
     Write-Output ("SIGD=Issuer|" + $s.SignerCertificate.Issuer)
     Write-Output ("SIGD=Thumbprint|" + $s.SignerCertificate.Thumbprint)
     Write-Output ("SIGD=Valid until|" + $s.SignerCertificate.NotAfter)
+    Write-Output ("SIGD=Signature type|" + $s.SignatureType)
 }}"#,
         path.replace('\'', "''")
     );

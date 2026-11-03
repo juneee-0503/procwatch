@@ -34,6 +34,7 @@ mod rules;
 mod trace;
 mod yara;
 mod triage;
+mod palette;
 mod persistence;
 mod process;
 mod profile;
@@ -41,6 +42,7 @@ mod sampler;
 mod selftest;
 mod soak;
 mod sigma;
+mod stdexport;
 mod store;
 mod ui;
 
@@ -618,6 +620,34 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         }
         Mode::Health => app.mode = Mode::Normal,
         Mode::Workspace => workspace_key(app, key),
+        Mode::Palette { input, cursor } => {
+            let list = palette::matches(&input);
+            match key.code {
+                KeyCode::Esc => app.mode = Mode::Normal,
+                KeyCode::Down => app.mode = Mode::Palette { cursor: (cursor + 1).min(list.len().saturating_sub(1)), input },
+                KeyCode::Up => app.mode = Mode::Palette { cursor: cursor.saturating_sub(1), input },
+                KeyCode::Backspace => {
+                    let mut i = input;
+                    i.pop();
+                    app.mode = Mode::Palette { input: i, cursor: 0 };
+                }
+                KeyCode::Char(c) => {
+                    let mut i = input;
+                    i.push(c);
+                    app.mode = Mode::Palette { input: i, cursor: 0 };
+                }
+                KeyCode::Enter => {
+                    app.mode = Mode::Normal;
+                    if let Some(e) = list.get(cursor) {
+                        if let Some(t) = e.tab {
+                            app.switch_tab(t);
+                        }
+                        normal_key(app, KeyEvent::new(KeyCode::Char(e.key), if e.key.is_uppercase() { KeyModifiers::SHIFT } else { KeyModifiers::NONE }));
+                    }
+                }
+                _ => {}
+            }
+        }
         Mode::LaunchConfirm(argv) => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
                 app.mode = Mode::Normal;
@@ -690,6 +720,14 @@ fn normal_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('H') => {
             app.mode = Mode::Health;
+            return;
+        }
+        KeyCode::Char(':') => {
+            app.mode = Mode::Palette { input: String::new(), cursor: 0 };
+            return;
+        }
+        KeyCode::Char('k') if ctrl => {
+            app.mode = Mode::Palette { input: String::new(), cursor: 0 };
             return;
         }
         KeyCode::Char('W') if !matches!(app.tab, Tab::Performance | Tab::Case) => {
@@ -879,6 +917,7 @@ fn normal_key(app: &mut App, key: KeyEvent) {
                 KeyCode::Char('i') => app.mode = input(app::InputPurpose::IsolationAllow),
                 KeyCode::Char('I') => app.open_sweep_dialog(),
                 KeyCode::Char('Y') => app.scan_executables(),
+                KeyCode::Char('X') => app.export_standard(),
                 KeyCode::Tab | KeyCode::BackTab => app.ir.case_focus_quarantine = !app.ir.case_focus_quarantine,
                 KeyCode::Char('R') if app.ir.case_focus_quarantine => app.restore_selected(),
                 KeyCode::Delete | KeyCode::Backspace if !app.ir.case_focus_quarantine => app.delete_finding(),
@@ -987,6 +1026,7 @@ fn alerts_key(app: &mut App, key: KeyEvent) {
                 }
             }
             KeyCode::Char('S') => app.request_suppress(),
+            KeyCode::Char('T') => app.request_trust_publisher(),
             KeyCode::Char('u') => {
                 app.ir.det.show_suppressed = !app.ir.det.show_suppressed;
                 app.ir.det.selected = 0;

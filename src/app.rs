@@ -370,6 +370,8 @@ pub enum Mode {
     Workspace,
     /// Confirm running a program for analysis (`--run`).
     LaunchConfirm(Vec<String>),
+    /// Command palette (`:` or ctrl+k).
+    Palette { input: String, cursor: usize },
     /// IOC sweep results overlay.
     Sweep,
     Help,

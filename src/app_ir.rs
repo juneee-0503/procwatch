@@ -1985,6 +1985,70 @@ impl App {
         }
     }
 
+    /// STIX 2.1 bundle + MISP event (indicators from medium+ detections)
+    /// and the timeline as ECS JSON lines, into the case.
+    pub fn export_standard(&mut self) {
+        use crate::stdexport::{ecs_event, misp_event, stix_bundle, unique, Indicator};
+        if self.ir.timeline_dirty {
+            self.rebuild_timeline();
+        }
+        let intel = self.ir.intel.snapshot();
+        let mut ind: Vec<Indicator> = Vec::new();
+        for d in self.ir.det.store.items.iter().filter(|d| d.suppressed.is_none() && d.severity >= crate::model::Severity::Medium) {
+            let why = format!("{} {} ({}) on {}", d.rule_id, d.rule_name, d.severity.label(), d.subject_label);
+            let exe = d.pid.and_then(|p| self.tree.get(p)).and_then(|n| n.info.exe_path.clone()).or_else(|| if let Entity::File(f) = &d.subject { Some(f.clone()) } else { None });
+            if let Some(e) = exe {
+                if let Some(h) = intel.get(&e).and_then(|x| x.sha256.clone()) {
+                    ind.push(Indicator::Sha256 { value: h, why: why.clone() });
+                }
+                ind.push(Indicator::Path { value: e, why: why.clone() });
+            }
+            if let Some(pid) = d.pid {
+                for c in self.connections.get(&pid).into_iter().flatten() {
+                    let ip = split_endpoint(&c.remote).0;
+                    if c.state != ConnState::Listen && ip != "*" && !crate::triage::is_private(&ip) {
+                        if let Some((name, _)) = dns::name_for(&self.ir.dns_obs, &ip, Some(pid), Local::now()) {
+                            ind.push(Indicator::Domain { value: name, why: why.clone() });
+                        }
+                        ind.push(Indicator::Ip { value: ip, why: why.clone() });
+                    }
+                }
+            }
+            if let Entity::Endpoint(ip) = &d.subject {
+                ind.push(Indicator::Ip { value: ip.clone(), why: why.clone() });
+            }
+        }
+        let ind = unique(ind);
+        let now = Local::now();
+        let host = sysinfo::System::host_name().unwrap_or_default();
+        let ecs: String = self
+            .ir
+            .timeline
+            .iter()
+            .rev()
+            .map(|e| {
+                let exe = e.links.iter().find_map(|(r, x)| if *r == Rel::Executes { if let Entity::File(p) = x { Some(p.as_str()) } else { None } } else { None });
+                let path = e.entities().find_map(|x| if let Entity::File(p) = x { Some(p.as_str()) } else { None });
+                let ep = e.detail.split_whitespace().nth(3).map(split_endpoint);
+                let remote = if e.source == "network" { ep.as_ref().map(|(a, b)| (a.as_str(), b.as_str())) } else { None };
+                ecs_event(e.time, &short_id(e.id), e.source, &e.kind, e.pid, &e.name, &e.detail, exe, remote, if e.source == "file" { path } else { None }, &host).to_string() + "\n"
+            })
+            .collect();
+        let Some(case) = self.ensure_case() else { return };
+        let id = case.id.clone();
+        let p = |what: &str| crate::case::Provenance::derived(what);
+        let r = (|| -> anyhow::Result<String> {
+            let (_, a) = case.add_text_with("stix-bundle.json", &serde_json::to_string_pretty(&stix_bundle(&id, &ind, now))?, p("STIX 2.1 bundle of indicators from medium+ detections"))?;
+            let (_, b) = case.add_text_with("misp-event.json", &serde_json::to_string_pretty(&misp_event(&id, &ind, now))?, p("MISP event with the same indicators"))?;
+            let (_, c) = case.add_text_with("timeline-ecs.jsonl", &ecs, p("timeline in Elastic Common Schema field names"))?;
+            Ok(format!("{} indicators → {} (STIX), {} (MISP); timeline → {} (ECS)", ind.len(), a.id, b.id, c.id))
+        })();
+        match r {
+            Ok(m) => self.set_status(StatusLevel::Success, m),
+            Err(e) => self.set_status(StatusLevel::Error, format!("Export failed: {e}")),
+        }
+    }
+
     pub fn export_case_report(&mut self) {
         if self.ir.timeline_dirty {
             self.rebuild_timeline();

@@ -538,6 +538,10 @@ pub fn file_report(frame: &mut Frame, app: &mut App, screen: Rect) {
         }
         let sig_style = if r.signature.starts_with("valid") { Style::new().fg(OK) } else { Style::new().fg(WARN) };
         lines.push(Line::from(vec![Span::styled(format!(" {:<14}", "Signature"), Style::new().fg(TEXT_DIM)), Span::styled(r.signature.clone(), sig_style)]));
+        if let Some(g) = &r.gatekeeper {
+            let st = if g.starts_with("REJECTED") { Style::new().fg(BAD) } else if g.starts_with("accepted") { Style::new().fg(OK) } else { Style::new().fg(TEXT_DIM) };
+            lines.push(Line::from(vec![Span::styled(format!(" {:<14}", "Gatekeeper"), Style::new().fg(TEXT_DIM)), Span::styled(g.clone(), st)]));
+        }
         for (k, v) in &r.signature_details {
             lines.push(kv(&format!("  {k}"), v.clone()));
         }

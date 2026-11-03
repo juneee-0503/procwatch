@@ -221,16 +221,18 @@ pub fn help(frame: &mut Frame, screen: Rect) {
             ("Persist: c  r", "changes since baseline · rescan autostart"),
             ("Logs: w  a", "time window · important/all"),
             ("Case: c s v e", "collect · seal · verify · export report"),
+            ("Case: X", "export STIX 2.1, MISP event, ECS timeline"),
             ("Case: a C i", "note · conclusion · isolation scripts"),
         ]),
         ("Detect page (9)", &[
             ("S", "suppress the selected rule for a program (with a reason)"),
+            ("T", "trust the program's publisher (weak signals only)"),
             ("u", "show / hide suppressed detections"),
             ("R", "reload Sigma rules and suppressions from disk"),
             ("m  enter", "record as finding · go to the subject"),
             ("tab", "detections → alerts → alert rules"),
         ]),
-        ("Other", &[("p", "pause all updates"), ("e", "export list to CSV"), ("o", "options: columns, refresh rate"), ("q", "quit")]),
+        ("Other", &[(": ctrl+k", "command palette: every action by name"), ("p", "pause all updates"), ("e", "export list to CSV"), ("o", "options: columns, refresh rate"), ("q", "quit")]),
     ];
     let render = |groups: &[(&str, &[(&str, &str)])]| {
         let mut lines: Vec<Line> = Vec::new();
@@ -358,4 +360,24 @@ pub fn launch_confirm(frame: &mut Frame, app: &mut App, screen: Rect) {
         Line::from(vec![Span::styled("  y", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)), Span::raw(" run under trace    "), Span::styled("esc", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)), Span::raw(" cancel")]),
     ];
     frame.render_widget(Paragraph::new(lines).block(frame_block("Launch and trace", BAD)), rect);
+}
+
+/// Command palette.
+pub fn palette(frame: &mut Frame, app: &mut App, screen: Rect) {
+    let crate::app::Mode::Palette { input, cursor } = &app.mode else { return };
+    let list = crate::palette::matches(input);
+    let h = (list.len() as u16 + 4).clamp(6, screen.height.saturating_sub(6));
+    let rect = Rect { y: screen.y + 3, ..centered(screen, 80, h) };
+    frame.render_widget(Clear, rect);
+    let mut lines = vec![Line::from(vec![Span::styled(" : ", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)), Span::raw(input.clone()), Span::styled(" ", Style::new().add_modifier(Modifier::REVERSED))]), Line::default()];
+    let rows = (h as usize).saturating_sub(4);
+    let off = cursor.saturating_sub(rows.saturating_sub(1));
+    for (i, e) in list.iter().enumerate().skip(off).take(rows) {
+        let line = Line::from(pad_line(vec![Span::raw(format!(" {:<60}", e.label)), muted(format!("{:>14}", e.hint))], 78));
+        lines.push(if i == *cursor { line.style(sel_style()) } else { line });
+    }
+    if list.is_empty() {
+        lines.push(Line::from(muted(" no matching action")));
+    }
+    frame.render_widget(Paragraph::new(lines).block(frame_block("Commands", ACCENT)), rect);
 }

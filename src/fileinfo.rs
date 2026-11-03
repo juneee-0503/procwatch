@@ -104,6 +104,8 @@ pub struct FileReport {
     pub entitlements: Vec<String>,
     /// YARA-subset content rule matches (built-in + user rules).
     pub yara: Vec<crate::yara::Match>,
+    /// macOS Gatekeeper assessment (notarization), e.g. "accepted · Notarized Developer ID".
+    pub gatekeeper: Option<String>,
     pub error: Option<String>,
 }
 
@@ -139,6 +141,7 @@ pub fn analyze_stub(path: &str) -> FileReport {
         deep: crate::binfmt::Deep::default(),
         entitlements: Vec::new(),
         yara: Vec::new(),
+        gatekeeper: None,
         error: None,
     }
 }
@@ -193,6 +196,7 @@ pub fn analyze(path: &str) -> FileReport {
         }
     }
     r.entitlements = entitlements(path);
+    r.gatekeeper = gatekeeper(path);
     if meta.is_file() {
         let (rules, _) = crate::yara::load(None);
         if let Ok((m, _)) = crate::yara::scan_file(&rules, p) {
@@ -200,6 +204,31 @@ pub fn analyze(path: &str) -> FileReport {
         }
     }
     r
+}
+
+/// Gatekeeper's verdict (`spctl --assess`), which includes notarization.
+/// Apps are assessed as such; other files as executables, where a plain
+/// command-line tool is "rejected" only because it isn't an app — that's
+/// reported as "not an app bundle", not as a failure.
+fn gatekeeper(path: &str) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let target = path.find(".app/").map(|i| &path[..i + 4]).unwrap_or(path);
+        let out = crate::inspect::run_command(
+            std::process::Command::new("/usr/sbin/spctl").args(["--assess", "--type", "execute", "-vv", target]),
+            std::time::Duration::from_secs(15),
+        )
+        .ok()?;
+        let text = String::from_utf8_lossy(&out.stderr).into_owned() + &String::from_utf8_lossy(&out.stdout);
+        let verdict = if text.contains(": accepted") { "accepted" } else if text.contains("does not seem to be an app") { "not an app bundle" } else if text.contains(": rejected") { "REJECTED" } else { return None };
+        let source = text.lines().find_map(|l| l.strip_prefix("source=")).unwrap_or("");
+        return Some(if source.is_empty() { verdict.to_string() } else { format!("{verdict} · {source}") });
+    }
+    #[allow(unreachable_code)]
+    {
+        let _ = path;
+        None
+    }
 }
 
 /// Entitlements requested by a signed macOS binary, e.g.

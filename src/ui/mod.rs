@@ -83,6 +83,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Mode::StateAt => pivot::state_at(frame, app, size),
         Mode::Workspace => workspace::draw(frame, app, size),
         Mode::LaunchConfirm(_) => overlays::launch_confirm(frame, app, size),
+        Mode::Palette { .. } => overlays::palette(frame, app, size),
         _ => {}
     }
 }
@@ -192,6 +193,7 @@ fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
         Mode::Clusters => vec![h("↑↓", "select"), h("enter", "show cluster in timeline"), h("esc", "close")],
         Mode::Health => vec![h("any key", "close")],
         Mode::LaunchConfirm(_) => vec![h("y", "run it under trace"), h("esc", "cancel")],
+        Mode::Palette { .. } => vec![h("type", "filter"), h("↑↓", "choose"), h("enter", "run"), h("esc", "close")],
         Mode::StateAt => vec![h("↑↓ PgUp PgDn", "scroll"), h("esc", "close")],
         Mode::Workspace if app.ir.ws.tab == 1 => vec![h("←→", "step"), h("PgUp PgDn", "×10"), h("tab 1-6", "views"), h("D", "deep trace"), h("e", "quick report"), h("esc", "close")],
         Mode::Workspace => vec![h("tab 1-6", "views"), h("↑↓", "scroll"), h("D", "deep trace"), h("e", "quick report"), h("r", "refresh"), h("esc", "close")],
@@ -221,7 +223,7 @@ fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
                     h("z", if app.order_frozen { "unfreeze order" } else { "freeze order" }),
                     h("d", if app.pane_visible { "hide details" } else { "details" }),
                     h("f", "find port/file"),
-                    h("o", "options"),
+                    h(":", "commands"),
                     h("?", "help"),
                     h("q", "quit"),
                 ];
@@ -253,7 +255,7 @@ fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
             Tab::Logs if app.ir.artifacts_view => vec![h("↑↓", "select"), h("enter", "analyze file"), h("A", "import folder…"), h("r", "re-collect"), h("x", "event log"), h("/", "filter"), h("l", "graph")],
             Tab::Logs => vec![h("x", "artifacts"),h("↑↓", "select"), h("enter", "process"), h("w", "time window"), h("a", "important/all"), h("r", "reload"), h("m", "finding"), h("/", "filter")],
             Tab::Case if app.ir.case.is_none() => vec![h("n", "new case"), h("?", "help")],
-            Tab::Case => vec![h("I", "IOC sweep"), h("Y", "content scan"), h("c", "collect"), h("s", "seal"), h("v", "verify"), h("a", "note"), h("C", "conclusion"), h("i", "isolation plan"), h("e", "export report"), h("tab", "findings/quarantine")],
+            Tab::Case => vec![h("I", "IOC sweep"), h("Y", "content scan"), h("X", "STIX/MISP/ECS"), h("c", "collect"), h("s", "seal"), h("v", "verify"), h("a", "note"), h("C", "conclusion"), h("i", "isolation plan"), h("e", "export report"), h("tab", "findings/quarantine")],
             Tab::Performance => vec![h("1-9 0", "pages"), h("p", "pause"), h("?", "help"), h("q", "quit")],
             Tab::Trace if app.trace.is_none() => vec![h("1", "processes"), h("?", "help"), h("q", "quit")],
             Tab::Trace => {
@@ -268,6 +270,7 @@ fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
                 h("enter", "go to subject"),
                 h("l", "graph"),
                 h("S", "suppress…"),
+                h("T", "trust publisher…"),
                 h("u", if app.ir.det.show_suppressed { "hide suppressed" } else { "show suppressed" }),
                 h("m", "finding"),
                 h("R", "reload rules"),

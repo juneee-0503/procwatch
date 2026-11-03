@@ -166,6 +166,10 @@ impl Filterable for Facts<'_> {
     }
 }
 
+/// Rules a trusted publisher silences: weak signals only — never invalid
+/// signatures, attack patterns or Sigma/YARA/behaviour detections.
+pub const TRUST_RULES: &str = "PW-002,PW-004,PW-013,PW-014,PW-018";
+
 pub fn path() -> Option<PathBuf> {
     crate::config::path().map(|p| p.with_file_name("suppressions.txt"))
 }
@@ -209,7 +213,10 @@ pub fn append(s: &Suppression) -> anyhow::Result<PathBuf> {
 /// The reason, if any suppression covers `rule` for these facts.
 pub fn suppressed(list: &[Suppression], rule: &str, facts: &Facts) -> Option<String> {
     list.iter()
-        .find(|s| (s.rule == "*" || s.rule.eq_ignore_ascii_case(rule)) && (s.filter.is_empty() || Filter::parse(&s.filter).matches(facts)))
+        .find(|s| {
+            let applies = s.rule == "*" || s.rule.split(',').any(|r| r.trim().eq_ignore_ascii_case(rule));
+            applies && (s.filter.is_empty() || Filter::parse(&s.filter).matches(facts))
+        })
         .map(|s| if s.reason.is_empty() { "suppressed".to_string() } else { s.reason.clone() })
 }
 
@@ -261,6 +268,11 @@ mod tests {
         assert_eq!(suppressed(&list, "PW-002", &f).as_deref(), Some("in-house"));
         assert_eq!(suppressed(&list, "PW-004", &f).as_deref(), Some("dev box"));
         assert!(suppressed(&list, "PW-001", &f).is_none());
+        let trust = parse(&format!("{TRUST_RULES} | team:ABC123 | trusted publisher\n"));
+        let signed = Facts { name: "x", path: "/x", user: "", cmd: "", team: "ABC123" };
+        assert!(suppressed(&trust, "PW-002", &signed).is_some());
+        assert!(suppressed(&trust, "PW-001", &signed).is_none(), "invalid signatures are never trusted away");
+        assert!(suppressed(&trust, "PW-008", &signed).is_none());
     }
 }
 

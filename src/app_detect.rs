@@ -39,7 +39,7 @@ impl App {
         let info = pid.and_then(|p| self.tree.get(p)).map(|n| &n.info);
         let path = info.and_then(|i| i.exe_path.as_deref()).unwrap_or(path_hint);
         let cmd = info.map(|i| i.cmd.join(" ")).unwrap_or_default();
-        let team = self.ir.intel.get(path).and_then(|e| e.team).unwrap_or_default();
+        let team = self.ir.intel.get(path).and_then(|e| e.team.or(Some(e.signer).filter(|s| !s.is_empty()))).unwrap_or_default();
         let facts = Facts {
             name: info.map_or("", |i| i.name.as_str()),
             path,
@@ -434,6 +434,25 @@ impl App {
         };
         let rule = d.rule_id.clone();
         self.mode = Mode::Input { purpose: InputPurpose::Suppress { rule }, input: format!("{filter} | "), error: None };
+    }
+
+    /// Trust the publisher of the selected detection's program: silences
+    /// only weak signals (see `detect::TRUST_RULES`) for everything it signed.
+    pub fn request_trust_publisher(&mut self) {
+        let Some(d) = self.selected_detection() else { return };
+        let exe = d.pid.and_then(|p| self.tree.get(p)).and_then(|n| n.info.exe_path.clone());
+        let Some(info) = exe.as_deref().and_then(|e| self.ir.intel.get(e)) else {
+            self.set_status(StatusLevel::Info, "No signature information for this program yet".into());
+            return;
+        };
+        if info.sig != crate::intel::Sig::Signed {
+            self.set_status(StatusLevel::Error, "Only validly signed programs can be trusted by publisher".into());
+            return;
+        }
+        let who = info.team.clone().unwrap_or_else(|| info.signer.clone());
+        let filter = format!("team:{}", crate::filter::quote(&who));
+        let rule = detect::TRUST_RULES.to_string();
+        self.mode = Mode::Input { purpose: InputPurpose::Suppress { rule }, input: format!("{filter} | trusted publisher {}", info.signer), error: None };
     }
 
     pub(super) fn add_suppression(&mut self, rule: String, input: String) {
