@@ -68,7 +68,20 @@ impl App {
             suppressed: hit.suppressed.clone(),
             active: true,
         };
+        let rec = crate::store::Rec::Detection {
+            rule: d.rule_id.clone(),
+            name: d.rule_name.clone(),
+            severity: d.severity.label().into(),
+            confidence: d.confidence.label().into(),
+            technique: d.technique.clone(),
+            subject: d.subject_label.clone(),
+            pid: d.pid,
+            evidence: d.evidence.join(" | "),
+        };
         if self.ir.det.store.upsert(d) {
+            if let Some(st) = self.ir.store.as_mut() {
+                st.write(t, rec);
+            }
             self.ir.timeline_dirty = true;
             if hit.suppressed.is_none() && hit.severity >= Severity::Medium {
                 self.ir.det.unread += 1;
@@ -312,6 +325,10 @@ impl App {
     /// Scan the executables of every running process with the content
     /// rules (files on disk only).
     pub fn scan_executables(&mut self) {
+        if self.replaying() {
+            self.set_status(StatusLevel::Info, "Not available while replaying a recording — this would act on the live system".into());
+            return;
+        }
         if self.ir.yara_pending {
             return;
         }
@@ -598,6 +615,18 @@ impl App {
                 None => format!("idle — starts automatically for priority ≥ {} or with D on a process", super::deep::AUTO_PRIORITY),
             },
         ));
+        v.push(match (&self.ir.store, &self.ir.replay) {
+            (_, Some(r)) => Source::new("Event history", Status::Available, format!("replaying a recording: {r}")),
+            (Some(st), None) => Source::new(
+                "Event history",
+                if st.error.is_some() { Status::Denied } else { Status::Available },
+                match &st.error {
+                    Some(e) => format!("can't write: {e}"),
+                    None => format!("recording to {} ({} MB on disk, kept {} days / {} MB)", st.dir().display(), st.total_bytes() >> 20, crate::store::MAX_DAYS, crate::store::MAX_BYTES >> 20),
+                },
+            ),
+            (None, None) => Source::new("Event history", Status::NotUsed, "off (history = off in the settings file): only in-memory buffers, capped"),
+        });
         // Sigma rules whose log source no live collector produces.
         let live: &[&str] = &["process_creation", "network_connection", "file_event", "file_change", "file_delete", "file_rename", ""];
         let blind: Vec<String> = self

@@ -102,6 +102,10 @@ impl App {
 
     /// Enroll a process (and its current descendants) in deep trace.
     pub fn deep_enroll(&mut self, pid: u32, reason: String, auto: bool) {
+        if self.replaying() {
+            self.set_status(StatusLevel::Info, "Not available while replaying a recording — this would act on the live system".into());
+            return;
+        }
         let me = std::process::id();
         if pid == me || self.tree.get(pid).is_some_and(|n| n.info.ppid == Some(me)) {
             return;
@@ -203,6 +207,12 @@ impl App {
                 }
                 DtKind::Exec => {}
             }
+            if let Some(st) = self.ir.store.as_mut() {
+                st.write(
+                    e.at,
+                    crate::store::Rec::Deep { kind: e.kind.label().into(), pid: e.pid, ppid: e.ppid, start: e.start, path: e.path.clone(), args: e.args.clone(), via: e.via.into() },
+                );
+            }
             if self.ir.deep.events.len() >= MAX_EVENTS {
                 self.ir.deep.events.pop_front();
                 self.ir.deep.dropped += 1;
@@ -286,6 +296,9 @@ impl App {
         snap.errors.truncate(8);
         if !out.is_empty() {
             for c in out {
+                if let Some(st) = self.ir.store.as_mut() {
+                    st.write(c.at, crate::store::Rec::Change { pid: c.key.pid, start: c.key.start, kind: c.kind.label().into(), path: c.path.clone() });
+                }
                 if self.ir.deep.changes.len() >= MAX_CHANGES {
                     self.ir.deep.changes.pop_front();
                     self.ir.deep.dropped += 1;

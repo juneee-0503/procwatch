@@ -153,7 +153,13 @@ fn unescape(s: &str) -> Result<Vec<u8>, String> {
                 b'\\' => out.push(b'\\'),
                 b'"' => out.push(b'"'),
                 b'x' if i + 3 < b.len() => {
-                    out.push(u8::from_str_radix(&s[i + 2..i + 4], 16).map_err(|_| format!("bad escape in \"{s}\""))?);
+                    // Work on bytes: the two digits may be followed by (or
+                    // be) multi-byte UTF-8, which a str slice would split.
+                    let hex = |c: u8| (c as char).to_digit(16);
+                    match (hex(b[i + 2]), hex(b[i + 3])) {
+                        (Some(h), Some(l)) => out.push((h * 16 + l) as u8),
+                        _ => return Err(format!("bad escape in \"{s}\"")),
+                    }
                     i += 2;
                 }
                 c => return Err(format!("unknown escape \\{} in \"{s}\"", c as char)),
@@ -902,6 +908,7 @@ rule Any { strings: $a = "zzz" $b = "yyy" condition: any of ($a*, $b) and not $a
     fn parses_and_rejects() {
         let (rules, errors) = parse(SRC, "t.yar");
         assert_eq!(rules.len(), 2, "{errors:?}");
+        assert!(unescape("\\x4é").is_err() && unescape("\\x41").unwrap() == b"A", "no panic on split UTF-8");
         assert_eq!(split_defs("$a = \"x $y\" $b = { 41 } $c=\"q\""), vec!["$a = \"x $y\"", "$b = { 41 }", "$c=\"q\""]);
         assert_eq!(errors.len(), 2);
         assert!(errors[0].contains("regular-expression"));

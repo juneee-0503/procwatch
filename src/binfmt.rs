@@ -184,7 +184,9 @@ fn macho_structure(b: &[u8], st: &mut Structure) {
     // Universal: analyse the first slice.
     if b.starts_with(&[0xca, 0xfe, 0xba, 0xbe]) {
         if let (Some(off), Some(size)) = (u32be(b, 8 + 8), u32be(b, 8 + 12)) {
-            if let Some(slice) = b.get(off as usize..(off as usize + size as usize).min(b.len())) {
+            // A slice must be a thin binary: a nested fat header (or one
+            // pointing back at itself) would recurse forever.
+            if let Some(slice) = b.get(off as usize..(off as usize).saturating_add(size as usize).min(b.len())).filter(|s| !s.starts_with(&[0xca, 0xfe, 0xba, 0xbe])) {
                 macho_structure(slice, st);
             }
         }
@@ -565,7 +567,7 @@ pub fn analyze(path: &Path) -> std::io::Result<Deep> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -612,7 +614,7 @@ mod tests {
         assert!(ind.iter().any(|(k, v)| k == "behavior" && v.contains("reverse-shell")));
     }
 
-    fn synthetic_pe() -> Vec<u8> {
+    pub(crate) fn synthetic_pe() -> Vec<u8> {
         let mut b = vec![0u8; 0x800];
         b[0..2].copy_from_slice(b"MZ");
         b[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());

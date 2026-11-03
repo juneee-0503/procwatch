@@ -14,6 +14,8 @@ mod export;
 mod filter;
 mod fileinfo;
 mod fswatch;
+#[cfg(test)]
+mod fuzz;
 mod gpu;
 mod health;
 mod inspect;
@@ -33,7 +35,9 @@ mod persistence;
 mod process;
 mod sampler;
 mod selftest;
+mod soak;
 mod sigma;
+mod store;
 mod ui;
 
 use std::io;
@@ -63,7 +67,7 @@ fn restore_terminal() {
 }
 
 /// Last panic message from a worker thread, shown in the status bar.
-static WORKER_PANIC: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+pub(crate) static WORKER_PANIC: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 const USAGE: &str = "procwatch — terminal process analyzer
 
@@ -73,6 +77,10 @@ Usage:
   procwatch --diff FILE [--json]    compare now with a baseline; exit status 1 if anything changed
   procwatch --case DIR              resume an existing investigation case
   procwatch --sigma DIR             use Sigma rules from DIR (default: sigma/ next to the settings file)
+  procwatch --replay [PATH] [--from WHEN] [--to WHEN]
+                                    open a recorded session (event history folder, a case folder or an
+                                    events.jsonl file; default: this machine's history) without touching
+                                    the live system. WHEN: 2026-11-03T14:00, \"2026-11-03 14:00\" or 14:00
   procwatch --sweep IOCFILE [--json]  sweep processes, connections and autostart entries for indicators;
                                     exit status 1 if anything matched
   procwatch --offline CASE [--iocs FILE] [--sigma DIR] [--yara DIR] [--artifacts DIR]... [--json]
@@ -80,6 +88,8 @@ Usage:
                                     the original machine; results are added to the case as derived evidence;
                                     exit status 1 if anything of medium severity or an indicator matched
   procwatch --check-rules [DIR]     parse Sigma rules and list the ones that can't be used, and why
+  procwatch --soak MINUTES          run the full pipeline headless under a churn workload and report
+                                    memory/CPU/buffer sizes; exit status 1 on leaks or worker panics
   procwatch --selftest [--json]     measure process-capture rates, PID-reuse protection, file-event latency
                                     and own overhead on this machine (harmless workloads only)
   procwatch --scan PATH... [--yara DIR] [--json]
@@ -132,6 +142,7 @@ fn main() -> anyhow::Result<()> {
             std::process::exit(if changes.is_empty() { 0 } else { 1 });
         }
         Some("--case" | "--sigma") if args.len() >= 2 => {}
+        Some("--replay") => {}
         Some("--offline") => {
             let Some(dir) = args.get(1) else {
                 eprintln!("--offline needs a case folder\n\n{USAGE}");
@@ -157,6 +168,10 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(2);
             }
             std::process::exit(headless_scan(&paths, yara_dir.as_deref(), args.iter().any(|a| a == "--json")));
+        }
+        Some("--soak") => {
+            let minutes = args.get(1).and_then(|m| m.parse().ok()).unwrap_or(10);
+            std::process::exit(soak::run(minutes));
         }
         Some("--selftest") => std::process::exit(selftest::run(args.iter().any(|a| a == "--json"))),
         Some("--check-rules") => {
@@ -305,6 +320,21 @@ fn headless_sweep(file: &str, json: bool) -> i32 {
     if hits.is_empty() { 0 } else { 1 }
 }
 
+/// "2026-11-03T14:00:00+08:00", "2026-11-03 14:00", "2026-11-03T14:00" or "14:00" (today).
+fn parse_when(s: &str) -> Option<chrono::DateTime<chrono::Local>> {
+    use chrono::{Local, NaiveDateTime, NaiveTime, TimeZone};
+    if let Ok(t) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Some(t.with_timezone(&Local));
+    }
+    for f in ["%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"] {
+        if let Ok(n) = NaiveDateTime::parse_from_str(s, f) {
+            return Local.from_local_datetime(&n).single();
+        }
+    }
+    let time = NaiveTime::parse_from_str(s, "%H:%M").or_else(|_| NaiveTime::parse_from_str(s, "%H:%M:%S")).ok()?;
+    Local.from_local_datetime(&Local::now().date_naive().and_time(time)).single()
+}
+
 /// One-shot capture for the command-line modes (no terminal UI).
 fn headless_capture() -> baseline::Baseline {
     let mut monitor = process::ProcessMonitor::new();
@@ -363,9 +393,31 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::Resu
         paused: AtomicBool::new(false),
         refresh_now: AtomicBool::new(false),
     });
-    sampler::spawn_sampler(tx.clone(), ctl.clone())?;
-    let mut app = App::new(tx, ctl, cfg.clone());
     let args: Vec<String> = std::env::args().collect();
+    let replay: Option<Option<std::path::PathBuf>> = args
+        .iter()
+        .position(|a| a == "--replay")
+        .map(|i| args.get(i + 1).filter(|a| !a.starts_with("--")).map(std::path::PathBuf::from).or_else(store::default_dir));
+    if replay.is_none() {
+        sampler::spawn_sampler(tx.clone(), ctl.clone())?;
+    }
+    let mut app = App::new(tx, ctl, Config { history: cfg.history && replay.is_none(), ..cfg.clone() });
+    if let Some(path) = replay {
+        let when = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).and_then(|s| parse_when(s));
+        match path {
+            Some(p) => match app.load_replay(&p, when("--from"), when("--to")) {
+                Ok(d) => app.set_status(app::StatusLevel::Success, d),
+                Err(e) => {
+                    app.ir.replay = Some("REPLAY (nothing loaded)".into());
+                    app.set_status(app::StatusLevel::Error, e);
+                }
+            },
+            None => {
+                app.ir.replay = Some("REPLAY (nothing loaded)".into());
+                app.set_status(app::StatusLevel::Error, "no event history folder on this system".into());
+            }
+        }
+    }
     if let Some(dir) = args.iter().position(|a| a == "--sigma").and_then(|i| args.get(i + 1)) {
         app.ir.det.sigma_dir = Some(std::path::PathBuf::from(dir));
         app.ir.det.reload_sigma();

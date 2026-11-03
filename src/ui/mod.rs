@@ -87,7 +87,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 }
 
 fn draw_title(frame: &mut Frame, app: &mut App, area: Rect) {
-    let mut spans = vec![Span::styled(" procwatch ", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))];
+    let mut spans = vec![if app.ir.replay.is_some() {
+        Span::styled(" REPLAY ", Style::new().fg(Color::Black).bg(WARN).add_modifier(Modifier::BOLD))
+    } else {
+        Span::styled(" procwatch ", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))
+    }];
     let mut x = area.x + spans[0].content.width() as u16;
     app.hit.tabs.clear();
     // Full names when they fit next to the summary, short ones otherwise.
@@ -122,7 +126,15 @@ fn draw_title(frame: &mut Frame, app: &mut App, area: Rect) {
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 
-    // Live summary on the right.
+    // Live summary on the right (a replay has no live numbers).
+    if app.ir.replay.is_some() {
+        let line = Line::from(vec![Span::styled("recorded session · live system not sampled ", Style::new().fg(WARN))]);
+        let w = line.width() as u16;
+        if w + 1 < area.width.saturating_sub(x - area.x) {
+            frame.render_widget(Paragraph::new(line), Rect { x: area.right() - w, width: w, ..area });
+        }
+        return;
+    }
     let s = &app.stats;
     let level = |r: f64| if r >= 0.85 { BAD } else if r >= 0.6 { WARN } else { OK };
     let mem = ratio(s.mem_used, s.mem_total);

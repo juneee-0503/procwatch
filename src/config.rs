@@ -23,6 +23,8 @@ pub struct Config {
     pub rules: Vec<String>,
     /// Folders watched for file changes (empty = defaults).
     pub watch: Vec<String>,
+    /// Keep a persistent event history on disk (see `store`).
+    pub history: bool,
 }
 
 impl Default for Config {
@@ -39,6 +41,7 @@ impl Default for Config {
             notify: true,
             rules: Vec::new(),
             watch: Vec::new(),
+            history: true,
         }
     }
 }
@@ -89,6 +92,7 @@ impl Config {
                 "notify" => cfg.notify = flag(value),
                 "rule" if !value.is_empty() => cfg.rules.push(value.to_string()),
                 "watch" if !value.is_empty() => cfg.watch.push(value.to_string()),
+                "history" => cfg.history = flag(value),
                 _ => {}
             }
         }
@@ -116,6 +120,7 @@ impl Config {
         ) + &format!("notify = {}\n", self.notify)
             + &self.rules.iter().map(|r| format!("rule = {r}\n")).collect::<String>()
             + &self.watch.iter().map(|w| format!("watch = {w}\n")).collect::<String>()
+            + &format!("history = {}\n", if self.history { "on" } else { "off" })
     }
 
     pub fn save(&self) -> anyhow::Result<PathBuf> {

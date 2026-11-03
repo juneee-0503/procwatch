@@ -254,6 +254,11 @@ pub struct Ir {
     pub response: super::response::ResponseState,
     pub deep: super::deep::DeepState,
     pub ws: super::workspace::WorkspaceState,
+    /// Persistent event history (None when off, in tests, or replaying).
+    pub store: Option<crate::store::Writer>,
+    last_store_snapshot: Option<Instant>,
+    /// Set when showing a recorded session instead of the live system.
+    pub replay: Option<String>,
     pub state_scroll: usize,
 }
 
@@ -334,6 +339,9 @@ impl Ir {
             response: Default::default(),
             deep: super::deep::DeepState { auto: true, ..Default::default() },
             ws: Default::default(),
+            store: None,
+            last_store_snapshot: None,
+            replay: None,
             state_scroll: 0,
         }
     }
@@ -561,7 +569,39 @@ impl App {
         self.ir.beacons = beacons;
     }
 
+    /// Process table into the history every 10 minutes (for replay).
+    fn store_snapshot(&mut self) {
+        let due = self.ir.last_store_snapshot.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(600));
+        if !due || self.ir.store.is_none() {
+            return;
+        }
+        self.ir.last_store_snapshot = Some(Instant::now());
+        let processes: Vec<crate::store::ProcRec> = self
+            .tree
+            .nodes
+            .values()
+            .map(|n| crate::store::ProcRec {
+                pid: n.info.pid,
+                ppid: n.info.ppid,
+                start: n.info.start_time_secs,
+                name: n.info.name.clone(),
+                exe: n.info.exe_path.clone(),
+                cmd: n.info.cmd.join(" "),
+                user: n.info.user.clone().unwrap_or_default(),
+            })
+            .collect();
+        if let Some(st) = self.ir.store.as_mut() {
+            st.write(Local::now(), crate::store::Rec::Snapshot { processes });
+            st.flush();
+            st.prune();
+        }
+    }
+
     pub(super) fn ir_on_snapshot(&mut self) {
+        self.store_snapshot();
+        if let Some(st) = self.ir.store.as_mut() {
+            st.flush();
+        }
         self.update_network_intel();
         self.triage_all();
         self.response_on_snapshot();
@@ -590,6 +630,22 @@ impl App {
                 let kind = if c.state == ConnState::Listen { "unlisten" } else { "close" };
                 let name = self.ir.net_events.iter().rev().find(|e| e.pid == *pid).map(|e| e.name.clone()).unwrap_or_else(|| self.name_of(*pid));
                 add.push(NetEvent { time: t, kind, pid: *pid, name, conn: c.clone() });
+            }
+            if let Some(st) = self.ir.store.as_mut() {
+                for e in &add {
+                    st.write(
+                        e.time,
+                        crate::store::Rec::Net {
+                            kind: e.kind.into(),
+                            pid: e.pid,
+                            name: e.name.clone(),
+                            proto: e.conn.protocol.into(),
+                            local: e.conn.local.clone(),
+                            remote: e.conn.remote.clone(),
+                            state: e.conn.state.label().into(),
+                        },
+                    );
+                }
             }
             for e in add {
                 if self.ir.net_events.len() >= MAX_NET_EVENTS {
@@ -632,6 +688,9 @@ impl App {
                     self.ir.fs_events.pop_front();
                 }
                 self.sigma_on_fs(&e);
+                if let Some(st) = self.ir.store.as_mut() {
+                    st.write(e.time, crate::store::Rec::File { kind: e.kind.into(), path: e.path.clone() });
+                }
                 self.ir.fs_events.push_back(e);
                 self.ir.timeline_dirty = true;
             }
@@ -714,6 +773,13 @@ impl App {
 
     pub(super) fn ir_on_tick(&mut self) -> bool {
         let mut dirty = false;
+        if self.replaying() {
+            if self.ir.timeline_dirty && self.tab == Tab::Timeline {
+                self.rebuild_timeline();
+                return true;
+            }
+            return false;
+        }
         match self.tab {
             Tab::Persistence if self.ir.persistence.is_none() => {
                 self.scan_persistence();
@@ -759,6 +825,10 @@ impl App {
     }
 
     pub fn collect_artifacts(&mut self) {
+        if self.replaying() {
+            self.set_status(StatusLevel::Info, "Not available while replaying a recording — this would act on the live system".into());
+            return;
+        }
         if self.ir.artifacts_live.as_ref().is_some_and(|l| l.pending) {
             return;
         }
@@ -797,6 +867,10 @@ impl App {
     // ── persistence / logs ─────────────────────────────────────────────
 
     pub fn scan_persistence(&mut self) {
+        if self.replaying() {
+            self.set_status(StatusLevel::Info, "Not available while replaying a recording — this would act on the live system".into());
+            return;
+        }
         if self.ir.persistence.as_ref().is_some_and(|p| p.pending) {
             return;
         }
@@ -823,6 +897,10 @@ impl App {
     }
 
     pub fn fetch_logs(&mut self) {
+        if self.replaying() {
+            self.set_status(StatusLevel::Info, "Not available while replaying a recording — this would act on the live system".into());
+            return;
+        }
         if self.ir.logs.as_ref().is_some_and(|l| l.pending) {
             return;
         }
@@ -1371,6 +1449,10 @@ impl App {
 
     /// Snapshot of everything currently known into the case.
     pub fn collect_system(&mut self) {
+        if self.replaying() {
+            self.set_status(StatusLevel::Info, "Not available while replaying a recording — this would act on the live system".into());
+            return;
+        }
         if self.ir.timeline_dirty {
             self.rebuild_timeline();
         }
@@ -1431,6 +1513,11 @@ impl App {
         let detections = self.ir.det.store.items.clone();
         let artifacts = self.ir.artifacts.clone();
         let summaries = self.cluster_summaries();
+        if let Some(st) = self.ir.store.as_mut() {
+            st.flush();
+        }
+        let history_dir = self.ir.store.as_ref().map(|s| s.dir().to_path_buf());
+        let since = self.ir.watch_start;
         let clusters: Vec<serde_json::Value> = self
             .ir
             .clusters
@@ -1477,6 +1564,16 @@ impl App {
         };
         optional("persistence.json", persistence.is_empty(), (&persistence as &dyn erased::Ser).json(), P::live("autostart enumeration").problems(gaps(&["Persistence"])), "persistence not scanned (open the Persistence page)");
         optional("event-log.json", logs.is_empty(), (&logs as &dyn erased::Ser).json(), P::live("system event log query").problems(gaps(&["Event logs"])), "event log not loaded (open the Logs page)");
+        // The recorded event history of this session, for --replay.
+        if let Some(dir) = history_dir.as_deref() {
+            let (lines, _) = crate::store::read(dir, Some(since), None);
+            let text: String = lines
+                .into_iter()
+                .filter_map(|(t, rec)| serde_json::to_string(&crate::store::Line { t: t.to_rfc3339_opts(chrono::SecondsFormat::Millis, false), rec }).ok())
+                .map(|l| l + "\n")
+                .collect();
+            optional("events.jsonl", text.is_empty(), text, P::live("procwatch event history for this session (replay with procwatch --replay CASE)"), "no event history recorded (history = off?)");
+        }
         optional("artifacts.json", artifacts.is_empty(), (&artifacts as &dyn erased::Ser).json(), P::live("execution artifacts").problems(gaps(&["Execution artifacts"])), "execution artifacts not collected (Logs → x)");
         let note = if partial > 0 { format!(" ({partial} partial — gaps recorded in the evidence register)") } else { String::new() };
         if errors.is_empty() {
@@ -1719,6 +1816,10 @@ impl App {
     // ── quarantine ─────────────────────────────────────────────────────
 
     pub fn request_quarantine(&mut self, path: String) {
+        if self.replaying() {
+            self.set_status(StatusLevel::Info, "Not available while replaying a recording — this would act on the live system".into());
+            return;
+        }
         if !Path::new(&path).is_file() {
             self.set_status(StatusLevel::Error, format!("Not a file: {path}"));
             return;

@@ -52,6 +52,8 @@ mod response;
 pub mod deep;
 #[path = "app_workspace.rs"]
 pub mod workspace;
+#[path = "app_replay.rs"]
+mod replay;
 pub use ir::{InputPurpose, RemoteSummary};
 
 // ── enums ──────────────────────────────────────────────────────────────
@@ -669,7 +671,20 @@ impl App {
             files: None,
             file_selected: 0,
             file_offset: 0,
-            ir: ir::Ir::new(tx.clone(), &cfg.watch),
+            ir: {
+                let mut ir = ir::Ir::new(tx.clone(), &cfg.watch);
+                if cfg.history && !cfg!(test) {
+                    ir.store = crate::store::default_dir().map(crate::store::Writer::open);
+                    if let Some(s) = ir.store.as_mut() {
+                        s.write(chrono::Local::now(), crate::store::Rec::Session {
+                            host: sysinfo::System::host_name().unwrap_or_default(),
+                            version: env!("CARGO_PKG_VERSION").into(),
+                            note: "session started".into(),
+                        });
+                    }
+                }
+                ir
+            },
             baseline: baseline::default_path().and_then(|p| Baseline::load(&p).ok()),
             changes: Vec::new(),
             change_selected: 0,
@@ -716,6 +731,9 @@ impl App {
             notify: self.notify,
             rules: self.rules.iter().map(|r| r.text.clone()).collect(),
             watch: self.ir.watch_paths.clone(),
+            // Not changed from the UI; keep what the file says (a replay
+            // session runs with history off and must not save that).
+            history: Config::load().history,
         }
     }
 
@@ -988,6 +1006,23 @@ impl App {
                 exe: i.exe_path.clone(),
             });
         }
+        if let Some(st) = self.ir.store.as_mut() {
+            for e in &new_events {
+                let rec = match e.kind {
+                    EventKind::Started => crate::store::Rec::ProcStart(crate::store::ProcRec {
+                        pid: e.pid,
+                        ppid: e.ppid,
+                        start: e.start,
+                        name: e.name.clone(),
+                        exe: e.exe.clone(),
+                        cmd: e.detail.clone(),
+                        user: e.user.clone(),
+                    }),
+                    EventKind::Exited => crate::store::Rec::ProcExit { pid: e.pid, start: e.start, name: e.name.clone(), ran: e.detail.clone() },
+                };
+                st.write(e.at, rec);
+            }
+        }
         for e in new_events {
             if self.events.len() >= MAX_EVENTS {
                 self.events.pop_back();
@@ -1068,6 +1103,10 @@ impl App {
     }
 
     pub fn refresh_files(&mut self) {
+        if self.replaying() {
+            self.set_status(StatusLevel::Info, "Not available while replaying a recording — this would act on the live system".into());
+            return;
+        }
         if self.files.as_ref().is_some_and(|f| f.pending) {
             return;
         }
@@ -1167,6 +1206,10 @@ impl App {
     // ── behavior trace ─────────────────────────────────────────────────
 
     pub fn start_trace(&mut self, pid: u32) {
+        if self.replaying() {
+            self.set_status(StatusLevel::Info, "Not available while replaying a recording — this would act on the live system".into());
+            return;
+        }
         if pid == std::process::id() {
             self.set_status(StatusLevel::Error, "procwatch can't trace itself".into());
             return;
@@ -1995,6 +2038,10 @@ impl App {
     }
 
     fn run_action(&mut self, action: Action, mut pids: Vec<u32>) {
+        if self.replaying() {
+            self.set_status(StatusLevel::Info, "Not available while replaying a recording — this would act on the live system".into());
+            return;
+        }
         let me = std::process::id();
         pids.retain(|p| *p != me);
         if pids.is_empty() {
