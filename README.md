@@ -175,6 +175,9 @@ cargo build --release
 ./target/release/procwatch --offline procwatch-case-…  --artifacts ./copied-evidence   # 离线分析
 ./target/release/procwatch --check-rules        # 校验 Sigma 规则
 ./target/release/procwatch --selftest           # 测量捕获率、PID 复用保护等质量指标
+./target/release/procwatch --soak 10            # 10 分钟无界面稳定性测试
+./target/release/procwatch --replay             # 回放本机记录的事件历史
+./target/release/procwatch --run -- ./sample    # 仅限隔离分析虚拟机:启动并从第一条指令开始追踪
 ./target/release/procwatch --case procwatch-case-20261102-101500   # 继续已有案件
 ```
 
@@ -273,6 +276,36 @@ cargo build --release
 - **质量指标**:`procwatch --selftest [--json]` 在本机用无害负载测量短生命周期进程捕获率、事件顺序、PID 复用保护、文件事件延迟(本机 12 ms)和自身开销(本机约 5% CPU、16 MB);采集健康度(`H`)显示当前平台的实际验证状态。
 
 平台验证状态:macOS 已在真实系统上交互与自动测试;Linux 与 Windows 仅编译通过并通过单元测试,深度追踪的 Linux/Windows 实现尚未在真机运行。
+
+## 可信度、底层能力与特色功能(本轮)
+
+### 可信度
+- **持续集成**:`.github/workflows/ci.yml` 在 Linux、macOS、Windows 三个平台上执行:`clippy -D warnings`、全部单元测试、解析器模糊测试、`--selftest`、`--soak 2`、规则校验。Windows/Linux 的真实运行结果以 CI 为准。
+- **解析器模糊测试**(`src/fuzz.rs`):对所有读取不可信数据的解析器(PE/Mach-O/ELF、Prefetch/Xpress、ShimCache、注册表 hive、EVTX、YARA/Sigma 规则、IOC、shell 历史、base64)做确定性变异测试,要求不崩溃、单个输入 2 秒内完成。已发现并修复两个真实问题:YARA 转义序列遇到多字节 UTF-8 时崩溃;universal Mach-O 的 slice 指回自身时无限递归。运行:`cargo test --release fuzz_ -- --ignored`(`PW_FUZZ_ITERATIONS` 控制次数)。
+- **长时间稳定性**:`procwatch --soak MINUTES` 无界面运行完整流水线(采样、检测、深度追踪、时间线重建、离屏渲染所有页面),在无害的进程更替负载下记录内存、CPU 和缓冲区大小;内存持续增长或后台线程崩溃即失败。本机 3 分钟:常驻内存约 60–70 MB,预热后增长 ≤10 MB(深度追踪缓冲区填充至上限前)。
+
+### 底层能力
+- **持久事件历史**:所有观测到的事件(进程启动/退出、网络、文件、深度追踪、模块/文件快照差异、检测、自启动项变化,以及每 10 分钟一次的进程表快照)按天写入 JSON Lines,位于用户数据目录(macOS `~/Library/Application Support/procwatch/events`,Linux `~/.local/share/procwatch/events`,Windows `%LOCALAPPDATA%\\procwatch\\events`),上限 256 MB / 14 天,设置文件 `history = off` 可关闭。案件采集时会把本次会话的历史复制为 `evidence/events.jsonl`。
+- **回放**:`procwatch --replay [历史目录|案件目录|events.jsonl] [--from 时间] [--to 时间]` 在不接触现场系统的情况下打开记录,时间线、调查工作台与行为回放、图谱、某一时刻状态、检测全部可用;结束进程、隔离、采集等会作用于现场的操作在回放中被禁用。
+- **按程序建立行为基线**:按 SHA-256 记住每个程序在本机的连接目的地、子程序、非系统模块、监听端口;运行 ≥3 次且累计观察 ≥1 小时后基线成立,此后出现从未有过的行为即报 **PW-018**(低严重度,注明"在 N 次运行中首次出现")。目的地很多的程序(浏览器等)和回环地址不报新目的地。
+- **自启动项实时监控**:自启动目录有变化时 3 秒后自动重扫(另外启动 30 秒后首扫、之后每 15 分钟),新增/修改/删除进入时间线并报 **PW-019**;若当时有被深度追踪的进程打开着该配置文件,则标出写入者。
+- **更真实的事件来源**:
+  - Windows 深度追踪优先使用 ETW Microsoft-Windows-Kernel-Process(需管理员),否则每 100 ms 快照。
+  - 文件操作归属到进程:Linux 以 root 运行时使用 fanotify;macOS 以 root 运行时对被追踪进程运行 `fs_usage`。普通权限下仍按打开文件快照推断,并在采集健康度中说明。
+  - DNS 查询与连接关联:有 Sysmon(事件 22)时,把连接的地址对应到"哪个进程查询了哪个域名",优先同一进程;否则主机名来自反向解析并明确标注。
+
+### 特色功能
+- **启动并追踪**:`procwatch --run -- 程序 [参数…]` —— 程序在第一条指令前被挂起,深度追踪同步挂接后才放行(Unix:fork 后 SIGSTOP 再 exec;Windows:CREATE_SUSPENDED),程序输出写入案件日志并登记为证据,退出状态记入取证链。启动前有确认界面:**只应在可重置的隔离分析虚拟机中使用**,procwatch 观察程序,但不隔离它。
+- **行为序列规则**(`rules/behavior/*.yml`,用户规则放在设置目录的 `behavior/`):多步骤、带时间窗口和范围(同一进程树 / 同一进程 / 任意)、可捕获字段并在后续步骤引用、可计数去重。内置 7 条:写入后执行、写入脚本后由解释器执行、下载工具后从临时目录运行、移除隔离属性后运行程序、新增自启动项且其程序随后外连、短时间内大量侦察命令、shell 启动后外连。均已用无害负载实测触发。
+- **可信发布者**:在 Detect 页对检测按 `T`,只对弱信号(未签名、可写目录、外连、监听、基线新行为)信任该发布者;签名无效、攻击模式、Sigma/YARA/行为规则永不被这样屏蔽。
+- **签名信任链**:文件报告显示 macOS Gatekeeper/公证结论;Windows 显示签名类型(嵌入 / 目录)与证书链及吊销状态。
+- **标准格式导出**(Case 页 `X`):STIX 2.1 bundle(已用官方 `stix2` 库和模式校验器验证)、MISP 事件、ECS 字段的时间线 JSON Lines。
+- **命令面板**:`:` 或 `ctrl+k`,按名称模糊搜索并执行任何操作。
+
+### 仍未完成 / 未验证
+- Windows 上的 ETW、`--run`、Amcache/BAM/Prefetch 实时采集,以及 Linux 的 fanotify,仅通过类型检查和单元测试;在真实系统上的结果需要看 CI 和实际使用。
+- macOS 的 `fs_usage` 归属需要 root,本轮只测了输出解析,没有以 root 实际运行。
+- Endpoint Security 需要苹果签发的授权,未接入;macOS 上 DNS 查询日志的域名被系统脱敏,无法做进程级 DNS 关联。
 
 ## 已知的简化之处
 

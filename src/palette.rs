@@ -89,7 +89,7 @@ pub fn score(query: &str, label: &str) -> Option<i32> {
 
 pub fn matches(query: &str) -> Vec<&'static Entry> {
     let mut v: Vec<(i32, &Entry)> = ENTRIES.iter().filter_map(|e| score(query, e.label).map(|s| (s, e))).collect();
-    v.sort_by(|a, b| b.0.cmp(&a.0));
+    v.sort_by_key(|x| std::cmp::Reverse(x.0));
     v.into_iter().map(|(_, e)| e).collect()
 }
 
