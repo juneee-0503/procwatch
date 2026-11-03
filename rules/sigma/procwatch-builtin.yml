@@ -1,0 +1,214 @@
+# procwatch built-in Sigma rules. Written for procwatch; deliberately few
+# and specific. Add your own (or a rule pack) under the config folder's
+# sigma/ directory; they are loaded alongside these.
+title: Security tooling disabled from the command line
+id: pw-sigma-001
+status: test
+level: high
+description: A command turns off Gatekeeper, SIP, SELinux or Defender real-time protection.
+tags: [attack.defense_evasion, attack.t1562.001]
+logsource: { category: process_creation }
+detection:
+  macos:
+    CommandLine|contains:
+      - 'spctl --master-disable'
+      - 'spctl --global-disable'
+      - 'csrutil disable'
+  linux:
+    CommandLine|contains: 'setenforce 0'
+  windows:
+    CommandLine|contains:
+      - 'DisableRealtimeMonitoring $true'
+      - 'DisableRealtimeMonitoring 1'
+      - 'Set-MpPreference -DisableIOAVProtection'
+  condition: 1 of them
+---
+title: Quarantine attribute removed
+id: pw-sigma-002
+status: test
+level: medium
+description: xattr strips com.apple.quarantine, so Gatekeeper no longer checks the downloaded file.
+tags: [attack.defense_evasion, attack.t1553.001]
+logsource: { category: process_creation, product: macos }
+detection:
+  sel:
+    Image|endswith: '/xattr'
+    CommandLine|contains: 'com.apple.quarantine'
+  del:
+    CommandLine|contains: [' -d ', ' -c ', ' -rd ', ' -dr ']
+  condition: sel and del
+---
+title: Keychain or credential store read from the command line
+id: pw-sigma-003
+status: test
+level: high
+description: Dumps keychain secrets, the shadow file, or LSASS memory with built-in tools.
+tags: [attack.credential_access, attack.t1555.001]
+logsource: { category: process_creation }
+detection:
+  keychain:
+    CommandLine|contains:
+      - 'security dump-keychain'
+      - 'find-generic-password -w'
+      - 'find-internet-password -w'
+  shadow:
+    CommandLine|contains: ['/etc/shadow', '/etc/gshadow']
+    Image|endswith: ['/cat', '/cp', '/less', '/head', '/tail', '/base64']
+  lsass:
+    CommandLine|contains|all: ['comsvcs', 'MiniDump']
+  condition: 1 of them
+---
+title: Logs or shell history cleared
+id: pw-sigma-004
+status: test
+level: medium
+description: Commands that erase system logs or shell history.
+tags: [attack.defense_evasion, attack.t1070]
+logsource: { category: process_creation }
+detection:
+  sel:
+    CommandLine|contains:
+      - 'log erase'
+      - 'wevtutil cl '
+      - 'Clear-EventLog'
+      - 'history -c'
+      - 'rm -rf /var/log'
+      - 'unset HISTFILE'
+      - 'HISTFILE=/dev/null'
+  condition: sel
+---
+title: Volume shadow copies or recovery disabled
+id: pw-sigma-005
+status: test
+level: critical
+description: Deletes shadow copies or disables recovery, typical right before ransomware encryption.
+tags: [attack.impact, attack.t1490]
+logsource: { category: process_creation, product: windows }
+detection:
+  sel:
+    CommandLine|contains:
+      - 'vssadmin delete shadows'
+      - 'shadowcopy delete'
+      - 'recoveryenabled no'
+      - 'wbadmin delete catalog'
+  condition: sel
+---
+title: Launch agent or daemon written
+id: pw-sigma-006
+status: test
+level: medium
+description: A property list appeared or changed in a LaunchAgents/LaunchDaemons folder.
+tags: [attack.persistence, attack.t1543.001]
+logsource: { category: file_event, product: macos }
+detection:
+  sel:
+    TargetFilename|contains: ['/LaunchAgents/', '/LaunchDaemons/']
+    TargetFilename|endswith: '.plist'
+  condition: sel
+---
+title: Cron or systemd unit written
+id: pw-sigma-007
+status: test
+level: medium
+description: A file appeared in a cron or systemd unit folder.
+tags: [attack.persistence, attack.t1053.003]
+logsource: { category: file_event, product: linux }
+detection:
+  sel:
+    TargetFilename|startswith: ['/etc/cron', '/var/spool/cron', '/etc/systemd/system/', '/usr/lib/systemd/system/']
+  condition: sel
+---
+title: Outbound connection to a classic reverse-shell port
+id: pw-sigma-008
+status: test
+level: low
+description: Connects out to ports commonly used by handlers and RATs (4444, 1337, 31337, 6666-6667).
+tags: [attack.command_and_control, attack.t1571]
+logsource: { category: network_connection }
+detection:
+  sel:
+    Initiated: 'true'
+    DestinationPort: [4444, 1337, 31337, 6666, 6667]
+  condition: sel
+---
+title: Security event log cleared
+id: pw-sigma-009
+status: stable
+level: high
+description: Event 1102 (Security) or 104 (System) — an audit log was cleared.
+tags: [attack.defense_evasion, attack.t1070.001]
+logsource: { product: windows }
+detection:
+  sec:
+    Channel: Security
+    EventID: 1102
+  sys:
+    Channel: System
+    EventID: 104
+  condition: 1 of them
+---
+title: Service installed
+id: pw-sigma-010
+status: test
+level: medium
+description: System event 7045 — a new service was installed.
+tags: [attack.persistence, attack.t1543.003]
+logsource: { product: windows, service: system }
+detection:
+  sel:
+    EventID: 7045
+  condition: sel
+---
+title: Scheduled task created
+id: pw-sigma-011
+status: test
+level: medium
+description: Security event 4698 — a scheduled task was created.
+tags: [attack.persistence, attack.t1053.005]
+logsource: { product: windows, service: security }
+detection:
+  sel:
+    EventID: 4698
+  condition: sel
+---
+title: Microsoft Defender detected malware
+id: pw-sigma-012
+status: stable
+level: high
+description: Defender events 1116/1117 — malware detected or action taken.
+tags: [attack.execution]
+logsource: { product: windows, service: windefend }
+detection:
+  sel:
+    EventID: [1116, 1117]
+  condition: sel
+---
+title: Suspicious PowerShell script block
+id: pw-sigma-013
+status: test
+level: high
+description: Script block logging (4104) captured AMSI bypass, in-memory download or credential-dumping code.
+tags: [attack.execution, attack.t1059.001]
+logsource: { product: windows, category: ps_script }
+detection:
+  sel:
+    ScriptBlockText|contains:
+      - 'AmsiUtils'
+      - 'amsiInitFailed'
+      - 'DownloadString('
+      - 'Invoke-Mimikatz'
+      - 'sekurlsa::'
+      - 'FromBase64String('
+  condition: sel
+---
+title: Repeated failed logons
+id: pw-sigma-014
+status: test
+level: low
+description: Security event 4625 — a logon failed (look for many in a row).
+tags: [attack.credential_access, attack.t1110]
+logsource: { product: windows, service: security }
+detection:
+  sel:
+    EventID: 4625
+  condition: sel

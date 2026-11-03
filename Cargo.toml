@@ -1,0 +1,47 @@
+[package]
+name = "procwatch"
+version = "0.1.0"
+edition = "2021"
+description = "Cross-platform (Windows/macOS, Linux bonus) TUI process monitor"
+license = "MIT"
+
+[[bin]]
+name = "procwatch"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.28"
+crossterm = "0.28"
+sysinfo = "0.31"
+netstat2 = "0.11"
+anyhow = "1"
+chrono = "0.4"
+unicode-width = "0.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+sha1 = "0.11.0"
+md-5 = "0.11.0"
+plist = "1.10.3"
+dns-lookup = "4.0.2"
+notify = { version = "8.2.1", default-features = false, features = ["macos_fsevent"] }
+evtx = { version = "0.15.1", default-features = false }
+serde_yaml = "0.9"
+memchr = "2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Memory",
+] }
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+codegen-units = 1

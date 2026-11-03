@@ -1,0 +1,10 @@
+/target
+# Investigation cases hold evidence from the machine they ran on.
+procwatch-case-*/
+procwatch-timeline-*.csv
+procwatch-trace-*
+*.tmp
+.idea/
+.DS_Store
+/fuzz/artifacts
+/fuzz/corpus
