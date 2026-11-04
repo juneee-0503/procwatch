@@ -219,17 +219,22 @@ mod tests {
     fn checks_and_hashes_in_background() {
         let intel = Intel::new();
         let me = std::env::current_exe().unwrap().display().to_string();
-        intel.request(&me, true);
-        for _ in 0..200 {
-            if intel.get(&me).is_some_and(|i| i.sha256.is_some()) {
-                break;
+        // Generous: on Windows the signature check starts PowerShell, which
+        // takes tens of seconds on a busy CI runner.
+        let wait = |done: &dyn Fn() -> bool| {
+            for _ in 0..1200 {
+                if done() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(50));
             }
-            thread::sleep(Duration::from_millis(50));
-        }
+        };
+        intel.request(&me, true);
+        wait(&|| intel.get(&me).is_some_and(|i| i.sha256.is_some()));
         let info = intel.get(&me).expect("examined");
         assert!(info.exists && info.sha256.as_deref().is_some_and(|h| h.len() == 64));
         intel.request("/nonexistent/procwatch", false);
-        thread::sleep(Duration::from_millis(300));
+        wait(&|| intel.get("/nonexistent/procwatch").is_some());
         assert!(!intel.get("/nonexistent/procwatch").unwrap().exists);
     }
 }
