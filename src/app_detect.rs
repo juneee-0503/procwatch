@@ -150,6 +150,7 @@ impl App {
     /// Signature checks for new executables, then host rules for every
     /// process (cheap: no I/O, everything comes from caches).
     pub(super) fn triage_all(&mut self) {
+        let mut lap = crate::perf::Lap::new();
         let mut paths: HashSet<&str> = HashSet::new();
         for n in self.tree.nodes.values() {
             if let Some(p) = n.info.exe_path.as_deref() {
@@ -159,7 +160,9 @@ impl App {
             }
         }
         let intel = self.ir.intel.snapshot();
+        lap.mark("triage: intel");
         self.sigma_on_processes(&intel);
+        lap.mark("triage: sigma");
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let empty = Vec::new();
         let mut scores: HashMap<u32, crate::triage::Assessment> = HashMap::with_capacity(self.tree.nodes.len());
@@ -188,6 +191,7 @@ impl App {
             host_hits.extend(a.hits.iter().filter(|h| h.id.starts_with("PW-")).map(|h| (*pid, n.info.start_time_secs, h.clone())));
             scores.insert(*pid, a);
         }
+        lap.mark("triage: assess");
         let t = Local::now();
         let mut seen: HashSet<(String, String)> = HashSet::with_capacity(host_hits.len());
         for (pid, start, h) in host_hits {
@@ -196,6 +200,7 @@ impl App {
             self.record_detection(&h, subject, self.label(pid), Some(pid), "host rule", t);
         }
         self.ir.det.store.settle("host rule", &seen);
+        lap.mark("triage: record");
         for (pid, n) in self.tree.nodes.iter_mut() {
             n.info.risk = scores.get(pid).map_or(0, |a| a.score);
             n.info.signed = match n.info.exe_path.as_deref().and_then(|p| intel.get(p)).map(|e| e.sig) {

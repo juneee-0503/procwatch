@@ -784,19 +784,26 @@ impl App {
     }
 
     pub(super) fn ir_on_snapshot(&mut self) {
+        let mut lap = crate::perf::Lap::new();
         self.store_snapshot();
         if let Some(st) = self.ir.store.as_mut() {
             st.flush();
         }
+        lap.mark("investigation: store");
         self.update_network_intel();
+        lap.mark("investigation: network intel");
         self.triage_all();
+        lap.mark("investigation: triage");
         self.response_on_snapshot();
         self.deep_auto_enroll();
         self.deep_tick();
         self.launch_tick();
+        lap.mark("investigation: deep trace");
         self.update_profiles();
+        lap.mark("investigation: profiles");
         if self.mode == Mode::Workspace {
             self.refresh_workspace();
+            lap.mark("investigation: workspace");
         }
         // System-wide socket changes become network events.
         let now: HashSet<(u32, Connection)> =
@@ -843,6 +850,7 @@ impl App {
             }
         }
         self.ir.prev_sockets = Some(now);
+        lap.mark("investigation: sockets");
 
         // Ask for reverse names of remote peers (cached, background).
         let remotes: Vec<String> = self
@@ -1310,6 +1318,8 @@ impl App {
     // ── timeline ───────────────────────────────────────────────────────
 
     pub fn rebuild_timeline(&mut self) {
+        let mut lap = crate::perf::Lap::new();
+        let mut whole = crate::perf::Lap::new();
         // New events arrive at the top; keep the selected event (and its
         // position on screen) where it is instead of letting it drift.
         let anchor = self.visible_timeline().get(self.ir.tl_selected).map(|i| self.ir.timeline[*i].id);
@@ -1547,7 +1557,9 @@ impl App {
             }
         }
         // Newest first; stable so same-second events keep source order.
+        lap.mark("timeline: gather");
         v.sort_by_key(|e| std::cmp::Reverse(e.time));
+        lap.mark("timeline: sort");
         let clusters = {
             let evs: Vec<crate::correlate::Ev> = v
                 .iter()
@@ -1571,10 +1583,13 @@ impl App {
                 v[*i].cluster = Some(c.id);
             }
         }
+        lap.mark("timeline: cluster");
         let behaviour = if self.ir.det.behavior.is_empty() { Vec::new() } else { crate::behave::evaluate(&self.ir.det.behavior, &behaviour_events(&v)) };
+        lap.mark("timeline: behaviour");
         self.ir.timeline = v;
         self.ir.clusters = clusters;
         self.ir.timeline_dirty = false;
+        whole.mark("timeline: rebuild total");
         let mut recorded = false;
         for m in behaviour {
             let first = m.events.first().cloned().unwrap_or_default();

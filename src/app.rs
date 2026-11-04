@@ -876,6 +876,7 @@ impl App {
     }
 
     fn on_snapshot(&mut self, snap: sampler::Snapshot) {
+        let mut lap = crate::perf::Lap::new();
         let first = !self.loaded;
         self.seq += 1;
         let old = std::mem::replace(&mut self.tree, snap.tree);
@@ -885,6 +886,7 @@ impl App {
         self.loaded = true;
 
         let (started, exited) = if first { (Vec::new(), Vec::new()) } else { self.record_events(&old) };
+        lap.mark("snapshot: record events");
 
         let seq = self.seq;
         let tree = &self.tree;
@@ -911,6 +913,7 @@ impl App {
                 self.proc_hist.get(pid).and_then(|h| rules::growth_per_min(&h.mem, interval, min_samples));
         }
 
+        lap.mark("snapshot: histories");
         // Alert rules.
         let started_refs: Vec<&ProcessInfo> = started.iter().collect();
         let exited_refs: Vec<&ProcessInfo> = exited.iter().collect();
@@ -919,6 +922,7 @@ impl App {
         let growth = |pid: u32| tree.get(pid).and_then(|n| n.info.mem_growth);
         let fired = self.engine.evaluate(&self.rules, tree, &self.connections, &changes, &growth);
         self.add_alerts(fired);
+        lap.mark("snapshot: alert rules");
 
         // Baseline comparison.
         if let Some(base) = &self.baseline {
@@ -934,7 +938,9 @@ impl App {
             }
         }
         self.follow_trace();
+        lap.mark("snapshot: baseline and trace");
         self.ir_on_snapshot();
+        lap.mark("snapshot: investigation");
 
         let s = &self.stats;
         let pct = |u: u64, t: u64| if t == 0 { 0.0 } else { u as f64 * 100.0 / t as f64 };
@@ -974,7 +980,11 @@ impl App {
             self.set_status(StatusLevel::Error, format!("{name} is still running — press X to force quit"));
         }
 
+        lap.mark("snapshot: housekeeping");
         self.rebuild();
+        lap.mark("snapshot: rebuild view");
+        drop(old);
+        lap.mark("snapshot: free old tree");
     }
 
     /// Log starts/exits since `old`; returns them for the rule engine.

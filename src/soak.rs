@@ -5,7 +5,6 @@
 //! time. Fails if memory keeps growing after warm-up or a worker panics.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::collections::BTreeMap;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -18,32 +17,7 @@ use crate::sampler::{self, SamplerCtl};
 /// What the main loop is doing right now, for the watchdog.
 static PHASE: Mutex<String> = Mutex::new(String::new());
 static BEAT: AtomicU64 = AtomicU64::new(0);
-/// Per message type: count, total and longest handling time.
-static HANDLED: Mutex<BTreeMap<&'static str, (u64, Duration, Duration)>> = Mutex::new(BTreeMap::new());
-
-fn record_handled(name: &'static str, took: Duration) {
-    if let Ok(mut h) = HANDLED.lock() {
-        let e = h.entry(name).or_default();
-        e.0 += 1;
-        e.1 += took;
-        e.2 = e.2.max(took);
-    }
-}
-
-/// Where message-handling time went, largest first.
-fn handled_report() -> Vec<String> {
-    let Ok(h) = HANDLED.lock() else { return Vec::new() };
-    let mut rows: Vec<_> = h.iter().collect();
-    rows.sort_by_key(|(_, v)| std::cmp::Reverse(v.1));
-    rows.iter()
-        .take(6)
-        .map(|(name, (n, total, max))| format!("  {name:<12} {n:>7} msgs  {:>9.1} s total  {:>8.1} ms longest", total.as_secs_f64(), max.as_secs_f64() * 1000.0))
-        .collect()
-}
-
-fn handled_total() -> Duration {
-    HANDLED.lock().map(|h| h.values().map(|v| v.1).sum()).unwrap_or_default()
-}
+const REPORT_ROWS: usize = 16;
 
 fn phase(p: impl Into<String>) {
     if let Ok(mut s) = PHASE.lock() {
@@ -71,7 +45,7 @@ fn watchdog(limit: Duration, deadline: Instant) {
                 let p = PHASE.lock().map(|s| s.clone()).unwrap_or_default();
                 let why = if stuck { format!("main loop stuck for {} s", since.elapsed().as_secs()) } else { "still running past its end".to_string() };
                 println!("soak: FAILED — {why}, last in: {p}");
-                for l in handled_report() {
+                for l in crate::perf::report(REPORT_ROWS) {
                     println!("{l}");
                 }
                 std::process::exit(3);
@@ -147,33 +121,35 @@ fn stop(w: &mut Workload) {
     }
 }
 
+/// `msg: ` prefixes the timing names of whole messages.
 fn msg_name(m: &crate::sampler::WorkerMsg) -> &'static str {
     use crate::sampler::WorkerMsg::*;
     match m {
-        Snapshot(_) => "Snapshot",
-        Gpu(_) => "Gpu",
-        Inspected { .. } => "Inspected",
-        Fs(_) => "Fs",
-        Persistence(_) => "Persistence",
-        Logs(_) => "Logs",
-        FileReport(_) => "FileReport",
-        Artifacts { .. } => "Artifacts",
-        Yara { .. } => "Yara",
-        Memory { .. } => "Memory",
-        Deep(_) => "Deep",
-        DeepSnap { .. } => "DeepSnap",
-        Error(_) => "Error",
-        Evidence(_) => "Evidence",
-        Stack { .. } => "Stack",
-        FileList(_) => "FileList",
-        TraceFiles(_) => "TraceFiles",
-        Found { .. } => "Found",
-        ActionDone { .. } => "ActionDone",
+        Snapshot(_) => "msg: Snapshot",
+        Gpu(_) => "msg: Gpu",
+        Inspected { .. } => "msg: Inspected",
+        Fs(_) => "msg: Fs",
+        Persistence(_) => "msg: Persistence",
+        Logs(_) => "msg: Logs",
+        FileReport(_) => "msg: FileReport",
+        Artifacts { .. } => "msg: Artifacts",
+        Yara { .. } => "msg: Yara",
+        Memory { .. } => "msg: Memory",
+        Deep(_) => "msg: Deep",
+        DeepSnap { .. } => "msg: DeepSnap",
+        Error(_) => "msg: Error",
+        Evidence(_) => "msg: Evidence",
+        Stack { .. } => "msg: Stack",
+        FileList(_) => "msg: FileList",
+        TraceFiles(_) => "msg: TraceFiles",
+        Found { .. } => "msg: Found",
+        ActionDone { .. } => "msg: ActionDone",
     }
 }
 
 pub fn run(minutes: u64) -> i32 {
     let minutes = minutes.clamp(1, 24 * 60);
+    crate::perf::enable();
     // Record worker panics (they are caught per worker) instead of printing.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -226,7 +202,7 @@ pub fn run(minutes: u64) -> i32 {
             phase(format!("handling worker message {name}"));
             let t = Instant::now();
             app.on_worker_msg(msg);
-            record_handled(name, t.elapsed());
+            crate::perf::record(name, t.elapsed());
         });
         cut_short += drained.more as u64;
         phase("loop top");
@@ -235,7 +211,9 @@ pub fn run(minutes: u64) -> i32 {
         }
         if last_tick.elapsed() >= Duration::from_millis(250) {
             phase(format!("on_tick (page {:?})", app.tab));
+            let t = Instant::now();
             app.on_tick();
+            crate::perf::record("on_tick", t.elapsed());
             last_tick = Instant::now();
         }
         if !traced {
@@ -253,15 +231,19 @@ pub fn run(minutes: u64) -> i32 {
                 if let Some(c) = child_pid {
                     phase("opening the workspace");
                     let k = app.proc_key(c);
+                    let t = Instant::now();
                     app.open_workspace_for(k);
+                    crate::perf::record("open workspace", t.elapsed());
                 }
             } else if frames % 7 == 5 {
                 app.mode = crate::app::Mode::Normal;
             }
             phase(format!("rendering page {:?} (mode {})", app.tab, if app.mode == crate::app::Mode::Normal { "normal" } else { "overlay" }));
+            let t = Instant::now();
             if let Err(e) = term.draw(|f| crate::ui::draw(f, &mut app)) {
                 panics.push(format!("render: {e}"));
             }
+            crate::perf::record("render a page", t.elapsed());
             frames += 1;
             last_draw = Instant::now();
         }
@@ -295,9 +277,10 @@ pub fn run(minutes: u64) -> i32 {
     let growth = rss - base;
     let limit = (base * 0.5).max(64.0);
     println!("frames rendered: {frames} · final RSS {rss:.1} MB · growth after warm-up {growth:+.1} MB (limit {limit:.0} MB)");
-    let busy = handled_total().as_secs_f64() / start.elapsed().as_secs_f64().max(1.0);
+    let busy = crate::perf::total("msg: ").as_secs_f64() / start.elapsed().as_secs_f64().max(1.0);
     println!("message handling: {:.0}% of the run · drain cut short {cut_short} times", busy * 100.0);
-    for l in handled_report() {
+    println!("slowest work (by longest single run):");
+    for l in crate::perf::report(REPORT_ROWS) {
         println!("{l}");
     }
     for p in &panics {

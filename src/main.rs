@@ -38,6 +38,7 @@ mod palette;
 mod persistence;
 mod process;
 mod profile;
+mod perf;
 mod sampler;
 mod selftest;
 mod soak;

@@ -119,8 +119,12 @@ pub fn spawn_sampler(tx: Sender<WorkerMsg>, ctl: Arc<SamplerCtl>) -> std::io::Re
                 // A failure in one sample (e.g. an OS API returning
                 // something unexpected) must not stop monitoring.
                 let sample = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let mut lap = crate::perf::Lap::new();
                     let (tree, stats) = monitor.snapshot();
-                    Snapshot { tree, stats, connections: network::connections_by_pid() }
+                    lap.mark("sampler: processes");
+                    let connections = network::connections_by_pid();
+                    lap.mark("sampler: connections");
+                    Snapshot { tree, stats, connections }
                 }));
                 let msg = match sample {
                     Ok(snap) => WorkerMsg::Snapshot(Box::new(snap)),
