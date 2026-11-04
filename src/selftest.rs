@@ -9,8 +9,9 @@
 //! - file-change latency in a watched folder
 //! - procwatch's own CPU and memory while sampling
 
+use std::collections::HashMap;
 #[cfg(unix)]
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -165,6 +166,84 @@ fn pid_reuse(r: &mut Report) {
     r.checked_action_worked = Some(ok == Outcome::Done);
 }
 
+/// Windows: a cmd.exe parent starting four `cmd /c exit` children (tens of
+/// milliseconds each) and two `ping -n 3 127.0.0.1` (~2 s each), after a
+/// first ping that gives the watcher time to attach.
+#[cfg(windows)]
+fn capture_windows(r: &mut Report) {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+    let (tx, rx) = std::sync::mpsc::channel();
+    let Some(w) = crate::deeptrace::Watcher::start(tx) else {
+        r.notes.push("deep trace watcher could not start".into());
+        return;
+    };
+    r.deep_trace_method = w.method.into();
+    let script = "ping -n 2 127.0.0.1 >NUL & cmd /c exit & cmd /c exit & cmd /c exit & cmd /c exit & ping -n 3 127.0.0.1 >NUL & ping -n 3 127.0.0.1 >NUL";
+    let mut parent = match std::process::Command::new("cmd").args(["/C", script]).stdout(std::process::Stdio::null()).spawn() {
+        Ok(p) => p,
+        Err(e) => {
+            r.notes.push(format!("couldn't start the test workload: {e}"));
+            return;
+        }
+    };
+    let ppid = parent.id();
+    w.watch(ppid);
+    let interval = Duration::from_millis(r.sampling_interval_ms);
+    let mut sys = System::new();
+    let mut sampled: HashMap<u32, String> = HashMap::new();
+    let started = Instant::now();
+    loop {
+        sys.refresh_processes_specifics(ProcessesToUpdate::All, ProcessRefreshKind::new());
+        for (pid, p) in sys.processes() {
+            if p.parent().map(|x| x.as_u32()) == Some(ppid) {
+                sampled.insert(pid.as_u32(), p.name().to_string_lossy().to_lowercase());
+            }
+        }
+        if parent.try_wait().ok().flatten().is_some() || started.elapsed() > Duration::from_secs(60) {
+            break;
+        }
+        std::thread::sleep(interval);
+    }
+    let mut deep: Vec<crate::deeptrace::DtEvent> = Vec::new();
+    let until = Instant::now() + Duration::from_millis(800);
+    while Instant::now() < until {
+        if let Ok(crate::sampler::WorkerMsg::Deep(evs)) = rx.recv_timeout(Duration::from_millis(100)) {
+            deep.extend(evs);
+        }
+    }
+    let spawned: HashMap<u32, String> = deep
+        .iter()
+        .filter(|e| e.kind == crate::deeptrace::DtKind::Spawn && e.ppid == Some(ppid))
+        .map(|e| (e.pid, e.path.as_deref().and_then(|p| p.rsplit('\\').next()).unwrap_or("").to_lowercase()))
+        .collect();
+    let count = |m: &HashMap<u32, String>, n: &str| m.values().filter(|v| v.as_str() == n).count();
+    r.capture.push(Capture { lifetime: "~30 ms (cmd)".into(), launched: 4, sampled: count(&sampled, "cmd.exe"), deep_trace: count(&spawned, "cmd.exe") });
+    r.capture.push(Capture { lifetime: "1–2 s (ping)".into(), launched: 3, sampled: count(&sampled, "ping.exe"), deep_trace: count(&spawned, "ping.exe") });
+    let unnamed = spawned.values().filter(|v| v.is_empty()).count();
+    if unnamed > 0 {
+        r.notes.push(format!("{unnamed} child process(es) were seen by deep trace but exited before their image path could be read"));
+    }
+}
+
+#[cfg(windows)]
+fn pid_reuse_windows(r: &mut Report) {
+    use crate::process::actions::{apply_checked, process_exists, Action, Outcome, Sig};
+    let Ok(mut child) = std::process::Command::new("ping").args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn() else { return };
+    let pid = child.id();
+    std::thread::sleep(Duration::from_millis(300));
+    let Some(start) = crate::process::native::start_time(pid) else {
+        r.notes.push("couldn't read the test process's start time".into());
+        let _ = child.kill();
+        return;
+    };
+    let stale = apply_checked(pid, start.saturating_sub(3600), Action::Signal(Sig::Kill));
+    r.pid_reuse_refused = Some(matches!(stale, Outcome::PidReused { .. }));
+    r.pid_reuse_target_survived = Some(process_exists(pid) && child.try_wait().ok().flatten().is_none());
+    let ok = apply_checked(pid, start, Action::Signal(Sig::Kill));
+    let _ = child.wait();
+    r.checked_action_worked = Some(ok == Outcome::Done);
+}
+
 fn file_latency(r: &mut Report) {
     let dir = std::env::temp_dir().join(format!("procwatch-selftest-{}", std::process::id()));
     if std::fs::create_dir_all(&dir).is_err() {
@@ -223,8 +302,11 @@ pub fn run(json: bool) -> i32 {
         capture(&mut r);
         pid_reuse(&mut r);
     }
-    #[cfg(not(unix))]
-    r.notes.push("capture and PID-reuse tests use /bin/sh and are not run on this platform yet".into());
+    #[cfg(windows)]
+    {
+        capture_windows(&mut r);
+        pid_reuse_windows(&mut r);
+    }
     file_latency(&mut r);
     own_cost(&mut r);
     if json {
