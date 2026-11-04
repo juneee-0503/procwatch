@@ -602,10 +602,8 @@ mod imp {
         units(&mut items, Path::new("/etc/systemd/system"), "system");
         units(&mut items, &h.join(".config/systemd/user"), "user");
 
-        for f in ["/etc/crontab"] {
-            if let Ok(t) = fs::read_to_string(f) {
-                cron_lines(&mut items, &t, f, "system", true);
-            }
+        if let Ok(t) = fs::read_to_string("/etc/crontab") {
+            cron_lines(&mut items, &t, "/etc/crontab", "system", true);
         }
         if let Ok(entries) = fs::read_dir("/etc/cron.d") {
             for e in entries.flatten() {

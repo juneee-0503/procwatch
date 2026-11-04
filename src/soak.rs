@@ -4,7 +4,7 @@
 //! process-churn workload, and report memory, CPU and buffer sizes over
 //! time. Fails if memory keeps growing after warm-up or a worker panics.
 
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
@@ -13,6 +13,38 @@ use ratatui::{backend::TestBackend, Terminal};
 use crate::app::{App, Tab};
 use crate::config::Config;
 use crate::sampler::{self, SamplerCtl};
+
+/// What the main loop is doing right now, for the watchdog.
+static PHASE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+static BEAT: AtomicU64 = AtomicU64::new(0);
+
+fn phase(p: impl Into<String>) {
+    if let Ok(mut s) = PHASE.lock() {
+        *s = p.into();
+    }
+    BEAT.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Fail fast with a diagnosis if the loop stops making progress, instead of
+/// hanging until an outer timeout.
+fn watchdog(limit: Duration) {
+    let _ = std::thread::Builder::new().name("soak-watchdog".into()).spawn(move || {
+        let mut last = BEAT.load(Ordering::Relaxed);
+        let mut since = Instant::now();
+        loop {
+            std::thread::sleep(Duration::from_secs(5));
+            let now = BEAT.load(Ordering::Relaxed);
+            if now != last {
+                last = now;
+                since = Instant::now();
+            } else if since.elapsed() >= limit {
+                let p = PHASE.lock().map(|s| s.clone()).unwrap_or_default();
+                println!("soak: FAILED — main loop stuck for {} s in: {p}", since.elapsed().as_secs());
+                std::process::exit(3);
+            }
+        }
+    });
+}
 
 struct Sample {
     minute: f64,
@@ -61,6 +93,31 @@ fn stop(pid: u32) {
     let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).output();
 }
 
+fn msg_name(m: &crate::sampler::WorkerMsg) -> &'static str {
+    use crate::sampler::WorkerMsg::*;
+    match m {
+        Snapshot(_) => "Snapshot",
+        Gpu(_) => "Gpu",
+        Inspected { .. } => "Inspected",
+        Fs(_) => "Fs",
+        Persistence(_) => "Persistence",
+        Logs(_) => "Logs",
+        FileReport(_) => "FileReport",
+        Artifacts { .. } => "Artifacts",
+        Yara { .. } => "Yara",
+        Memory { .. } => "Memory",
+        Deep(_) => "Deep",
+        DeepSnap { .. } => "DeepSnap",
+        Error(_) => "Error",
+        Evidence(_) => "Evidence",
+        Stack { .. } => "Stack",
+        FileList(_) => "FileList",
+        TraceFiles(_) => "TraceFiles",
+        Found { .. } => "Found",
+        ActionDone { .. } => "ActionDone",
+    }
+}
+
 pub fn run(minutes: u64) -> i32 {
     let minutes = minutes.clamp(1, 24 * 60);
     // Record worker panics (they are caught per worker) instead of printing.
@@ -100,16 +157,20 @@ pub fn run(minutes: u64) -> i32 {
     let mut frames = 0u64;
     let mut panics = Vec::new();
     let tabs = Tab::ALL;
+    watchdog(Duration::from_secs(90));
     println!("soak: {minutes} min, sampling every 1 s, churn workload {}", if child.is_some() { "running" } else { "unavailable" });
     println!("{:>7} {:>9} {:>6} {:>9} {:>7} {:>7} {:>11}", "minute", "RSS MB", "CPU%", "timeline", "net", "deep", "detections");
     while Instant::now() < end {
         while let Ok(msg) = rx.try_recv() {
+            phase(format!("handling worker message {}", msg_name(&msg)));
             app.on_worker_msg(msg);
         }
+        phase("loop top");
         if let Some(m) = crate::WORKER_PANIC.lock().ok().and_then(|mut m| m.take()) {
             panics.push(m);
         }
         if last_tick.elapsed() >= Duration::from_millis(250) {
+            phase(format!("on_tick (page {:?})", app.tab));
             app.on_tick();
             last_tick = Instant::now();
         }
@@ -126,12 +187,14 @@ pub fn run(minutes: u64) -> i32 {
             app.tab = tabs[(frames as usize) % tabs.len()];
             if frames % 7 == 3 {
                 if let Some(c) = child {
+                    phase("opening the workspace");
                     let k = app.proc_key(c);
                     app.open_workspace_for(k);
                 }
             } else if frames % 7 == 5 {
                 app.mode = crate::app::Mode::Normal;
             }
+            phase(format!("rendering page {:?} (mode {})", app.tab, if app.mode == crate::app::Mode::Normal { "normal" } else { "overlay" }));
             if let Err(e) = term.draw(|f| crate::ui::draw(f, &mut app)) {
                 panics.push(format!("render: {e}"));
             }
