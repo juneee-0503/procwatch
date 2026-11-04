@@ -149,6 +149,14 @@ impl App {
 
     /// Signature checks for new executables, then host rules for every
     /// process (cheap: no I/O, everything comes from caches).
+    /// PW-020 needs the environment, which only an inspection reads.
+    pub(super) fn check_preload(&mut self, pid: u32, start: u64, info: &crate::inspect::DeepInfo) {
+        let Ok(env) = &info.environment else { return };
+        let (Some(evidence), Some(def)) = (crate::triage::preload_evidence(env), crate::triage::rule("PW-020")) else { return };
+        let hit = RuleHit::from_def(def, evidence);
+        self.record_detection_pub(&hit, Entity::Process(ProcKey { pid, start }), self.label(pid), Some(pid), "inspection");
+    }
+
     pub(super) fn triage_all(&mut self) {
         let mut lap = crate::perf::Lap::new();
         let mut paths: HashSet<&str> = HashSet::new();
@@ -638,7 +646,7 @@ impl App {
             match &self.ir.deep.watcher {
                 Some(w) => format!(
                     "{} · {live} live / {enrolled} traced instances · {} lifecycle events{} · modules every 20 s, open files every 3 s",
-                    w.method,
+                    w.method(),
                     self.ir.deep.events.len(),
                     if self.ir.deep.dropped > 0 { format!(", {} older events dropped (buffer full)", self.ir.deep.dropped) } else { String::new() }
                 ),

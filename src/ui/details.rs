@@ -136,7 +136,7 @@ fn overview(app: &App, info: &ProcessInfo, width: usize) -> Vec<Line<'static>> {
     let mem_pct = ratio(info.mem(), app.stats.mem_total) * 100.0;
     let sockets = app.connections.get(&info.pid).map_or(0, |c| c.len());
 
-    let left = vec![
+    let mut left = vec![
         kv("Parent", parent),
         kv("Children", val(children.to_string())),
         // The inspector's owner lookup covers processes sysinfo can't attribute.
@@ -151,6 +151,9 @@ fn overview(app: &App, info: &ProcessInfo, width: usize) -> Vec<Line<'static>> {
         }),
         kv("Started", started),
     ];
+    for (k, v) in deep.map(|d| d.security.as_slice()).unwrap_or_default() {
+        left.push(kv(k, val(v.clone())));
+    }
     let right = vec![
         kv("CPU", vec![Span::raw(format!("{:.1}%", info.cpu_usage_pct)), muted(format!("  avg {cpu_avg:.1}%"))]),
         kv("Memory", vec![Span::raw(human_bytes(info.mem())), muted(format!("  {mem_pct:.1}% of RAM"))]),

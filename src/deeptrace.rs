@@ -70,14 +70,12 @@ pub enum Cmd {
 /// Handle to the watcher thread.
 pub struct Watcher {
     tx: Sender<Cmd>,
-    pub method: &'static str,
 }
 
 impl Watcher {
     /// Start the watcher; events are delivered through `out` in batches.
     pub fn start(out: Sender<crate::sampler::WorkerMsg>) -> Option<Watcher> {
         let (tx, rx) = std::sync::mpsc::channel();
-        let method = imp::METHOD;
         std::thread::Builder::new()
             .name("deeptrace".into())
             .spawn(move || {
@@ -87,7 +85,14 @@ impl Watcher {
                 }
             })
             .ok()?;
-        Some(Watcher { tx, method })
+        #[cfg(target_os = "linux")]
+        imp::wait_ready();
+        Some(Watcher { tx })
+    }
+
+    /// What is in use right now; Linux picks once its thread has started.
+    pub fn method(&self) -> &'static str {
+        imp::method()
     }
 
     pub fn watch(&self, pid: u32) {
@@ -139,7 +144,9 @@ fn drain(rx: &Receiver<Cmd>, mut f: impl FnMut(Cmd)) -> bool {
 mod imp {
     use super::*;
 
-    pub const METHOD: &str = "kqueue process notifications";
+    pub fn method() -> &'static str {
+        "kqueue process notifications"
+    }
 
     fn path(pid: u32) -> Option<String> {
         let mut buf = vec![0u8; 4096];
@@ -277,11 +284,229 @@ mod imp {
     }
 }
 
+/// The kernel's process event connector (`cn_proc`), as it appears on a
+/// netlink socket. Parsing is kept apart from the socket so it can be
+/// tested on any platform.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod cn_proc {
+    #[derive(Debug, PartialEq, Eq)]
+    pub enum Ev {
+        Fork { parent: u32, child: u32 },
+        Exec { pid: u32 },
+        Exit { pid: u32 },
+    }
+
+    const NLMSG_HDR: usize = 16;
+    const CN_MSG: usize = 20;
+    const EVENT_HDR: usize = 16;
+    const FORK: u32 = 0x0000_0001;
+    const EXEC: u32 = 0x0000_0002;
+    const EXIT: u32 = 0x8000_0000;
+
+    fn u32_at(b: &[u8], at: usize) -> Option<u32> {
+        Some(u32::from_ne_bytes(b.get(at..at + 4)?.try_into().ok()?))
+    }
+
+    /// Every process event in one datagram. Threads are dropped: only
+    /// events where the thread is its group's leader describe a process.
+    pub fn parse(mut buf: &[u8]) -> Vec<Ev> {
+        let mut out = Vec::new();
+        while let Some(len) = u32_at(buf, 0).map(|l| l as usize) {
+            if len < NLMSG_HDR || len > buf.len() {
+                break;
+            }
+            let msg = &buf[..len];
+            let at = NLMSG_HDR + CN_MSG;
+            let data = at + EVENT_HDR;
+            match u32_at(msg, at) {
+                Some(FORK) => {
+                    if let (Some(tgid), Some(child), Some(leader)) = (u32_at(msg, data + 4), u32_at(msg, data + 8), u32_at(msg, data + 12)) {
+                        if child == leader {
+                            out.push(Ev::Fork { parent: tgid, child });
+                        }
+                    }
+                }
+                Some(EXEC) => {
+                    if let Some(tgid) = u32_at(msg, data + 4) {
+                        out.push(Ev::Exec { pid: tgid });
+                    }
+                }
+                Some(EXIT) => {
+                    if let (Some(pid), Some(tgid)) = (u32_at(msg, data), u32_at(msg, data + 4)) {
+                        if pid == tgid {
+                            out.push(Ev::Exit { pid });
+                        }
+                    }
+                }
+                _ => {}
+            }
+            let next = (len + 3) & !3;
+            if next >= buf.len() {
+                break;
+            }
+            buf = &buf[next..];
+        }
+        out
+    }
+
+    /// The message that subscribes a socket to process events.
+    pub fn listen_message() -> Vec<u8> {
+        const NLMSG_DONE: u16 = 3;
+        const CN_IDX_PROC: u32 = 1;
+        const CN_VAL_PROC: u32 = 1;
+        const MCAST_LISTEN: u32 = 1;
+        let total = (NLMSG_HDR + CN_MSG + 4) as u32;
+        let mut m = Vec::with_capacity(total as usize);
+        m.extend(total.to_ne_bytes());
+        m.extend(NLMSG_DONE.to_ne_bytes());
+        m.extend(0u16.to_ne_bytes()); // flags
+        m.extend(0u32.to_ne_bytes()); // seq
+        m.extend(0u32.to_ne_bytes()); // pid: assigned by the kernel
+        m.extend(CN_IDX_PROC.to_ne_bytes());
+        m.extend(CN_VAL_PROC.to_ne_bytes());
+        m.extend(0u32.to_ne_bytes()); // seq
+        m.extend(0u32.to_ne_bytes()); // ack
+        m.extend(4u16.to_ne_bytes()); // payload length
+        m.extend(0u16.to_ne_bytes()); // flags
+        m.extend(MCAST_LISTEN.to_ne_bytes());
+        m
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn event(what: u32, fields: [u32; 4]) -> Vec<u8> {
+            let mut m = vec![0u8; NLMSG_HDR + CN_MSG];
+            let len = (NLMSG_HDR + CN_MSG + EVENT_HDR + 16 + 2) as u32;
+            m[..4].copy_from_slice(&len.to_ne_bytes());
+            m.extend(what.to_ne_bytes());
+            m.extend([0u8; 12]);
+            fields.iter().for_each(|f| m.extend(f.to_ne_bytes()));
+            m.extend([0u8; 2]);
+            m
+        }
+
+        #[test]
+        fn parses_process_events_and_skips_threads() {
+            assert_eq!(parse(&event(FORK, [10, 10, 20, 20])), vec![Ev::Fork { parent: 10, child: 20 }]);
+            assert_eq!(parse(&event(FORK, [10, 10, 21, 10])), vec![], "a new thread");
+            assert_eq!(parse(&event(EXEC, [20, 20, 0, 0])), vec![Ev::Exec { pid: 20 }]);
+            assert_eq!(parse(&event(EXIT, [20, 20, 0, 0])), vec![Ev::Exit { pid: 20 }]);
+            assert_eq!(parse(&event(EXIT, [21, 20, 0, 0])), vec![], "a thread ended");
+            assert_eq!(parse(&event(0x40, [1, 2, 3, 4])), vec![], "other events");
+        }
+
+        #[test]
+        fn several_messages_and_garbage() {
+            let mut two = event(EXEC, [5, 5, 0, 0]);
+            while !two.len().is_multiple_of(4) {
+                two.push(0);
+            }
+            two.extend(event(EXIT, [5, 5, 0, 0]));
+            assert_eq!(parse(&two), vec![Ev::Exec { pid: 5 }, Ev::Exit { pid: 5 }]);
+            assert_eq!(parse(&[]), vec![]);
+            assert_eq!(parse(&[1, 2, 3]), vec![]);
+            assert_eq!(parse(&u32::MAX.to_ne_bytes()), vec![]);
+            let truncated = event(FORK, [1, 2, 3, 4]);
+            assert_eq!(parse(&truncated[..30]), vec![]);
+            assert_eq!(listen_message().len(), 40);
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod imp {
     use super::*;
 
-    pub const METHOD: &str = "procfs polling every 20 ms";
+    /// Filled in by `run`, which is the first to know what is available.
+    static NETLINK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    pub fn method() -> &'static str {
+        if NETLINK.load(std::sync::atomic::Ordering::Relaxed) {
+            "kernel process events (netlink)"
+        } else {
+            "procfs polling every 20 ms"
+        }
+    }
+
+    static READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    /// So `method` is right from the moment the watcher exists.
+    pub fn wait_ready() {
+        for _ in 0..100 {
+            if READY.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Exact fork/exec/exit events from the kernel. Needs CAP_NET_ADMIN.
+    struct Netlink(libc::c_int);
+
+    impl Netlink {
+        fn open() -> Option<Netlink> {
+            const NETLINK_CONNECTOR: libc::c_int = 11;
+            const CN_IDX_PROC: u32 = 1;
+            unsafe {
+                let fd = libc::socket(libc::AF_NETLINK, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, NETLINK_CONNECTOR);
+                if fd < 0 {
+                    return None;
+                }
+                let sock = Netlink(fd);
+                let mut addr: libc::sockaddr_nl = std::mem::zeroed();
+                addr.nl_family = libc::AF_NETLINK as libc::sa_family_t;
+                addr.nl_groups = CN_IDX_PROC;
+                let size = std::mem::size_of::<libc::sockaddr_nl>() as libc::socklen_t;
+                if libc::bind(fd, &addr as *const _ as *const libc::sockaddr, size) != 0 {
+                    return None;
+                }
+                let buffer: libc::c_int = 4 << 20;
+                libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_RCVBUF, &buffer as *const _ as *const libc::c_void, std::mem::size_of::<libc::c_int>() as libc::socklen_t);
+                let msg = cn_proc::listen_message();
+                addr.nl_groups = CN_IDX_PROC;
+                addr.nl_pid = 0;
+                let sent = libc::sendto(fd, msg.as_ptr() as *const libc::c_void, msg.len(), 0, &addr as *const _ as *const libc::sockaddr, size);
+                (sent == msg.len() as isize).then_some(sock)
+            }
+        }
+
+        /// Wait up to `ms` for events and return what is queued.
+        fn wait(&self, ms: i32) -> Vec<cn_proc::Ev> {
+            let mut out = Vec::new();
+            let mut p = libc::pollfd { fd: self.0, events: libc::POLLIN, revents: 0 };
+            if unsafe { libc::poll(&mut p, 1, ms) } <= 0 {
+                return out;
+            }
+            let mut buf = [0u8; 8192];
+            // Bounded: commands and delivery must keep moving under load.
+            for _ in 0..512 {
+                let mut from: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
+                let mut len = std::mem::size_of::<libc::sockaddr_nl>() as libc::socklen_t;
+                let n = unsafe { libc::recvfrom(self.0, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), libc::MSG_DONTWAIT, &mut from as *mut _ as *mut libc::sockaddr, &mut len) };
+                if n <= 0 {
+                    // Empty, or the queue overflowed; polling covers gaps.
+                    let again = std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOBUFS);
+                    if again {
+                        continue;
+                    }
+                    break;
+                }
+                // Only the kernel may speak here.
+                if from.nl_pid == 0 {
+                    out.extend(cn_proc::parse(&buf[..n as usize]));
+                }
+            }
+            out
+        }
+    }
+
+    impl Drop for Netlink {
+        fn drop(&mut self) {
+            unsafe { libc::close(self.0) };
+        }
+    }
 
     fn exe(pid: u32) -> Option<String> {
         std::fs::read_link(format!("/proc/{pid}/exe")).ok().map(|p| p.display().to_string())
@@ -313,6 +538,10 @@ mod imp {
         let mut b = Book { watched: HashSet::new(), exe: HashMap::new() };
         let mut parent: HashMap<u32, u32> = HashMap::new();
         let mut batch = Vec::new();
+        let netlink = Netlink::open();
+        NETLINK.store(netlink.is_some(), std::sync::atomic::Ordering::Relaxed);
+        READY.store(true, std::sync::atomic::Ordering::Release);
+        let mut sweep = 0u32;
         loop {
             let alive = drain(&rx, |c| match c {
                 Cmd::Watch(pid) => {
@@ -331,18 +560,52 @@ mod imp {
             if !alive {
                 break;
             }
+            if let Some(nl) = &netlink {
+                for e in nl.wait(20) {
+                    match e {
+                        cn_proc::Ev::Fork { parent: from, child } if b.watched.contains(&from) && b.watched.insert(child) => {
+                            parent.insert(child, from);
+                            let e = ev(DtKind::Spawn, child, Some(from));
+                            b.exe.insert(child, e.path.clone());
+                            batch.push(e);
+                        }
+                        cn_proc::Ev::Exec { pid } if b.watched.contains(&pid) => {
+                            let e = ev(DtKind::Exec, pid, parent.get(&pid).copied());
+                            b.exe.insert(pid, e.path.clone());
+                            batch.push(e);
+                        }
+                        cn_proc::Ev::Exit { pid } if b.watched.remove(&pid) => {
+                            batch.push(DtEvent { at: Local::now(), kind: DtKind::Exit, pid, ppid: parent.remove(&pid), start: 0, path: b.exe.remove(&pid).flatten(), args: None, via: "netlink" });
+                        }
+                        _ => {}
+                    }
+                }
+                // The sweep below only backstops lost events now.
+                sweep += 1;
+                if !sweep.is_multiple_of(25) {
+                    if !send(out, &mut batch) {
+                        break;
+                    }
+                    continue;
+                }
+            }
             let current: Vec<u32> = b.watched.iter().copied().collect();
             for pid in current {
                 if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
                     batch.push(DtEvent { at: Local::now(), kind: DtKind::Exit, pid, ppid: parent.get(&pid).copied(), start: 0, path: None, args: None, via: "procfs poll" });
                     b.watched.remove(&pid);
+                    b.exe.remove(&pid);
+                    parent.remove(&pid);
                     continue;
                 }
+                // A zombie's exe link can't be read: that isn't an exec.
                 let now_exe = exe(pid);
-                if b.exe.get(&pid).is_some_and(|e| *e != now_exe) {
-                    batch.push(ev(DtKind::Exec, pid, parent.get(&pid).copied()));
+                if now_exe.is_some() {
+                    if b.exe.get(&pid).is_some_and(|e| *e != now_exe) {
+                        batch.push(ev(DtKind::Exec, pid, parent.get(&pid).copied()));
+                    }
+                    b.exe.insert(pid, now_exe);
                 }
-                b.exe.insert(pid, now_exe);
                 for child in children(pid) {
                     if b.watched.insert(child) {
                         parent.insert(child, pid);
@@ -355,7 +618,9 @@ mod imp {
             if !send(out, &mut batch) {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(20));
+            if netlink.is_none() {
+                std::thread::sleep(Duration::from_millis(20));
+            }
         }
     }
 }
@@ -367,7 +632,9 @@ mod imp {
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
     use windows_sys::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION};
 
-    pub const METHOD: &str = "ETW Kernel-Process events (administrator) or process snapshots every 100 ms";
+    pub fn method() -> &'static str {
+        "ETW Kernel-Process events (administrator) or process snapshots every 100 ms"
+    }
 
     /// Real-time ETW session on Microsoft-Windows-Kernel-Process: exact
     /// start/stop events for every process. Needs administrator rights.
@@ -489,7 +756,10 @@ mod imp {
                 if !alive {
                     return;
                 }
-                while let Ok(ev) = erx.recv_timeout(Duration::from_millis(20)) {
+                // Events arrive for the whole system: on a busy host the
+                // queue never empties, so stop to deliver and take commands.
+                let until = std::time::Instant::now() + Duration::from_millis(50);
+                while let Ok(ev) = erx.recv_timeout(until.saturating_duration_since(std::time::Instant::now())) {
                     match ev {
                         etw::Ev::Start { pid, ppid, image } if watched.contains_key(&ppid) => {
                             watched.insert(pid, 0);
@@ -564,7 +834,9 @@ mod imp {
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 mod imp {
     use super::*;
-    pub const METHOD: &str = "unsupported";
+    pub fn method() -> &'static str {
+        "unsupported"
+    }
     pub fn run(_rx: Receiver<Cmd>, _out: &Sender<crate::sampler::WorkerMsg>) {}
 }
 

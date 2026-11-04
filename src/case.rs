@@ -459,12 +459,37 @@ impl Case {
         if let Some(d) = path.parent() {
             fs::create_dir_all(d)?;
         }
+        self.keep_earlier(&path)?;
         fs::write(&path, content)?;
         let status = if prov.problems.is_empty() { Status::Complete } else { Status::Partial };
         let item = self.enter(Some(&path), &prov, status)?;
         let gaps = if prov.problems.is_empty() { String::new() } else { format!(" partial: {}", prov.problems.join("; ")) };
         self.log("collected", &format!("{} {} [{}] sha256={}{gaps}", item.id, item.path, prov.class.label(), item.sha256))?;
         Ok((path, item))
+    }
+
+    /// Collecting again must not destroy what was collected before: move
+    /// the earlier file aside and point its register entry at the new place.
+    fn keep_earlier(&self, path: &Path) -> anyhow::Result<()> {
+        if !path.is_file() {
+            return Ok(());
+        }
+        let hash = hash_evidence(path)?;
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let dir = self.dir.join("evidence").join("earlier");
+        fs::create_dir_all(&dir)?;
+        let dest = dir.join(format!("{}_{name}", hash.get(..16).unwrap_or(&hash)));
+        let (old, new) = (self.rel(path), self.rel(&dest));
+        fs::rename(path, &dest)?;
+        {
+            let _g = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let mut reg = self.register();
+            if let Some(item) = reg.iter_mut().rev().find(|i| i.path == old) {
+                item.path = new.clone();
+                crate::config::write_atomic(&self.dir.join("evidence.json"), &serde_json::to_string_pretty(&reg)?)?;
+            }
+        }
+        self.log("kept earlier collection", &format!("{old} → {new} sha256={hash}"))
     }
 
     /// Copy a file (e.g. a suspicious executable) into `evidence/files/`.
@@ -474,6 +499,11 @@ impl Case {
         let dir = self.dir.join("evidence").join("files");
         fs::create_dir_all(&dir)?;
         let dest = dir.join(format!("{}_{}", &hash[..16], safe(&name)));
+        // Named by content: an existing read-only copy is this same file.
+        if dest.exists() && sha256_file(&dest)? == hash {
+            self.log("copy already held", &format!("{} sha256={hash}", self.rel(&dest)))?;
+            return Ok(dest);
+        }
         fs::copy(src, &dest)?;
         // Collected copies must not be runnable by accident.
         #[cfg(unix)]
@@ -974,6 +1004,31 @@ impl Case {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn collecting_again_keeps_the_earlier_evidence_and_copies_twice() {
+        let dir = std::env::temp_dir().join(format!("procwatch-again-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let case = Case::create(&dir).unwrap();
+        case.add_text("processes.json", "first").unwrap();
+        case.add_text("processes.json", "second").unwrap();
+        assert_eq!(fs::read_to_string(case.dir.join("evidence/processes.json")).unwrap(), "second");
+        let reg = case.register();
+        assert_eq!(reg.len(), 2);
+        for item in &reg {
+            let p = case.dir.join(&item.path);
+            assert_eq!(hash_evidence(&p).unwrap(), item.sha256, "{}", item.path);
+        }
+        assert!(reg[0].path.contains("earlier"));
+
+        let src = dir.join("tool.bin");
+        fs::write(&src, "payload").unwrap();
+        let a = case.add_copy(&src).unwrap();
+        let b = case.add_copy(&src).unwrap();
+        assert_eq!(a, b);
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn appending_from_the_tail_matches_the_full_chain() {

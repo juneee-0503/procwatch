@@ -561,6 +561,7 @@ pub fn indicators(b: &[u8]) -> Vec<(String, String)> {
 }
 
 pub fn analyze(path: &Path) -> std::io::Result<Deep> {
+    crate::fileinfo::require_regular(path)?;
     let mut buf = Vec::new();
     File::open(path)?.take(SCAN_BYTES as u64).read_to_end(&mut buf)?;
     Ok(Deep { format: header(&buf), entropy: Some(entropy(&buf)), indicators: indicators(&buf), scanned_bytes: buf.len(), structure: structure(&buf) })

@@ -26,8 +26,19 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Opening a FIFO blocks forever and a device never ends, and either can
+/// sit wherever an attacker can write. Follows symlinks, like `open`.
+pub fn require_regular(path: &Path) -> std::io::Result<()> {
+    if std::fs::metadata(path)?.is_file() {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a regular file"))
+    }
+}
+
 /// MD5, SHA-1 and SHA-256 in one pass over the file.
 pub fn hash_file(path: &Path) -> std::io::Result<Hashes> {
+    require_regular(path)?;
     let mut r = BufReader::with_capacity(1 << 20, File::open(path)?);
     let (mut m, mut s1, mut s2) = (Md5::new(), Sha1::new(), Sha256::new());
     let mut buf = vec![0u8; 1 << 20];
@@ -45,6 +56,7 @@ pub fn hash_file(path: &Path) -> std::io::Result<Hashes> {
 
 /// SHA-256 only (evidence manifests).
 pub fn sha256_file(path: &Path) -> std::io::Result<String> {
+    require_regular(path)?;
     let mut r = BufReader::with_capacity(1 << 20, File::open(path)?);
     let mut h = Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
@@ -60,6 +72,9 @@ pub fn sha256_file(path: &Path) -> std::io::Result<String> {
 
 /// Identify the format from the first bytes.
 pub fn file_type(path: &Path) -> String {
+    if require_regular(path).is_err() {
+        return "not a regular file".into();
+    }
     let mut head = [0u8; 8];
     let n = File::open(path).and_then(|mut f| f.read(&mut head)).unwrap_or(0);
     let h = &head[..n];

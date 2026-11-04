@@ -55,7 +55,7 @@ fn parse_bytes(s: &str) -> Option<u64> {
 fn parse_secs(s: &str) -> Option<u64> {
     let s = s.trim().to_lowercase();
     if let Some(m) = s.strip_suffix("min").or_else(|| s.strip_suffix('m')) {
-        return m.parse::<u64>().ok().map(|v| v * 60);
+        return m.parse::<u64>().ok().and_then(|v| v.checked_mul(60));
     }
     s.trim_end_matches('s').parse().ok()
 }
@@ -179,12 +179,20 @@ pub struct Changes<'a> {
 
 #[derive(Default)]
 pub struct Engine {
-    cpu_since: HashMap<(usize, u32), Instant>,
-    fired: HashSet<(usize, u32)>,
+    /// Keyed by rule position, pid and start time, so a process that takes
+    /// over a PID doesn't inherit another's state.
+    cpu_since: HashMap<(usize, u32, u64), Instant>,
+    fired: HashSet<(usize, u32, u64)>,
     sockets: Option<HashSet<(u32, Connection)>>,
 }
 
 impl Engine {
+    /// A rule was removed: positions shifted, so per-rule state is stale.
+    pub fn rules_changed(&mut self) {
+        self.cpu_since.clear();
+        self.fired.clear();
+    }
+
     /// Evaluate every enabled rule against the new state. Each rule fires
     /// once per process per episode and re-arms when the condition clears.
     pub fn evaluate(
@@ -219,7 +227,7 @@ impl Engine {
                         if !rule.applies(i) {
                             continue;
                         }
-                        let key = (idx, i.pid);
+                        let key = (idx, i.pid, i.start_time_secs);
                         let (hit, message) = match &rule.cond {
                             Cond::Cpu { pct, for_secs } => {
                                 if i.cpu_usage_pct > *pct {
@@ -279,8 +287,9 @@ impl Engine {
         }
 
         // Forget state for processes that are gone.
-        self.cpu_since.retain(|(_, pid), _| tree.nodes.contains_key(pid));
-        self.fired.retain(|(_, pid)| tree.nodes.contains_key(pid));
+        let alive = |pid: u32, start: u64| tree.get(pid).is_some_and(|n| n.info.start_time_secs == start);
+        self.cpu_since.retain(|(_, pid, start), _| alive(*pid, *start));
+        self.fired.retain(|(_, pid, start)| alive(*pid, *start));
         self.sockets = Some(sockets);
         out
     }

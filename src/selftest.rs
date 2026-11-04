@@ -69,7 +69,7 @@ fn capture(r: &mut Report) {
         r.notes.push("deep trace watcher could not start".into());
         return;
     };
-    r.deep_trace_method = w.method.into();
+    r.deep_trace_method = w.method().into();
     let mut parent = match std::process::Command::new("/bin/sh").args(["-c", &script]).spawn() {
         Ok(p) => p,
         Err(e) => {
@@ -177,7 +177,7 @@ fn capture_windows(r: &mut Report) {
         r.notes.push("deep trace watcher could not start".into());
         return;
     };
-    r.deep_trace_method = w.method.into();
+    r.deep_trace_method = w.method().into();
     let script = "ping -n 2 127.0.0.1 >NUL & cmd /c exit & cmd /c exit & cmd /c exit & cmd /c exit & ping -n 3 127.0.0.1 >NUL & ping -n 3 127.0.0.1 >NUL";
     let mut parent = match std::process::Command::new("cmd").args(["/C", script]).stdout(std::process::Stdio::null()).spawn() {
         Ok(p) => p,

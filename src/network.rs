@@ -87,16 +87,19 @@ fn endpoint(addr: IpAddr, port: u16) -> String {
 /// users' processes may be invisible; that's a normal OS restriction, not
 /// a bug in this tool.
 pub fn connections_by_pid() -> HashMap<u32, Vec<Connection>> {
+    try_connections().unwrap_or_default()
+}
+
+/// None when the socket table couldn't be read, which is different from
+/// there being no connections: treating it as empty would report every
+/// socket closed, then every socket as new on the next sample.
+pub fn try_connections() -> Option<HashMap<u32, Vec<Connection>>> {
     let af_flags = AddressFamilyFlags::IPV4 | AddressFamilyFlags::IPV6;
     let proto_flags = ProtocolFlags::TCP | ProtocolFlags::UDP;
 
     let mut map: HashMap<u32, Vec<Connection>> = HashMap::new();
 
-    let sockets = match get_sockets_info(af_flags, proto_flags) {
-        Ok(s) => s,
-
-        Err(_) => return map, // insufficient privilege or unsupported; degrade gracefully
-    };
+    let sockets = get_sockets_info(af_flags, proto_flags).ok()?;
 
     for SocketInfo { protocol_socket_info, associated_pids, .. } in sockets {
         let conn = match &protocol_socket_info {
@@ -123,7 +126,7 @@ pub fn connections_by_pid() -> HashMap<u32, Vec<Connection>> {
         conns.dedup();
     }
 
-    map
+    Some(map)
 }
 
 #[cfg(test)]

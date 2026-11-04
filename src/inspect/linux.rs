@@ -27,6 +27,24 @@ pub fn inspect(pid: u32, _exe_path: Option<&str>, _modules: bool) -> DeepInfo {
         .ok()
         .map(|p| p.display().to_string());
 
+    if let Ok(t) = fs::read_to_string(format!("/proc/{pid}/status")) {
+        info.security = super::linux_status(&t);
+    }
+    if let Some(c) = fs::read_to_string(format!("/proc/{pid}/cgroup")).ok().and_then(|t| super::linux_container(&t)) {
+        info.security.push(("Container".into(), c));
+    }
+    // Namespaces different from ours: it can't see what we see, or vice versa.
+    let separate: Vec<&str> = ["pid", "net", "mnt", "user"]
+        .into_iter()
+        .filter(|n| {
+            let ns = |p: String| fs::read_link(format!("/proc/{p}/ns/{n}")).ok();
+            matches!((ns(pid.to_string()), ns("self".to_string())), (Some(a), Some(b)) if a != b)
+        })
+        .collect();
+    if !separate.is_empty() {
+        info.security.push(("Separate namespaces".into(), separate.join(", ")));
+    }
+
     info
 }
 

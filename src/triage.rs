@@ -72,6 +72,10 @@ pub static RULES: &[RuleDef] = &[
         "This program has an established behaviour profile on this machine and just did something it never did before (new destination, child program, module or listening port)."),
     rule!("PW-019", "Autostart entry added or changed", Medium, High, "T1547",
         "An autostart entry appeared or its command/target changed while procwatch was watching. The writer is named when a deep-traced process had the file open."),
+    rule!("PW-020", "Library preloaded through the environment", High, Medium, "T1574.006",
+        "LD_PRELOAD, LD_AUDIT or DYLD_INSERT_LIBRARIES is set, so extra code loads into this process before its own."),
+    rule!("PW-021", "Running from memory, with no file on disk", High, High, "T1620",
+        "The executable is an anonymous in-memory file (memfd): nothing on disk can be scanned, which is the point of doing it."),
     rule!("PW-017", "Relaunched after termination", Medium, Medium, "T1543",
         "A program ended by procwatch started again. Autostart entries pointing at it are listed as candidates, not proven causes."),
 ];
@@ -237,6 +241,11 @@ pub fn is_private(ip: &str) -> bool {
     }
 }
 
+/// Evidence for PW-020 in a process's environment.
+pub fn preload_evidence(env: &[(String, String)]) -> Option<String> {
+    env.iter().find(|(k, v)| matches!(k.as_str(), "LD_PRELOAD" | "LD_AUDIT" | "DYLD_INSERT_LIBRARIES") && !v.trim().is_empty()).map(|(k, v)| format!("{k}={v}"))
+}
+
 pub fn assess(info: &ProcessInfo, parent: Option<&ProcessInfo>, conns: &[Connection], exe: Option<&ExeInfo>, now_secs: u64) -> Assessment {
     let mut a = Assessment::default();
     let name = info.name.to_lowercase();
@@ -253,6 +262,9 @@ pub fn assess(info: &ProcessInfo, parent: Option<&ProcessInfo>, conns: &[Connect
         if !e.exists && !path.is_empty() {
             a.add("PW-003", path);
         }
+    }
+    if path.starts_with("/memfd:") {
+        a.add("PW-021", path);
     }
     let writable = !path.is_empty() && risky_location(path);
     if writable {
@@ -300,6 +312,16 @@ pub fn assess(info: &ProcessInfo, parent: Option<&ProcessInfo>, conns: &[Connect
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preload_variables_are_recognised() {
+        let env = |k: &str, v: &str| vec![(k.to_string(), v.to_string())];
+        assert!(preload_evidence(&env("LD_PRELOAD", "/tmp/x.so")).is_some());
+        assert!(preload_evidence(&env("DYLD_INSERT_LIBRARIES", "/tmp/x.dylib")).is_some());
+        assert!(preload_evidence(&env("LD_AUDIT", "/tmp/a.so")).is_some());
+        assert!(preload_evidence(&env("LD_PRELOAD", "  ")).is_none(), "set but empty");
+        assert!(preload_evidence(&env("LD_LIBRARY_PATH", "/opt/lib")).is_none());
+    }
     use crate::process::tests::info;
 
     fn exe(sig: Sig, exists: bool) -> ExeInfo {

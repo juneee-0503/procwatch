@@ -66,6 +66,7 @@ try {{
         Invoke-CimMethod -MethodName GetOwner -ErrorAction Stop
     if ($o.User) {{ Write-Output ("OWNER=" + $o.Domain + "\" + $o.User) }}
 }} catch {{ Write-Output ("NOTE=owner: " + $_.Exception.Message) }}
+Get-CimInstance Win32_Service -Filter "ProcessId={pid}" -ErrorAction SilentlyContinue | ForEach-Object {{ Write-Output ("SVC=" + $_.Name + "|" + $_.DisplayName) }}
 {modules_part}
 {sig_part}
 "#
@@ -96,14 +97,66 @@ try {{
                     info.signature_details.push((k.to_string(), v.to_string()));
                 }
             }
+            "SVC" => {
+                let (name, shown) = value.split_once('|').unwrap_or((value, ""));
+                info.security.push(("Service".into(), if shown.is_empty() { name.to_string() } else { format!("{name} ({shown})") }));
+            }
             "NOTE" => info.notes.push(value.to_string()),
             _ => {}
         }
     }
+    info.security.extend(token_facts(pid));
     info.loaded_modules.sort_by_key(|m| m.to_lowercase());
     info.loaded_modules.dedup();
 
     info
+}
+
+/// Integrity level and elevation, read from the process token. A query
+/// handle is all this needs; nothing of the process itself is touched.
+fn token_facts(pid: u32) -> Vec<(String, String)> {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Security::{GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenElevation, TokenIntegrityLevel, TOKEN_ELEVATION, TOKEN_MANDATORY_LABEL, TOKEN_QUERY};
+    use windows_sys::Win32::System::Threading::{OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION};
+    let mut out = Vec::new();
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            return out;
+        }
+        let mut token: HANDLE = std::ptr::null_mut();
+        let opened = OpenProcessToken(process, TOKEN_QUERY, &mut token) != 0;
+        CloseHandle(process);
+        if !opened {
+            return out;
+        }
+        let mut elevation: TOKEN_ELEVATION = std::mem::zeroed();
+        let mut len = 0;
+        let size = std::mem::size_of::<TOKEN_ELEVATION>() as u32;
+        if GetTokenInformation(token, TokenElevation, &mut elevation as *mut _ as *mut _, size, &mut len) != 0 {
+            out.push(("Elevated".to_string(), if elevation.TokenIsElevated != 0 { "yes" } else { "no" }.to_string()));
+        }
+        // u64s: the buffer must be aligned for the structure it holds.
+        let mut buf = [0u64; 16];
+        if GetTokenInformation(token, TokenIntegrityLevel, buf.as_mut_ptr() as *mut _, std::mem::size_of_val(&buf) as u32, &mut len) != 0 {
+            let label = &*(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL);
+            let sid = label.Label.Sid;
+            let count = *GetSidSubAuthorityCount(sid);
+            if count > 0 {
+                let rid = *GetSidSubAuthority(sid, count as u32 - 1);
+                let level = match rid {
+                    0..=0x0fff => "untrusted",
+                    0x1000..=0x1fff => "low",
+                    0x2000..=0x2fff => "medium",
+                    0x3000..=0x3fff => "high",
+                    _ => "system",
+                };
+                out.push(("Integrity".to_string(), level.to_string()));
+            }
+        }
+        CloseHandle(token);
+    }
+    out
 }
 
 fn parse_signature(value: &str) -> SignatureStatus {

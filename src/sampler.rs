@@ -133,6 +133,8 @@ pub fn spawn_sampler(tx: Sender<WorkerMsg>, ctl: Arc<SamplerCtl>) -> std::io::Re
             // CPU usage is a delta between two samples; take the first real
             // one shortly after startup instead of a full interval later.
             thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL.max(Duration::from_millis(250)));
+            let mut last_connections: HashMap<u32, Vec<Connection>> = HashMap::new();
+            let mut socket_failures = 0u32;
             loop {
                 let started = Instant::now();
                 // A slow UI gets the newest state, not a growing pile of
@@ -147,7 +149,20 @@ pub fn spawn_sampler(tx: Sender<WorkerMsg>, ctl: Arc<SamplerCtl>) -> std::io::Re
                     let mut lap = crate::perf::Lap::new();
                     let (tree, stats) = monitor.snapshot();
                     lap.mark("sampler: processes");
-                    let connections = network::connections_by_pid();
+                    let connections = match network::try_connections() {
+                        Some(c) => {
+                            socket_failures = 0;
+                            last_connections.clone_from(&c);
+                            c
+                        }
+                        None => {
+                            socket_failures += 1;
+                            if socket_failures == 1 {
+                                let _ = tx.send(WorkerMsg::Error("couldn't read the socket table; showing the last known connections".into()));
+                            }
+                            last_connections.clone()
+                        }
+                    };
                     lap.mark("sampler: connections");
                     Snapshot { tree, stats, connections }
                 }));

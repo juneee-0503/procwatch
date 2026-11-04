@@ -808,6 +808,7 @@ impl App {
                         info.modules_loaded = true;
                     }
                 }
+                self.check_preload(pid, start_time, &info);
                 self.deep_cache.insert(pid, DeepEntry { start_time, fetched: Instant::now(), info });
             }
             WorkerMsg::ActionDone { action, results } => {
@@ -1128,6 +1129,7 @@ impl App {
     pub fn delete_rule(&mut self) {
         if self.rule_selected < self.rules.len() {
             let r = self.rules.remove(self.rule_selected);
+            self.engine.rules_changed();
             self.rule_selected = self.rule_selected.min(self.rules.len().saturating_sub(1));
             self.set_status(StatusLevel::Info, format!("Rule removed: {}", r.text));
             self.save_config();
@@ -2454,6 +2456,23 @@ pub(crate) mod tests_support {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicU64};
+
+    #[test]
+    fn every_page_and_overlay_draws_at_any_terminal_size() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut a = app();
+        let modes = [Mode::Normal, Mode::Help, Mode::Graph, Mode::Clusters, Mode::Health, Mode::StateAt, Mode::Sweep, Mode::FileReport, Mode::Workspace, Mode::Palette { input: "x".into(), cursor: 0 }];
+        for (w, h) in [(1, 1), (2, 2), (5, 3), (10, 4), (20, 5), (33, 9), (40, 10), (80, 24), (200, 60)] {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            for tab in Tab::ALL {
+                a.tab = tab;
+                for m in &modes {
+                    a.mode = m.clone();
+                    term.draw(|f| crate::ui::draw(f, &mut a)).unwrap();
+                }
+            }
+        }
+    }
 
     pub(super) fn app() -> App {
         let (tx, _rx) = std::sync::mpsc::channel();

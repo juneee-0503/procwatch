@@ -322,7 +322,7 @@ fn authorized_keys(items: &mut Vec<Item>, path: &Path, scope: &str) {
         let parts: Vec<&str> = line.split_whitespace().collect();
         let Some(kpos) = parts.iter().position(|p| p.starts_with("ssh-") || p.starts_with("ecdsa-") || p.starts_with("sk-")) else { continue };
         let comment = parts.get(kpos + 2..).map(|c| c.join(" ")).unwrap_or_default();
-        let key = parts.get(kpos + 1).map(|k| format!("…{}", &k[k.len().saturating_sub(12)..])).unwrap_or_default();
+        let key = parts.get(kpos + 1).map(|k| format!("…{}", k.chars().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect::<String>())).unwrap_or_default();
         let name = if comment.is_empty() { format!("{} {key}", parts[kpos]) } else { comment };
         let mut it = Item::new("SSH authorized key", name, line.chars().take(120).collect::<String>(), path.display().to_string(), scope);
         it.target = Some(path.display().to_string());
@@ -527,6 +527,10 @@ mod imp {
             ("/Library/StartupItems", "Startup item (legacy)"),
             ("/Library/Security/SecurityAgentPlugins", "Authorization plug-in"),
             ("/etc/emond.d/rules", "Event monitor rule"),
+            ("/usr/local/etc/periodic/daily", "Periodic script"),
+            ("/usr/local/etc/periodic/weekly", "Periodic script"),
+            ("/usr/local/etc/periodic/monthly", "Periodic script"),
+            ("/private/var/at/jobs", "at job"),
         ] {
             let Ok(entries) = std::fs::read_dir(dir) else { continue };
             for e in entries.flatten() {
@@ -758,6 +762,16 @@ try {
     Emit 'WMI subscription' $_.Name $cmd 'root\subscription' 'system' 'True' $_.__CLASS
   }
 } catch { Write-Output ("NOTE`tWMI subscriptions: " + $_.Exception.Message) }
+$lsa = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' -ErrorAction SilentlyContinue
+if ($lsa) { foreach ($v in @('Authentication Packages','Notification Packages','Security Packages')) { foreach ($d in @($lsa.$v)) { if ($d -and $d -ne '""') { Emit 'LSA package' $d $d "HKLM\...\Lsa\$v" 'system' 'True' 'loaded into lsass' } } } }
+$sm = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -ErrorAction SilentlyContinue
+if ($sm) { foreach ($d in @($sm.BootExecute)) { if ($d -and $d -notmatch '^autocheck autochk') { Emit 'Boot execute' $d $d 'HKLM\...\Session Manager' 'system' 'True' 'runs before Windows starts' } } }
+$nh = Get-Item 'HKLM:\SOFTWARE\Microsoft\NetSh' -ErrorAction SilentlyContinue
+if ($nh) { foreach ($v in $nh.GetValueNames()) { $d = $nh.GetValue($v); Emit 'Netsh helper' $v $d 'HKLM\SOFTWARE\Microsoft\NetSh' 'system' 'True' 'loaded by netsh.exe' } }
+Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Control\Print\Monitors' -ErrorAction SilentlyContinue | ForEach-Object {
+  $d = (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).Driver
+  if ($d) { Emit 'Print monitor' $_.PSChildName $d 'HKLM\...\Print\Monitors' 'system' 'True' 'loaded by the spooler' }
+}
 Emit 'HostsFile' 'hosts' "$env:SystemRoot\System32\drivers\etc\hosts" 'hosts' 'system' 'True' ''
 "#;
 

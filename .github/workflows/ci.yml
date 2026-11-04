@@ -39,6 +39,11 @@ jobs:
         timeout-minutes: 5
         run: ./target/release/procwatch --selftest
         shell: bash
+      - name: Self-test as root (kernel process events)
+        if: runner.os == 'Linux'
+        timeout-minutes: 5
+        run: sudo -E ./target/release/procwatch --selftest
+        shell: bash
       - name: Soak test (2 minutes, headless)
         timeout-minutes: 8
         run: ./target/release/procwatch --soak 2

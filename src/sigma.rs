@@ -208,7 +208,11 @@ fn tokenize(s: &str) -> Vec<String> {
     s.replace('(', " ( ").replace(')', " ) ").split_whitespace().map(str::to_string).collect()
 }
 
+/// Rules come from anywhere; a stack overflow can't be caught.
+const MAX_NESTING: usize = 64;
+
 struct Parser {
+    depth: usize,
     toks: Vec<String>,
     pos: usize,
 }
@@ -239,6 +243,15 @@ impl Parser {
         Ok(if f.len() == 1 { f.remove(0) } else { Cond::And(f) })
     }
     fn factor(&mut self) -> Result<Cond, String> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING {
+            return Err("condition nested too deeply".into());
+        }
+        let c = self.factor_inner();
+        self.depth -= 1;
+        c
+    }
+    fn factor_inner(&mut self) -> Result<Cond, String> {
         let t = self.next().ok_or("condition ends too early")?;
         match t.to_lowercase().as_str() {
             "not" => Ok(Cond::Not(Box::new(self.factor()?))),
@@ -266,7 +279,7 @@ fn parse_condition(s: &str) -> Result<Cond, String> {
     if s.contains('|') {
         return Err("aggregations ('| count()' etc.) are not supported".into());
     }
-    let mut p = Parser { toks: tokenize(s), pos: 0 };
+    let mut p = Parser { depth: 0, toks: tokenize(s), pos: 0 };
     let c = p.expr()?;
     if p.pos < p.toks.len() {
         return Err(format!("unexpected '{}' in condition", p.toks[p.pos]));
@@ -726,6 +739,13 @@ pub mod map {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deeply_nested_conditions_are_rejected() {
+        assert!(parse_condition(&format!("{}a{}", "( ".repeat(100_000), " )".repeat(100_000))).is_err());
+        assert!(parse_condition(&format!("{}a", "not ".repeat(100_000))).is_err());
+        assert!(parse_condition("not ( a and ( b or not c ) )").is_ok());
+    }
 
     const RULES: &str = r#"
 title: Shell from document

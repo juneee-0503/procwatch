@@ -107,8 +107,10 @@ pub fn apply_checked(pid: u32, expected_start: u64, action: Action) -> Outcome {
     if expected_start > 0 {
         match super::native::start_time(pid) {
             None if !process_exists(pid) => return Outcome::AlreadyExited,
+            // Can't tell who holds this PID now, so don't touch it.
+            None => return Outcome::Failed("can't confirm this is still the same process".into()),
             Some(now) if now.abs_diff(expected_start) > 2 => return Outcome::PidReused { now_started: now },
-            _ => {}
+            Some(_) => {}
         }
     }
     match apply(pid, action) {
@@ -128,10 +130,19 @@ pub fn process_exists(pid: u32) -> bool {
         let r = unsafe { libc::kill(pid as libc::pid_t, 0) };
         r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        super::native::exists(pid)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         super::native::start_time(pid).is_some()
     }
+}
+
+/// The process the OS can't run without: init, or the Windows kernel.
+fn is_system_root(pid: u32) -> bool {
+    if cfg!(windows) { pid == 4 } else { pid == 1 }
 }
 
 /// Apply `action` to `pid`. Returns Err with a human-readable reason on
@@ -143,6 +154,9 @@ pub fn apply(pid: u32, action: Action) -> Result<()> {
     }
     if pid == std::process::id() && matches!(action, Action::Signal(_)) {
         return Err(anyhow!("refusing to signal procwatch itself"));
+    }
+    if is_system_root(pid) && matches!(action, Action::Signal(_)) {
+        return Err(anyhow!("refusing to signal the system's root process"));
     }
     match action {
         Action::SetNice(n) => super::native::set_nice(pid, n),

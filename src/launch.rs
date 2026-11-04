@@ -21,6 +21,35 @@ pub struct Launched {
     thread: isize,
 }
 
+/// Quote one argument the way `CommandLineToArgvW` reads it: backslashes
+/// are literal unless they precede a quote, where they must be doubled.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn windows_arg(a: &str) -> String {
+    if !a.is_empty() && !a.contains([' ', '\t', '\n', '"']) {
+        return a.to_string();
+    }
+    let mut out = String::from("\"");
+    let mut slashes = 0;
+    for c in a.chars() {
+        match c {
+            '\\' => slashes += 1,
+            '"' => {
+                out.push_str(&"\\".repeat(slashes * 2 + 1));
+                out.push('"');
+                slashes = 0;
+            }
+            c => {
+                out.push_str(&"\\".repeat(slashes));
+                out.push(c);
+                slashes = 0;
+            }
+        }
+    }
+    out.push_str(&"\\".repeat(slashes * 2));
+    out.push('"');
+    out
+}
+
 /// Resolve a program name through PATH (absolute/relative paths as given).
 pub fn resolve(program: &str) -> Option<PathBuf> {
     let p = Path::new(program);
@@ -100,8 +129,18 @@ pub fn start(argv: &[String], log: Option<&Path>) -> Result<Launched, String> {
     }
     // Wait until it has stopped itself.
     let mut status = 0;
-    let r = unsafe { libc::waitpid(pid, &mut status, libc::WUNTRACED) };
+    let r = loop {
+        let r = unsafe { libc::waitpid(pid, &mut status, libc::WUNTRACED) };
+        if r >= 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            break r;
+        }
+    };
     if r != pid || !libc::WIFSTOPPED(status) {
+        // Don't leave it stopped forever, or as a zombie.
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+            libc::waitpid(pid, &mut status, 0);
+        }
         return Err("the program didn't reach its start point".into());
     }
     Ok(Launched { pid: pid as u32, program: path.display().to_string() })
@@ -129,9 +168,8 @@ pub fn start(argv: &[String], _log: Option<&Path>) -> Result<Launched, String> {
     use windows_sys::Win32::System::Threading::{CreateProcessW, CREATE_NEW_CONSOLE, CREATE_SUSPENDED, PROCESS_INFORMATION, STARTUPINFOW};
     let program = argv.first().ok_or("nothing to run")?;
     let path = resolve(program).ok_or_else(|| format!("{program}: not found"))?;
-    let quote = |a: &str| if a.contains(' ') || a.is_empty() { format!("\"{}\"", a.replace('"', "\\\"")) } else { a.to_string() };
-    let mut cmdline: Vec<u16> = std::iter::once(quote(&path.display().to_string()))
-        .chain(argv[1..].iter().map(|a| quote(a)))
+    let mut cmdline: Vec<u16> = std::iter::once(windows_arg(&path.display().to_string()))
+        .chain(argv[1..].iter().map(|a| windows_arg(a)))
         .collect::<Vec<_>>()
         .join(" ")
         .encode_utf16()
@@ -192,5 +230,20 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&log).unwrap().trim(), "launched-ok");
         assert!(start(&["definitely-not-a-program-xyz".into()], None).is_err());
         let _ = std::fs::remove_file(log);
+    }
+}
+
+#[cfg(test)]
+mod quoting {
+    #[test]
+    fn windows_arguments_round_trip_through_the_argv_rules() {
+        use super::windows_arg as q;
+        assert_eq!(q("plain"), "plain");
+        assert_eq!(q(""), "\"\"");
+        assert_eq!(q("a b"), "\"a b\"");
+        assert_eq!(q(r"C:\dir with space\"), r#""C:\dir with space\\""#);
+        assert_eq!(q(r#"say "hi""#), r#""say \"hi\"""#);
+        assert_eq!(q(r#"a\"b"#), r#""a\\\"b""#);
+        assert_eq!(q(r"C:\no\spaces\"), r"C:\no\spaces\");
     }
 }

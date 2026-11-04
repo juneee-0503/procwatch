@@ -177,6 +177,8 @@ cargo build --release
 ./target/release/procwatch --check-rules        # 校验 Sigma 规则
 ./target/release/procwatch --selftest           # 测量捕获率、PID 复用保护等质量指标
 ./target/release/procwatch --soak 10            # 10 分钟无界面稳定性测试
+./target/release/procwatch --monitor --output events.jsonl   # 无界面持续采集,输出 ECS JSON 行
+./target/release/procwatch --coverage           # 规则覆盖的 MITRE ATT&CK 技术
 ./target/release/procwatch --replay             # 回放本机记录的事件历史
 ./target/release/procwatch --run -- ./sample    # 仅限隔离分析虚拟机:启动并从第一条指令开始追踪
 ./target/release/procwatch --case procwatch-case-20261102-101500   # 继续已有案件
@@ -327,10 +329,32 @@ cargo build --release
 - **数据**:内容相同的两个文件进入隔离区时记录互相覆盖,第一个无法恢复;`write_atomic` 未落盘且临时文件名固定;事件历史的 256 MB 上限只在启动时检查,长期运行不会清理;自启动项写入者记录满后丢弃的是最新而非最旧的;规则捕获的路径含 `{}`(Windows 常见的 GUID 目录)时永远匹配不上。
 - **性能与积压**:规则引擎按步骤分桶,事件只接触等待该类型的序列;证据链追加不再重新哈希整个日志;界面绘制时缓存链校验结果;sysinfo 改为两阶段刷新,读不到的受保护进程最多重试 3 次;界面处理不过来时采样线程暂停,不再堆积快照;文件事件每秒上限 2000 条,丢弃数量显示在采集健康页。
 
+第二轮审查针对上一轮未覆盖的模块:
+
+- **进程操作**:`start_time` 读不到时不再盲目执行动作,PID 复用保护没有缺口;Windows 上被拒绝访问的受保护进程不再被误报为已退出;拒绝向 init 或 Windows 内核进程发信号。
+- **规则解析**:Sigma/YARA 条件限制嵌套深度和长度(栈溢出无法捕获),十六进制模式的回溯有步数上限。
+- **不可信文件**:`--scan` 不跟随子目录符号链接;哈希、YARA 和格式分析都拒绝 FIFO 和设备文件;工件解析拒绝超过 1 GB 的文件;畸形 `authorized_keys` 不再让整个持久化扫描崩溃。
+- **数据准确性**:socket 表读取失败时保留上次结果,不再产生"全部关闭、全部新建"的假事件;Linux 僵尸进程不再被误报为 exec;告警状态按进程实例记录,删除规则后不再错位。
+- **证据**:重新采集时旧文件移到 `evidence/earlier/`,不再被覆盖;重复复制同一文件不再失败。
+- **其他**:Windows `--run` 的参数引号遵循 `CommandLineToArgvW` 规则;ETW 事件循环在高负载下不再饥饿;启动失败时不留下停止状态的子进程。
+
+新增测试:所有页面和浮层在 1×1 到 200×60 的终端下渲染、两万次随机导航按键、构造的恶意规则。这两项 UI 测试没有发现崩溃。
+
+### 对比专业工具后新增
+
+- **Linux 内核进程事件**:以 root 运行时用 netlink proc connector 取得精确的 fork/exec/exit,失败时回退轮询;`--selftest` 和采集健康页显示实际方式。
+- **安全上下文**(进程详情):Linux 的 capabilities、seccomp、no-new-privs、setuid、容器和独立命名空间;Windows 的完整性级别、提权状态和进程承载的服务。
+- **新检测**:PW-020 通过环境变量预加载库(检查进程时触发);PW-021 从 memfd 运行、磁盘上没有文件。
+- **自启动项**:Windows 增加 LSA 包、BootExecute、Netsh 助手、打印监视器;macOS 增加 periodic 脚本和 at 作业。
+- **`--monitor`**:无界面运行完整流水线,持续输出 ECS JSON 行,读取端关闭时正常退出。
+- **`--coverage`**:列出各引擎规则覆盖的 ATT&CK 技术。它只说明规则关注什么,不代表检出率。
+
+与专业工具相比仍然没有的:Procmon 级别的全量文件、注册表和网络事件(需要内核驱动或大量 ETW 工作);Windows 句柄枚举;每进程流量统计;完整的 YARA 语法。内存取证和在线信誉查询是有意不做的。
+
 ### 仍未完成 / 未验证
 - Windows 上的卡顿:分阶段计时定位到时间线重建(`cluster` 最长 1890 ms、`behaviour` 最长 1342 ms),两处都已改写,并限制自动重建最多占界面线程约 5%。`cluster` 已由 CI 测得降到 14 ms;表中 2222 ms 是修复前的数字,`behaviour` 第二轮修复和 sysinfo 两阶段刷新的效果以下一次 CI 为准。
 - Windows 上 soak 早先多次跑不到终点。为消息循环加上时间预算、优化 `cluster` 后跑通,但两项改动是一起上线的,没有单独验证究竟是哪一项解决了问题。
-- Linux 的 procfs 轮询会漏掉 20 ms 以内的进程(0 ms 档 4 个只抓到 0–1 个);需要 root 的 netlink proc connector 未实现。
+- Linux 的精确进程事件(netlink proc connector)需要 root 或 CAP_NET_ADMIN;普通用户回退到 20 ms 轮询,此时会漏掉 20 ms 以内的进程(0 ms 档 4 个只抓到 0–1 个)。这一路径只在 CI 的 root self-test 中运行。
 - Windows 上自测输出没有标明实际用的是 ETW 还是 ToolHelp;~30 ms 进程 4/4 被抓到说明很可能是 ETW,但这是推断。
 - Windows 的 `--run`、Amcache/BAM/Prefetch 实时采集,以及 Linux 的 fanotify,仅通过类型检查和单元测试,CI 没有运行这些路径。
 - macOS 的 `fs_usage` 归属需要 root,本轮只测了输出解析,没有以 root 实际运行。

@@ -38,6 +38,8 @@ pub struct DeepInfo {
     pub modules_loaded: bool,
     /// Signer details as label/value pairs (identifier, team, chain…).
     pub signature_details: Vec<(String, String)>,
+    /// Privileges and isolation: integrity level, capabilities, container…
+    pub security: Vec<(String, String)>,
 }
 
 impl Default for DeepInfo {
@@ -54,6 +56,7 @@ impl Default for DeepInfo {
             environment: Ok(Vec::new()),
             modules_loaded: false,
             signature_details: Vec::new(),
+            security: Vec::new(),
         }
     }
 }
@@ -235,6 +238,66 @@ pub fn run_command(cmd: &mut Command, timeout: Duration) -> anyhow::Result<Outpu
     run_command_capped(cmd, timeout, MAX_OUTPUT)
 }
 
+/// Linux capabilities that matter for privilege, by bit number.
+const CAPS: &[(u32, &str)] = &[
+    (0, "chown"), (1, "dac_override"), (2, "dac_read_search"), (5, "kill"), (6, "setgid"), (7, "setuid"), (8, "setpcap"),
+    (12, "net_admin"), (13, "net_raw"), (16, "sys_module"), (17, "sys_rawio"), (18, "sys_chroot"), (19, "sys_ptrace"),
+    (21, "sys_admin"), (22, "sys_boot"), (25, "sys_time"), (38, "perfmon"), (39, "bpf"),
+];
+
+/// Effective capabilities as text. Everything set reads as "all".
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn capability_names(hex: &str) -> Option<String> {
+    let bits = u64::from_str_radix(hex.trim(), 16).ok()?;
+    if bits == 0 {
+        return Some("none".into());
+    }
+    // 41 is what every kernel since 5.9 defines.
+    if bits & ((1 << 41) - 1) == (1 << 41) - 1 {
+        return Some("all".into());
+    }
+    let names: Vec<&str> = CAPS.iter().filter(|(b, _)| bits & (1 << b) != 0).map(|(_, n)| *n).collect();
+    Some(if names.is_empty() { format!("{bits:#x}") } else { names.join(", ") })
+}
+
+/// Privilege facts from `/proc/<pid>/status`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn linux_status(text: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let get = |k: &str| text.lines().find_map(|l| l.strip_prefix(k).map(str::trim));
+    if let Some(ids) = get("Uid:").map(|u| u.split_whitespace().collect::<Vec<_>>()) {
+        if let [real, effective, ..] = ids[..] {
+            out.push(("User IDs".to_string(), format!("real {real}, effective {effective}{}", if real != effective { " (setuid)" } else { "" })));
+        }
+    }
+    if let Some(c) = get("CapEff:").and_then(capability_names) {
+        out.push(("Capabilities".into(), c));
+    }
+    if let Some(m) = get("Seccomp:") {
+        out.push(("Seccomp".into(), match m { "0" => "off", "1" => "strict", "2" => "filtered", o => o }.to_string()));
+    }
+    if get("NoNewPrivs:") == Some("1") {
+        out.push(("No new privileges".into(), "set".into()));
+    }
+    out
+}
+
+/// The container a process runs in, from `/proc/<pid>/cgroup`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn linux_container(cgroup: &str) -> Option<String> {
+    let id_after = |line: &str, key: &str| -> Option<String> {
+        // The id is the first long hexadecimal run after the runtime's name.
+        let tail = &line[line.find(key)? + key.len()..];
+        tail.split(|c: char| !c.is_ascii_hexdigit()).find(|run| run.len() >= 12).map(|run| run[..12].to_string())
+    };
+    cgroup.lines().find_map(|l| {
+        [("docker", "Docker"), ("kubepods", "Kubernetes"), ("containerd", "containerd"), ("cri-containerd", "containerd"), ("crio", "CRI-O"), ("libpod", "Podman")]
+            .iter()
+            .find_map(|(key, name)| id_after(l, key).map(|id| format!("{name} {id}")))
+            .or_else(|| l.contains("/lxc").then(|| "LXC".to_string()))
+    })
+}
+
 /// Output kept from one tool; more means something is wrong with it.
 const MAX_OUTPUT: usize = 256 << 20;
 /// How long pipes may stay open after the tool itself has exited.
@@ -330,6 +393,26 @@ pub fn run_command_capped(cmd: &mut Command, timeout: Duration, max_bytes: usize
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn linux_security_facts() {
+        use super::*;
+        assert_eq!(capability_names("0000000000000000").as_deref(), Some("none"));
+        assert_eq!(capability_names("000001ffffffffff").as_deref(), Some("all"));
+        assert_eq!(capability_names("0000000000003000").as_deref(), Some("net_admin, net_raw"));
+        assert_eq!(capability_names("xyz"), None);
+        let status = "Name:\tx\nUid:\t1000\t0\t0\t0\nCapEff:\t0000000000001000\nSeccomp:\t2\nNoNewPrivs:\t1\n";
+        let f = linux_status(status);
+        assert!(f.contains(&("User IDs".into(), "real 1000, effective 0 (setuid)".into())), "{f:?}");
+        assert!(f.contains(&("Capabilities".into(), "net_admin".into())));
+        assert!(f.contains(&("Seccomp".into(), "filtered".into())));
+        assert!(f.contains(&("No new privileges".into(), "set".into())));
+        assert!(linux_status("garbage").is_empty());
+        let id = "0123456789abcdef0123456789abcdef";
+        assert_eq!(linux_container(&format!("0::/system.slice/docker-{id}.scope")).as_deref(), Some("Docker 0123456789ab"));
+        assert_eq!(linux_container(&format!("0::/kubepods/burstable/pod1/{id}")).as_deref(), Some("Kubernetes 0123456789ab"));
+        assert_eq!(linux_container("0::/user.slice/user-1000.slice/session-2.scope"), None);
+    }
+
     #[test]
     fn powershell_quoting_covers_every_quote_character() {
         assert_eq!(super::ps_quote("C:\\a b\\x.exe"), "C:\\a b\\x.exe");

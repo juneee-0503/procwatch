@@ -38,6 +38,8 @@ mod palette;
 mod persistence;
 mod process;
 mod profile;
+mod coverage;
+mod monitor;
 mod perf;
 mod sampler;
 mod selftest;
@@ -105,6 +107,9 @@ Usage:
   procwatch --scan PATH... [--yara DIR] [--json]
                                     match files (folders recursively) against YARA-subset content rules;
                                     exit status 1 if anything matched
+  procwatch --monitor [--output FILE] [--minutes N]
+                                    run without a screen and stream new events as ECS JSON lines
+  procwatch --coverage [--json]     list the MITRE ATT&CK techniques the rules look for
   procwatch --help";
 
 fn main() -> anyhow::Result<()> {
@@ -190,6 +195,19 @@ fn main() -> anyhow::Result<()> {
             std::process::exit(soak::run(minutes));
         }
         Some("--selftest") => std::process::exit(selftest::run(args.iter().any(|a| a == "--json"))),
+        Some("--coverage") => std::process::exit(coverage::run(args.iter().any(|a| a == "--json"))),
+        Some("--monitor") => {
+            let value = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1));
+            let minutes = match value("--minutes").map(|m| m.parse::<u64>()) {
+                None => None,
+                Some(Ok(m)) => Some(m),
+                Some(Err(_)) => {
+                    eprintln!("--minutes needs a number\n\n{USAGE}");
+                    std::process::exit(2);
+                }
+            };
+            std::process::exit(monitor::run(value("--output").map(std::path::Path::new), minutes));
+        }
         Some("--check-rules") => {
             let dir = args.get(1).map(std::path::PathBuf::from).or_else(sigma::default_dir);
             let builtin = sigma::builtin();
@@ -367,12 +385,17 @@ fn headless_scan(paths: &[&String], yara_dir: Option<&str>, json: bool) -> i32 {
     }
     let mut files: Vec<String> = Vec::new();
     let mut stack: Vec<std::path::PathBuf> = paths.iter().map(std::path::PathBuf::from).collect();
+    let given = stack.len();
+    let mut seen = 0;
     while let Some(p) = stack.pop() {
-        if p.is_dir() {
+        seen += 1;
+        // Links below the given paths aren't followed: they can loop.
+        let Ok(meta) = (if seen <= given { std::fs::metadata(&p) } else { std::fs::symlink_metadata(&p) }) else { continue };
+        if meta.is_dir() {
             if let Ok(rd) = std::fs::read_dir(&p) {
                 stack.extend(rd.flatten().map(|e| e.path()));
             }
-        } else {
+        } else if meta.is_file() {
             files.push(p.display().to_string());
         }
     }
@@ -1485,3 +1508,34 @@ fn handle_mouse(app: &mut App, m: MouseEvent) {
     }
 }
 
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+
+    /// Navigation only: no key here reaches an action, export or confirm.
+    #[test]
+    fn random_navigation_never_panics() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let keys: Vec<KeyCode> = [KeyCode::Up, KeyCode::Down, KeyCode::Left, KeyCode::Right, KeyCode::PageUp, KeyCode::PageDown, KeyCode::Home, KeyCode::End, KeyCode::Tab, KeyCode::BackTab, KeyCode::Esc, KeyCode::Enter]
+            .into_iter()
+            .chain("123456789jk?".chars().map(KeyCode::Char))
+            .collect();
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut app = app::tests_support::app();
+        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        for _ in 0..20_000 {
+            let k = keys[(next() % keys.len() as u64) as usize];
+            handle_key(&mut app, KeyEvent::new(k, crossterm::event::KeyModifiers::NONE));
+            if next().is_multiple_of(4) {
+                term.draw(|f| ui::draw(f, &mut app)).unwrap();
+            }
+        }
+    }
+}

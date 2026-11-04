@@ -298,7 +298,7 @@ pub fn collect_live() -> Scan {
     {
         for (home, user) in homes() {
             for f in history_files(&home) {
-                match std::fs::read(&f) {
+                match read_capped(&f) {
                     Ok(b) => scan.items.extend(parse_history(&f, &b, user.clone())),
                     Err(e) => scan.notes.push(format!("{}: {e}", f.display())),
                 }
@@ -348,7 +348,7 @@ pub fn collect_dir(dir: &Path) -> Scan {
             let name = p.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
             let ext = p.extension().map(|x| x.to_string_lossy().to_lowercase()).unwrap_or_default();
             if ext == "pf" {
-                match std::fs::read(&p).map_err(|e| e.to_string()).and_then(|b| prefetch::parse(&b)) {
+                match read_capped(&p).map_err(|e| e.to_string()).and_then(|b| prefetch::parse(&b)) {
                     Ok(pf) => scan.items.extend(pf.artifacts(&p.display().to_string())),
                     Err(e) => scan.notes.push(format!("{}: {e}", p.display())),
                 }
@@ -362,11 +362,11 @@ pub fn collect_dir(dir: &Path) -> Scan {
                     Err(e) => scan.notes.push(format!("{}: {e}", p.display())),
                 }
             } else if name.ends_with("history") || name == "fish_history" {
-                if let Ok(b) = std::fs::read(&p) {
+                if let Ok(b) = read_capped(&p) {
                     scan.items.extend(parse_history(&p, &b, None));
                 }
             } else if name == "amcache.hve" || name == "system" || ext == "hve" || name.ends_with(".hiv") {
-                let parsed = std::fs::read(&p).map_err(|e| e.to_string()).and_then(regf::Hive::parse);
+                let parsed = read_capped(&p).map_err(|e| e.to_string()).and_then(regf::Hive::parse);
                 match parsed {
                     Ok(h) if name.contains("amcache") => match hives::amcache(&h, &p.display().to_string()) {
                         Ok(v) => scan.items.extend(v),
@@ -380,7 +380,7 @@ pub fn collect_dir(dir: &Path) -> Scan {
                     Err(e) => scan.notes.push(format!("{}: {e}", p.display())),
                 }
             } else if ext == "appcompat" || name == "appcompatcache.bin" {
-                match std::fs::read(&p).map_err(|e| e.to_string()).and_then(|b| shimcache::parse(&b)) {
+                match read_capped(&p).map_err(|e| e.to_string()).and_then(|b| shimcache::parse(&b)) {
                     Ok(v) => scan.items.extend(v.into_iter().map(|e| e.artifact(&p.display().to_string()))),
                     Err(e) => scan.notes.push(format!("{}: {e}", p.display())),
                 }
@@ -416,7 +416,7 @@ mod windows {
                 let mut n = 0;
                 for e in rd.flatten().filter(|e| e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("pf"))) {
                     n += 1;
-                    match std::fs::read(e.path()).map_err(|e| e.to_string()).and_then(|b| prefetch::parse(&b)) {
+                    match read_capped(e.path()).map_err(|e| e.to_string()).and_then(|b| prefetch::parse(&b)) {
                         Ok(pf) => scan.items.extend(pf.artifacts(&e.path().display().to_string())),
                         Err(err) => scan.notes.push(format!("{}: {err}", e.path().display())),
                     }
@@ -429,7 +429,7 @@ mod windows {
         }
         // Amcache: locked while Windows runs; read it if we can.
         let am = std::env::var("SystemRoot").map(|r| PathBuf::from(r).join(r"appcompat\Programs\Amcache.hve")).unwrap_or_default();
-        match std::fs::read(&am).map_err(|e| e.to_string()).and_then(regf::Hive::parse) {
+        match read_capped(&am).map_err(|e| e.to_string()).and_then(regf::Hive::parse) {
             Ok(h) => match hives::amcache(&h, &am.display().to_string()) {
                 Ok(v) => scan.items.extend(v),
                 Err(e) => scan.notes.push(format!("Amcache: {e}")),
@@ -506,6 +506,18 @@ try { Get-MpThreatDetection -ErrorAction Stop | ForEach-Object {
             Err(e) => scan.notes.push(format!("Defender: {e}")),
         }
     }
+}
+
+/// Whole-file parsers work in memory; a folder from elsewhere can hold
+/// anything, so refuse what can't be an artifact instead of exhausting RAM.
+fn read_capped(path: impl AsRef<Path>) -> std::io::Result<Vec<u8>> {
+    const MAX: u64 = 1 << 30;
+    let path = path.as_ref();
+    crate::fileinfo::require_regular(path)?;
+    if std::fs::metadata(path)?.len() > MAX {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "larger than 1 GB"));
+    }
+    std::fs::read(path)
 }
 
 #[cfg(test)]

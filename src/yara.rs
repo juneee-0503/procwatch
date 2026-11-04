@@ -299,7 +299,13 @@ fn ctokens(s: &str) -> Vec<String> {
     out
 }
 
+/// Conditions come from rule files; a stack overflow can't be caught, and
+/// long `a and b and …` chains nest as deeply as parentheses do.
+const MAX_NESTING: usize = 64;
+const MAX_CONDITION_TOKENS: usize = 4096;
+
 struct P<'a> {
+    depth: usize,
     t: Vec<String>,
     i: usize,
     ids: &'a [String],
@@ -371,6 +377,15 @@ impl P<'_> {
         Ok(out)
     }
     fn unary(&mut self) -> Result<Expr, String> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING {
+            return Err("condition nested too deeply".into());
+        }
+        let e = self.unary_inner();
+        self.depth -= 1;
+        e
+    }
+    fn unary_inner(&mut self) -> Result<Expr, String> {
         let t = self.next()?;
         let num = |s: &str| -> Option<i64> {
             let (n, mult) = if let Some(n) = s.strip_suffix("KB") { (n, 1024) } else if let Some(n) = s.strip_suffix("MB") { (n, 1 << 20) } else { (s, 1) };
@@ -601,7 +616,11 @@ fn parse_body(body: &str) -> Result<Body, String> {
     }
     let ids: Vec<String> = strings.iter().map(|s| s.id.clone()).collect();
     let cond_src = span(Some(c), &[]);
-    let mut p = P { t: ctokens(cond_src), i: 0, ids: &ids };
+    let tokens = ctokens(cond_src);
+    if tokens.len() > MAX_CONDITION_TOKENS {
+        return Err(format!("condition too long ({} tokens)", tokens.len()));
+    }
+    let mut p = P { depth: 0, t: tokens, i: 0, ids: &ids };
     let condition = p.or()?;
     if p.i < p.t.len() {
         return Err(format!("unexpected '{}' in condition", p.t[p.i]));
@@ -682,12 +701,32 @@ fn text_offsets(data: &[u8], hay: &[u8], needle: &[u8], fullword: bool, limit: u
     }
 }
 
+/// Backtracking over jumps is exponential in the worst case; a rule mustn't
+/// be able to stall a scan, so each start position gets a budget.
+const HEX_STEPS: u32 = 200_000;
+
 fn hex_at(data: &[u8], at: usize, toks: &[Tok]) -> bool {
-    match toks.first() {
-        None => true,
-        Some(Tok::Byte(v, m)) => data.get(at).is_some_and(|b| b & m == *v & m) && hex_at(data, at + 1, &toks[1..]),
-        Some(Tok::Jump(lo, hi)) => (*lo..=*hi).any(|j| at + j <= data.len() && hex_at(data, at + j, &toks[1..])),
+    fn step(data: &[u8], mut at: usize, mut toks: &[Tok], budget: &mut u32) -> bool {
+        // Bytes loop rather than recurse: patterns can be long.
+        while let Some(Tok::Byte(v, m)) = toks.first() {
+            if !data.get(at).is_some_and(|b| b & m == *v & m) {
+                return false;
+            }
+            at += 1;
+            toks = &toks[1..];
+        }
+        match toks.first() {
+            Some(Tok::Jump(lo, hi)) => (*lo..=*hi).any(|j| {
+                if *budget == 0 {
+                    return false;
+                }
+                *budget -= 1;
+                at + j <= data.len() && step(data, at + j, &toks[1..], budget)
+            }),
+            _ => true,
+        }
     }
+    step(data, at, toks, &mut { HEX_STEPS })
 }
 
 fn offsets(s: &Str, data: &[u8], lower: &[u8]) -> Vec<usize> {
@@ -870,6 +909,7 @@ pub fn scan_files(rules: &[Rule], paths: &[String]) -> (Vec<(String, Vec<Match>)
 /// Scan one file (first `MAX_SCAN` bytes).
 pub fn scan_file(rules: &[Rule], path: &Path) -> Result<(Vec<Match>, bool), String> {
     use std::io::Read;
+    crate::fileinfo::require_regular(path).map_err(|e| e.to_string())?;
     let f = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let size = f.metadata().map(|m| m.len()).unwrap_or(0);
     let mut data = Vec::with_capacity(size.min(MAX_SCAN) as usize);
@@ -885,6 +925,35 @@ pub fn scan_file(rules: &[Rule], path: &Path) -> Result<(Vec<Match>, bool), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hostile_rules_are_rejected_or_bounded() {
+        let deep = format!("rule a {{ strings: $a = \"x\" condition: {}$a{} }}", "(".repeat(100_000), ")".repeat(100_000));
+        assert!(parse(&deep, "t").0.is_empty());
+        let nots = format!("rule a {{ strings: $a = \"x\" condition: {}$a }}", "not ".repeat(100_000));
+        assert!(parse(&nots, "t").0.is_empty());
+        let long = format!("rule a {{ strings: $a = \"x\" condition: $a{} }}", " and $a".repeat(100_000));
+        assert!(parse(&long, "t").0.is_empty());
+        // Many wide jumps over data that nearly matches.
+        let toks: Vec<Tok> = std::iter::repeat_n([Tok::Byte(b'a', 0xff), Tok::Jump(0, 64)], 12).flatten().chain([Tok::Byte(b'z', 0xff)]).collect();
+        let t = std::time::Instant::now();
+        assert!(!hex_at(&vec![b'a'; 4096], 0, &toks));
+        assert!(t.elapsed() < std::time::Duration::from_secs(1), "{:?}", t.elapsed());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_is_refused_instead_of_blocking() {
+        let p = std::env::temp_dir().join(format!("procwatch-fifo-{}", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        let c = std::ffi::CString::new(p.display().to_string()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        assert!(scan_file(&[], &p).is_err());
+        assert!(crate::fileinfo::hash_file(&p).is_err());
+        assert!(crate::binfmt::analyze(&p).is_err());
+        assert_eq!(crate::fileinfo::file_type(&p), "not a regular file");
+        let _ = std::fs::remove_file(&p);
+    }
 
     const SRC: &str = r#"
 // comment

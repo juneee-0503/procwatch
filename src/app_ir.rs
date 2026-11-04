@@ -566,6 +566,15 @@ fn behaviour_events(tl: &[TimelineItem]) -> Vec<crate::behave::Ev> {
     out
 }
 
+/// One timeline row as an ECS JSON line.
+fn ecs_line(e: &TimelineItem, host: &str) -> String {
+    let exe = e.links.iter().find_map(|(r, x)| if *r == Rel::Executes { if let Entity::File(p) = x { Some(p.as_str()) } else { None } } else { None });
+    let path = e.entities().find_map(|x| if let Entity::File(p) = x { Some(p.as_str()) } else { None });
+    let ep = e.detail.split_whitespace().nth(3).map(split_endpoint);
+    let remote = if e.source == "network" { ep.as_ref().map(|(a, b)| (a.as_str(), b.as_str())) } else { None };
+    crate::stdexport::ecs_event(e.time, &short_id(e.id), e.source, &e.kind, e.pid, &e.name, &e.detail, exe, remote, if e.source == "file" { path } else { None }, host).to_string()
+}
+
 fn parse_severity(text: &str) -> (&'static str, String) {
     let t = text.trim();
     for (prefix, sev) in [("high:", "high"), ("critical:", "high"), ("low:", "low"), ("info:", "low"), ("medium:", "medium")] {
@@ -1346,8 +1355,21 @@ impl App {
     /// Automatic rebuilds run on the UI thread, so they may take at most
     /// about 5% of it however large the timeline grows. Anything the user
     /// asks for directly rebuilds at once.
-    pub(super) fn timeline_rebuild_due(&self) -> bool {
+    pub fn timeline_rebuild_due(&self) -> bool {
         self.ir.timeline_dirty && self.ir.last_rebuild.is_none_or(|(at, cost)| at.elapsed() >= (cost * 20).min(std::time::Duration::from_secs(30)))
+    }
+
+    /// Timeline events since `since` not in `seen`, oldest first, as ECS
+    /// JSON lines (for `--monitor`).
+    pub fn new_ecs_lines(&self, since: DateTime<Local>, seen: &mut HashSet<u64>) -> Vec<String> {
+        let host = sysinfo::System::host_name().unwrap_or_default();
+        self.ir.timeline.iter().rev().filter(|e| e.time >= since && seen.insert(e.id)).map(|e| ecs_line(e, &host)).collect()
+    }
+
+    /// Forget ids that have left the timeline.
+    pub fn retain_seen(&self, seen: &mut HashSet<u64>) {
+        let live: HashSet<u64> = self.ir.timeline.iter().map(|e| e.id).collect();
+        seen.retain(|id| live.contains(id));
     }
 
     pub fn rebuild_timeline(&mut self) {
@@ -2038,7 +2060,7 @@ impl App {
     /// STIX 2.1 bundle + MISP event (indicators from medium+ detections)
     /// and the timeline as ECS JSON lines, into the case.
     pub fn export_standard(&mut self) {
-        use crate::stdexport::{ecs_event, misp_event, stix_bundle, unique, Indicator};
+        use crate::stdexport::{misp_event, stix_bundle, unique, Indicator};
         if self.ir.timeline_dirty {
             self.rebuild_timeline();
         }
@@ -2076,13 +2098,7 @@ impl App {
             .timeline
             .iter()
             .rev()
-            .map(|e| {
-                let exe = e.links.iter().find_map(|(r, x)| if *r == Rel::Executes { if let Entity::File(p) = x { Some(p.as_str()) } else { None } } else { None });
-                let path = e.entities().find_map(|x| if let Entity::File(p) = x { Some(p.as_str()) } else { None });
-                let ep = e.detail.split_whitespace().nth(3).map(split_endpoint);
-                let remote = if e.source == "network" { ep.as_ref().map(|(a, b)| (a.as_str(), b.as_str())) } else { None };
-                ecs_event(e.time, &short_id(e.id), e.source, &e.kind, e.pid, &e.name, &e.detail, exe, remote, if e.source == "file" { path } else { None }, &host).to_string() + "\n"
-            })
+            .map(|e| ecs_line(e, &host) + "\n")
             .collect();
         let Some(case) = self.ensure_case() else { return };
         let id = case.id.clone();

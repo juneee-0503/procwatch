@@ -60,6 +60,11 @@ pub fn start_time(pid: u32) -> Option<u64> {
     imp::start_time(pid)
 }
 
+#[cfg(windows)]
+pub fn exists(pid: u32) -> bool {
+    imp::exists(pid)
+}
+
 // ── macOS ──────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "macos")]
@@ -321,6 +326,13 @@ mod imp {
         }
         let ft = ((c.dwHighDateTime as u64) << 32) | c.dwLowDateTime as u64;
         (ft / 10_000_000).checked_sub(11_644_473_600)
+    }
+
+    /// Unlike a failed open, access denied means it does exist: protected
+    /// processes refuse even the most limited handle.
+    pub fn exists(pid: u32) -> bool {
+        let h = Handle(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) });
+        !h.0.is_null() || unsafe { windows_sys::Win32::Foundation::GetLastError() } == windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED
     }
 
     /// Closes the wrapped handle on drop.
