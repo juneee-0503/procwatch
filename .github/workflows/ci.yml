@@ -37,11 +37,15 @@ jobs:
           PW_FUZZ_ITERATIONS: "3000"
       - name: Self-test (measured capture rates etc.)
         timeout-minutes: 5
+        env:
+          PW_SELFTEST_URL: https://raw.githubusercontent.com/juneee-0503/procwatch/${{ github.sha }}/Cargo.lock
         run: ./target/release/procwatch --selftest
         shell: bash
-      - name: Self-test as root (kernel process events)
+      - name: Self-test as root (kernel process events, blocking)
         if: runner.os == 'Linux'
         timeout-minutes: 5
+        env:
+          PW_SELFTEST_URL: https://raw.githubusercontent.com/juneee-0503/procwatch/${{ github.sha }}/Cargo.lock
         run: sudo -E ./target/release/procwatch --selftest
         shell: bash
       - name: Soak test as root (activity capture running)

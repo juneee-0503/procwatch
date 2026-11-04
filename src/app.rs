@@ -377,6 +377,8 @@ pub enum Mode {
     Workspace,
     /// Confirm running a program for analysis (`--run`).
     LaunchConfirm(Vec<String>),
+    /// Most active processes, targets and operations in the capture.
+    ActivitySummary,
     /// Command palette (`:` or ctrl+k).
     Palette { input: String, cursor: usize },
     /// IOC sweep results overlay.
@@ -2476,7 +2478,7 @@ mod tests {
     fn every_page_and_overlay_draws_at_any_terminal_size() {
         use ratatui::{backend::TestBackend, Terminal};
         let mut a = app();
-        let modes = [Mode::Normal, Mode::Help, Mode::Graph, Mode::Clusters, Mode::Health, Mode::StateAt, Mode::Sweep, Mode::FileReport, Mode::Workspace, Mode::Palette { input: "x".into(), cursor: 0 }];
+        let modes = [Mode::Normal, Mode::Help, Mode::Graph, Mode::Clusters, Mode::Health, Mode::StateAt, Mode::Sweep, Mode::ActivitySummary, Mode::FileReport, Mode::Workspace, Mode::Palette { input: "x".into(), cursor: 0 }];
         for (w, h) in [(1, 1), (2, 2), (5, 3), (10, 4), (20, 5), (33, 9), (40, 10), (80, 24), (200, 60)] {
             let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
             for tab in Tab::ALL {

@@ -285,6 +285,7 @@ mod linux {
     const FAN_MODIFY_EVENT: u64 = 0x02;
     const FAN_CLOSE_WRITE_EVENT: u64 = 0x08;
     const FAN_ONDIR: u64 = 0x4000_0000;
+    const FAN_Q_OVERFLOW: u64 = 0x4000;
 
     fn group(flags: libc::c_uint, mask: u64, mounts: &[String]) -> Option<libc::c_int> {
         let fd = unsafe { libc::fanotify_init(libc::FAN_CLASS_NOTIF | libc::FAN_CLOEXEC | libc::FAN_NONBLOCK | flags, (libc::O_RDONLY | libc::O_LARGEFILE) as libc::c_uint) };
@@ -335,10 +336,16 @@ mod linux {
             while off + size <= n {
                 let m: libc::fanotify_event_metadata = unsafe { std::ptr::read_unaligned(buf.as_ptr().add(off) as *const _) };
                 let len = m.event_len as usize;
-                if len < size || off + len > n {
+                let info = off + m.metadata_len as usize;
+                if len < size || off + len > n || info > off + len {
                     break;
                 }
-                each(&m, &buf[off + m.metadata_len as usize..off + len]);
+                // The kernel's queue filled up: events were lost before us.
+                if m.mask & FAN_Q_OVERFLOW != 0 {
+                    DROPPED.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    each(&m, &buf[info..off + len]);
+                }
                 off += len;
             }
         }

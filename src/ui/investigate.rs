@@ -248,7 +248,8 @@ pub fn timeline(frame: &mut Frame, app: &mut App, area: Rect) {
 
 /// Per-process operations, in the manner of Process Monitor.
 pub fn activity(frame: &mut Frame, app: &mut App, area: Rect) {
-    let visible = app.visible_activity();
+    app.refresh_activity_view();
+    let total = app.visible_activity().len();
     let mut extra: Vec<Span> = vec![muted("   ")];
     match (&app.ir.capture, &app.ir.capture_error) {
         (Some(c), _) => extra.push(Span::styled(format!("● capturing via {}", c.method), Style::new().fg(BAD))),
@@ -259,14 +260,14 @@ pub fn activity(frame: &mut Frame, app: &mut App, area: Rect) {
     if dropped > 0 {
         extra.push(Span::styled(format!("  {dropped} events dropped"), Style::new().fg(WARN)));
     }
-    frame.render_widget(Paragraph::new(search_bar(app, "operations", visible.len(), extra)), Rect { height: 1, ..area });
+    frame.render_widget(Paragraph::new(search_bar(app, "operations", total, extra)), Rect { height: 1, ..area });
     app.hit.search = Rect { height: 1, width: area.width / 3, ..area };
     frame.render_widget(
         Paragraph::new(muted(" Newest first; ×n = n identical operations merged. Filter e.g. source:registry  name:powershell  kind:write  path:\\\\Run")),
         Rect { y: area.y + 1, height: 1, ..area },
     );
     let table = Rect { y: area.y + 3, height: area.height.saturating_sub(3), ..area };
-    if visible.is_empty() {
+    if total == 0 {
         frame.render_widget(Paragraph::new(muted(" Nothing captured. Windows needs administrator rights; Linux and macOS need root.")), table);
         return;
     }
@@ -280,15 +281,16 @@ pub fn activity(frame: &mut Frame, app: &mut App, area: Rect) {
         ColSpec::new("Target", 0, false),
     ];
     let height = table.height.saturating_sub(1) as usize;
-    app.ir.ac_selected = app.ir.ac_selected.min(visible.len() - 1);
-    app.ir.ac_offset = scroll_window(app.ir.ac_offset, app.ir.ac_selected, height, visible.len());
+    app.ir.ac_selected = app.ir.ac_selected.min(total - 1);
+    app.ir.ac_offset = scroll_window(app.ir.ac_offset, app.ir.ac_selected, height, total);
     let target_w = (table.width as usize).saturating_sub(76);
-    let rows = visible
+    let rows = app
+        .visible_activity()
         .iter()
         .skip(app.ir.ac_offset)
         .take(height)
-        .map(|i| {
-            let e = &app.ir.activity[*i];
+        .filter_map(|seq| app.activity_at(*seq))
+        .map(|e| {
             let op = if e.count > 1 { format!("{} ×{}", e.op, e.count) } else { e.op.to_string() };
             vec![
                 vec![muted(e.time.format("%H:%M:%S%.3f").to_string())],
@@ -303,6 +305,26 @@ pub fn activity(frame: &mut Frame, app: &mut App, area: Rect) {
         .collect();
     let mut scroll = 0;
     app.hit.list_rows = draw_table(frame, table, &specs, rows, &mut scroll, Some(app.ir.ac_selected - app.ir.ac_offset));
+}
+
+/// What the shown operations add up to, like Procmon's Count Occurrences.
+pub fn activity_summary(frame: &mut Frame, app: &mut App, screen: Rect) {
+    let rect = centered(screen, screen.width.saturating_sub(6), screen.height.saturating_sub(4));
+    frame.render_widget(Clear, rect);
+    let block = Block::bordered().title(Span::styled(" Activity summary (current filter) ", Style::new().fg(ACCENT)));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let width = (inner.width as usize).saturating_sub(24);
+    let mut lines = Vec::new();
+    for (title, rows) in app.activity_summary() {
+        lines.push(Line::from(heading(&format!(" {title}"))));
+        for (count, bytes, name) in rows {
+            let size = if bytes > 0 { crate::ui::human_bytes(bytes) } else { String::new() };
+            lines.push(Line::from(vec![muted(format!("  {count:>8}  {size:>9}  ")), Span::raw(truncate_left(&name, width))]));
+        }
+        lines.push(Line::from(""));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 pub fn logs(frame: &mut Frame, app: &mut App, area: Rect) {

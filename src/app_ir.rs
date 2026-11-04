@@ -29,6 +29,9 @@ const MAX_FS_EVENTS: usize = 5000;
 /// Operations kept for the Activity page.
 const MAX_ACTIVITY: usize = 200_000;
 
+/// A titled ranking: (title, [(count, bytes, name)]).
+pub type SummaryGroup = (&'static str, Vec<(u64, u64, String)>);
+
 #[derive(Debug, Clone, Copy)]
 pub struct TrafficRate {
     pub rx: u64,
@@ -267,6 +270,14 @@ pub struct Ir {
     pub capture_error: Option<String>,
     pub ac_selected: usize,
     pub ac_offset: usize,
+    /// Sequence number of the oldest kept operation.
+    ac_base: u64,
+    /// Filtered view, newest first, as sequence numbers: filtering 200,000
+    /// rows can't happen on every draw.
+    ac_view: Vec<u64>,
+    ac_view_query: String,
+    ac_view_dirty: bool,
+    ac_view_at: Option<(Instant, std::time::Duration)>,
     /// Names shared by a process's events.
     activity_names: HashMap<u32, Arc<str>>,
     /// Operations for `--monitor` to stream.
@@ -407,6 +418,11 @@ impl Ir {
             capture_error: None,
             ac_selected: 0,
             ac_offset: 0,
+            ac_base: 0,
+            ac_view: Vec::new(),
+            ac_view_query: String::new(),
+            ac_view_dirty: true,
+            ac_view_at: None,
             activity_names: HashMap::new(),
             activity_out: None,
             traffic: None,
@@ -626,6 +642,27 @@ fn behaviour_events(tl: &[TimelineItem]) -> Vec<crate::behave::Ev> {
     }
     out.sort_by_key(|e| e.time);
     out
+}
+
+/// One captured operation as an ECS JSON line.
+fn activity_line(a: &crate::activity::Activity, host: &str) -> String {
+    let id = short_id(event_id(&[&a.time.to_rfc3339(), &a.pid.to_string(), a.op, &a.path]));
+    let (file, registry) = match a.class {
+        crate::activity::Class::File => (Some(a.path.as_str()), None),
+        crate::activity::Class::Registry => (None, Some(a.path.as_str())),
+        crate::activity::Class::Network => (None, None),
+    };
+    let mut v = crate::stdexport::ecs_event(a.time, &id, a.class.label(), a.op, Some(a.pid), &a.name, &a.path, None, None, file, host);
+    if let Some(r) = registry {
+        v["registry"] = json!({ "path": r });
+    }
+    if a.count > 1 {
+        v["event"]["count"] = a.count.into();
+    }
+    if a.bytes > 0 {
+        v["procwatch"] = json!({ "bytes": a.bytes });
+    }
+    v.to_string()
 }
 
 /// One timeline row as an ECS JSON line.
@@ -1110,14 +1147,38 @@ impl App {
     }
 
     pub fn clear_activity(&mut self) {
+        self.ir.ac_base += self.ir.activity.len() as u64;
         self.ir.activity.clear();
+        self.ir.ac_view.clear();
         self.ir.ac_selected = 0;
         self.ir.ac_offset = 0;
     }
 
-    pub fn visible_activity(&self) -> Vec<usize> {
+    /// The filtered view as of the last refresh.
+    pub fn visible_activity(&self) -> &[u64] {
+        &self.ir.ac_view
+    }
+
+    /// An operation by sequence number; None once it has aged out.
+    pub fn activity_at(&self, seq: u64) -> Option<&crate::activity::Activity> {
+        self.ir.activity.get(usize::try_from(seq.checked_sub(self.ir.ac_base)?).ok()?)
+    }
+
+    /// Rebuild the filtered view: at once when the filter changed, otherwise
+    /// taking at most about 5% of the UI thread.
+    pub fn refresh_activity_view(&mut self) {
+        let changed = self.query != self.ir.ac_view_query;
+        let due = self.ir.ac_view_at.is_none_or(|(at, cost)| at.elapsed() >= (cost * 20).max(std::time::Duration::from_millis(200)));
+        if !changed && !(self.ir.ac_view_dirty && due) {
+            return;
+        }
+        let began = Instant::now();
         let f = Filter::parse(&self.query);
-        self.ir.activity.iter().enumerate().rev().filter(|(_, e)| f.matches(*e)).map(|(i, _)| i).collect()
+        let base = self.ir.ac_base;
+        self.ir.ac_view = self.ir.activity.iter().enumerate().rev().filter(|(_, e)| f.matches(*e)).map(|(i, _)| base + i as u64).collect();
+        self.ir.ac_view_query.clone_from(&self.query);
+        self.ir.ac_view_dirty = false;
+        self.ir.ac_view_at = Some((Instant::now(), began.elapsed()));
     }
 
     fn on_activity(&mut self, batch: Vec<crate::activity::Activity>) {
@@ -1159,8 +1220,10 @@ impl App {
             }
             if self.ir.activity.len() >= MAX_ACTIVITY {
                 self.ir.activity.pop_front();
+                self.ir.ac_base += 1;
             }
             self.ir.activity.push_back(a);
+            self.ir.ac_view_dirty = true;
         }
     }
 
@@ -1183,28 +1246,50 @@ impl App {
     pub fn take_activity_lines(&mut self) -> Vec<String> {
         let host = sysinfo::System::host_name().unwrap_or_default();
         let items = self.ir.activity_out.as_mut().map(std::mem::take).unwrap_or_default();
-        items
-            .iter()
-            .map(|a| {
-                let id = crate::model::short_id(crate::model::event_id(&[&a.time.to_rfc3339(), &a.pid.to_string(), a.op, &a.path]));
-                let (file, registry) = match a.class {
-                    crate::activity::Class::File => (Some(a.path.as_str()), None),
-                    crate::activity::Class::Registry => (None, Some(a.path.as_str())),
-                    crate::activity::Class::Network => (None, None),
-                };
-                let mut v = crate::stdexport::ecs_event(a.time, &id, a.class.label(), a.op, Some(a.pid), &a.name, &a.path, None, None, file, &host);
-                if let Some(r) = registry {
-                    v["registry"] = serde_json::json!({ "path": r });
-                }
-                if a.count > 1 {
-                    v["event"]["count"] = a.count.into();
-                }
-                if a.bytes > 0 {
-                    v["procwatch"] = serde_json::json!({ "bytes": a.bytes });
-                }
-                v.to_string()
-            })
-            .collect()
+        items.iter().map(|a| activity_line(a, &host)).collect()
+    }
+
+    /// Top entries of the shown operations: (title, [(count, bytes, name)]).
+    pub fn activity_summary(&self) -> Vec<SummaryGroup> {
+        const TOP: usize = 8;
+        let shown = || self.visible_activity().iter().filter_map(|s| self.activity_at(*s));
+        let rank = |key: &dyn Fn(&crate::activity::Activity) -> String| -> Vec<(u64, u64, String)> {
+            let mut m: HashMap<String, (u64, u64)> = HashMap::new();
+            for a in shown() {
+                let e = m.entry(key(a)).or_default();
+                e.0 += u64::from(a.count);
+                e.1 += a.bytes;
+            }
+            let mut v: Vec<(u64, u64, String)> = m.into_iter().map(|(k, (c, b))| (c, b, k)).collect();
+            v.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
+            v.truncate(TOP);
+            v
+        };
+        vec![
+            ("Busiest processes", rank(&|a| format!("{} ({})", a.name, a.pid))),
+            ("Operations", rank(&|a| format!("{} {}", a.class.label(), a.op))),
+            ("Most touched targets", rank(&|a| a.path.clone())),
+        ]
+    }
+
+    /// The captured operations, as evidence in the case.
+    pub fn save_activity(&mut self) {
+        if self.ir.activity.is_empty() {
+            self.set_status(StatusLevel::Info, "Nothing captured to save".into());
+            return;
+        }
+        let host = sysinfo::System::host_name().unwrap_or_default();
+        let text: String = self.ir.activity.iter().map(|a| activity_line(a, &host) + "\n").collect();
+        let (n, dropped) = (self.ir.activity.len(), crate::activity::dropped());
+        let mut prov = crate::case::Provenance::live(self.ir.capture.as_ref().map_or("procwatch activity capture", |c| c.method));
+        if dropped > 0 {
+            prov.problems.push(format!("{dropped} events were dropped during capture"));
+        }
+        let Some(case) = self.ensure_case() else { return };
+        match case.add_text_with("activity.jsonl", &text, prov) {
+            Ok((_, item)) => self.set_status(StatusLevel::Success, format!("{n} operations saved as {}", item.id)),
+            Err(e) => self.set_status(StatusLevel::Error, format!("Couldn't save activity: {e}")),
+        }
     }
 
     /// On Windows this runs PowerShell for seconds, so never on this thread.
@@ -1244,6 +1329,9 @@ impl App {
                 Ok(t) => self.ir.traffic = Some(t),
                 Err(e) => self.ir.traffic_error = Some(e),
             }
+        }
+        if self.tab == Tab::Activity {
+            self.refresh_activity_view();
         }
         match self.tab {
             Tab::Persistence if self.ir.persistence.is_none() => {
@@ -1556,7 +1644,27 @@ impl App {
     /// JSON lines (for `--monitor`).
     pub fn new_ecs_lines(&self, since: DateTime<Local>, seen: &mut HashSet<u64>) -> Vec<String> {
         let host = sysinfo::System::host_name().unwrap_or_default();
-        self.ir.timeline.iter().rev().filter(|e| e.time >= since && seen.insert(e.id)).map(|e| ecs_line(e, &host)).collect()
+        self.ir
+            .timeline
+            .iter()
+            .rev()
+            .filter(|e| e.time >= since && seen.insert(e.id))
+            .map(|e| {
+                let exe = e.links.iter().find_map(|(r, x)| if *r == Rel::Executes { if let Entity::File(p) = x { Some(p.as_str()) } else { None } } else { None });
+                let line = ecs_line(e, &host);
+                // A hash is asked for once and added as soon as it is known.
+                let Some(exe) = exe else { return line };
+                self.ir.intel.request(exe, true);
+                match self.ir.intel.get(exe).and_then(|i| i.sha256) {
+                    Some(h) => {
+                        let mut v: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+                        v["process"]["hash"] = json!({ "sha256": h });
+                        v.to_string()
+                    }
+                    None => line,
+                }
+            })
+            .collect()
     }
 
     /// Forget ids that have left the timeline.
@@ -2798,11 +2906,20 @@ mod activity_tests {
         assert_eq!(app.ir.activity.len(), 3);
         assert_eq!(&*app.ir.activity[0].name, name.as_str());
         app.query = "source:registry".into();
+        app.refresh_activity_view();
         assert_eq!(app.visible_activity().len(), 2);
+        let newest = app.visible_activity()[0];
+        assert_eq!(app.activity_at(newest).unwrap().path, r"HKLM\SOFTWARE\Vendor\Setting");
         app.query = "kind:write".into();
+        app.refresh_activity_view();
         assert_eq!(app.visible_activity().len(), 1);
         app.query.clear();
         assert_eq!(app.ir.det.store.items.iter().filter(|d| d.rule_id == "PW-022").count(), 1, "only the autostart key");
+        app.refresh_activity_view();
+        let summary = app.activity_summary();
+        assert_eq!(summary[0].1[0].0, 3, "all three by one process");
+        assert_eq!(summary[1].1[0].2, "registry set value");
+        assert_eq!(summary[2].1.len(), 3);
         let lines = app.take_activity_lines();
         assert_eq!(lines.len(), 3);
         let v: serde_json::Value = serde_json::from_str(&lines[1]).unwrap();

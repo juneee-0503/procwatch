@@ -232,6 +232,28 @@ impl ProcessMonitor {
         }
     }
 
+    /// How long refreshing each kind of process data takes here, to explain
+    /// a slow sampler.
+    pub fn refresh_costs() -> Vec<String> {
+        let mut sys = System::new();
+        sys.refresh_processes_specifics(ProcessesToUpdate::All, Self::light_kind());
+        [("cpu", ProcessRefreshKind::new().with_cpu()), ("memory", ProcessRefreshKind::new().with_memory()), ("disk", ProcessRefreshKind::new().with_disk_usage()), ("nothing", ProcessRefreshKind::new())]
+            .into_iter()
+            .map(|(name, kind)| {
+                let t = Instant::now();
+                for _ in 0..3 {
+                    sys.refresh_processes_specifics(ProcessesToUpdate::All, kind);
+                }
+                format!("process refresh, {name}: {} ms each over {} processes", t.elapsed().as_millis() / 3, sys.processes().len())
+            })
+            .collect()
+    }
+
+    /// Parent of each process.
+    pub fn parents(&self) -> HashMap<u32, u32> {
+        self.sys.processes().iter().filter_map(|(pid, p)| p.parent().map(|q| (pid.as_u32(), q.as_u32()))).collect()
+    }
+
     /// Process names by pid.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub fn names(&self) -> HashMap<u32, String> {

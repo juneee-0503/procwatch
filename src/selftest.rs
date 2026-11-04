@@ -305,20 +305,55 @@ fn activity_probe(r: &mut Report) {
             let mut ops: std::collections::BTreeMap<String, u32> = Default::default();
             let needle = dir.display().to_string().to_lowercase();
             let until = Instant::now() + Duration::from_secs(3);
+            let mut unnamed: Vec<String> = Vec::new();
             while Instant::now() < until {
                 if let Ok(crate::sampler::WorkerMsg::Activity(batch)) = rx.recv_timeout(Duration::from_millis(100)) {
                     for a in batch {
-                        let ours = a.path.to_lowercase().contains(&needle) || a.path.to_lowercase().contains("procwatch-selftest");
+                        let path = a.path.to_lowercase();
+                        let ours = path.contains(&needle) || path.contains("procwatch-selftest") || path.ends_with("a.txt") || path.ends_with("b.txt");
                         if ours && matches!(a.class, Class::File | Class::Registry) {
                             *ops.entry(format!("{} {}", a.class.label(), a.op)).or_default() += a.count;
                         }
+                        // Operations with a poor name say more than any count.
+                        if !path.contains('/') && !path.contains('\\') && unnamed.len() < 4 {
+                            unnamed.push(format!("{} '{}'", a.op, a.path));
+                        }
                     }
                 }
+            }
+            if !unnamed.is_empty() {
+                r.activity.push(format!("operations without a full path: {}", unnamed.join(", ")));
             }
             r.activity.push(format!("capture via {}: {}", c.method, if ops.is_empty() { "saw nothing of the workload".to_string() } else { ops.iter().map(|(k, n)| format!("{k} ×{n}")).collect::<Vec<_>>().join(", ") }));
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Accuracy on real traffic, when CI names a file of known size to fetch.
+fn traffic_download_probe(r: &mut Report) {
+    let Ok(url) = std::env::var("PW_SELFTEST_URL") else { return };
+    let (tx, rx) = std::sync::mpsc::channel();
+    let Ok(t) = crate::netio::start(tx) else { return };
+    std::thread::sleep(Duration::from_millis(500));
+    let dest = std::env::temp_dir().join(format!("procwatch-selftest-download-{}", std::process::id()));
+    // The pause keeps the socket around for counters that end with it.
+    let spawned = std::process::Command::new("curl").args(["-s", "-L", "--max-time", "30", "-o"]).arg(&dest).arg(&url).spawn();
+    let Ok(mut child) = spawned else { return };
+    let pid = child.id();
+    let mut seen = (0, 0);
+    let until = Instant::now() + Duration::from_secs(12);
+    while Instant::now() < until {
+        if let Ok(crate::sampler::WorkerMsg::Traffic(m)) = rx.recv_timeout(Duration::from_millis(200)) {
+            if let Some(v) = m.get(&pid) {
+                seen = *v;
+            }
+        }
+    }
+    let _ = child.wait();
+    let size = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+    let _ = std::fs::remove_file(&dest);
+    r.activity.push(format!("traffic via {} on a real download: file {size} bytes, counted {} in, {} out", t.method, seen.0, seen.1));
 }
 
 fn traffic_probe(r: &mut Report) {
@@ -341,6 +376,8 @@ fn traffic_probe(r: &mut Report) {
             std::thread::sleep(Duration::from_secs(5));
         }
     });
+    // Held open too: per-socket counters end with the socket.
+    let mut _reader = None;
     if let Ok((mut c, _)) = listener.accept() {
         let mut buf = vec![0u8; 1 << 16];
         let mut got = 0;
@@ -350,6 +387,7 @@ fn traffic_probe(r: &mut Report) {
                 Ok(n) => got += n,
             }
         }
+        _reader = Some(c);
     }
     let me = std::process::id();
     let mut seen = (0, 0);
@@ -363,6 +401,130 @@ fn traffic_probe(r: &mut Report) {
     }
     let _ = writer.join();
     r.activity.push(format!("traffic via {}: {} MiB moved over loopback, counted {:.1} MiB in, {:.1} MiB out", t.method, SIZE >> 20, seen.0 as f64 / 1_048_576.0, seen.1 as f64 / 1_048_576.0));
+}
+
+/// A throwaway folder with a canonical path: rules match resolved paths.
+fn enforce_dir() -> Option<std::path::PathBuf> {
+    let d = std::env::current_dir().ok()?.join(format!("procwatch-selftest-enforce-{}", std::process::id()));
+    std::fs::create_dir_all(&d).ok()?;
+    std::fs::canonicalize(d).ok()
+}
+
+/// Ending a process after it starts, on every platform.
+fn enforce_kill_probe(r: &mut Report) {
+    use crate::enforce::{self, Policy};
+    let Some(dir) = enforce_dir() else { return };
+    #[cfg(unix)]
+    let (original, name, args) = ("/bin/sleep", "pw-selftest-victim", vec!["20"]);
+    #[cfg(windows)]
+    let (original, name, args) = ("C:\\Windows\\System32\\ping.exe", "pw-selftest-victim.exe", vec!["-n", "20", "127.0.0.1"]);
+    let victim = dir.join(name);
+    if std::fs::copy(original, &victim).is_err() {
+        return;
+    }
+    let text = format!("mode: enforce\nrules:\n  - {{ id: t, on: start, action: kill, path: ['{}'] }}\n", victim.display());
+    let policy = match Policy::parse(&text) {
+        Ok(p) => p,
+        Err(e) => {
+            r.activity.push(format!("enforce kill: policy refused ({e})"));
+            return;
+        }
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    match enforce::start(policy, tx) {
+        Err(e) => r.activity.push(format!("enforce kill: not available ({e})")),
+        Ok(run) => {
+            std::thread::sleep(Duration::from_millis(1500));
+            let t = Instant::now();
+            if let Ok(mut c) = std::process::Command::new(&victim).args(&args).stdout(std::process::Stdio::null()).spawn() {
+                let mut ended = false;
+                while t.elapsed() < Duration::from_secs(8) {
+                    if matches!(c.try_wait(), Ok(Some(_))) {
+                        ended = true;
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                let took = t.elapsed();
+                let _ = c.kill();
+                let _ = c.wait();
+                r.activity.push(format!("enforce kill: running process ended: {} after {} ms; decision logged: {}", ended, took.as_millis(), rx.try_recv().is_ok()));
+            }
+            drop(run);
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Real prevention of exec on Linux, as root.
+#[cfg(target_os = "linux")]
+fn enforce_block_probe(r: &mut Report) {
+    use crate::enforce::{self, Policy};
+    if unsafe { libc::geteuid() } != 0 {
+        r.activity.push("enforce block: needs root".into());
+        return;
+    }
+    let Some(dir) = enforce_dir() else { return };
+    let (blocked, allowed) = (dir.join("blocked"), dir.join("allowed"));
+    if std::fs::copy("/bin/true", &blocked).is_err() || std::fs::copy("/bin/true", &allowed).is_err() {
+        return;
+    }
+    let run_one = |mode: &str| -> Result<(bool, bool, usize), String> {
+        let text = format!("mode: {mode}\nrules:\n  - {{ id: t, on: exec, action: block, path: ['{}'] }}\n", blocked.display());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let run = enforce::start(Policy::parse(&text)?, tx)?;
+        std::thread::sleep(Duration::from_millis(300));
+        let ran = |p: &std::path::Path| std::process::Command::new(p).status().is_ok_and(|s| s.success());
+        let (b, a) = (ran(&blocked), ran(&allowed));
+        drop(run);
+        std::thread::sleep(Duration::from_millis(400));
+        Ok((b, a, rx.try_iter().count()))
+    };
+    for mode in ["audit", "enforce"] {
+        match run_one(mode) {
+            Ok((b, a, n)) => r.activity.push(format!("enforce block ({mode}): matching program ran: {b}; other program ran: {a}; decisions logged: {n}")),
+            Err(e) => r.activity.push(format!("enforce block ({mode}): {e}")),
+        }
+    }
+    let after = std::process::Command::new(&blocked).status().is_ok_and(|s| s.success());
+    r.activity.push(format!("enforce block: runs again once enforcement ends: {after}"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Real prevention of connections on Windows, as administrator.
+#[cfg(windows)]
+fn enforce_block_probe(r: &mut Report) {
+    use crate::enforce::{self, Policy};
+    let curl = "C:\\Windows\\System32\\curl.exe";
+    let Ok(listener) = std::net::TcpListener::bind("127.0.0.1:0") else { return };
+    let Ok(addr) = listener.local_addr() else { return };
+    let _ = listener.set_nonblocking(true);
+    let url = format!("http://{addr}/");
+    // Accepting is enough for curl to connect; it then times out on the reply.
+    let connected = |l: &std::net::TcpListener| -> bool {
+        let _ = std::process::Command::new(curl).args(["-s", "--max-time", "2", &url]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+        l.accept().is_ok()
+    };
+    let before = connected(&listener);
+    let text = format!("mode: enforce\nrules:\n  - {{ id: t, on: connect, action: block, path: ['{curl}'] }}\n");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let policy = match Policy::parse(&text) {
+        Ok(p) => p,
+        Err(e) => {
+            r.activity.push(format!("enforce block: policy refused ({e})"));
+            return;
+        }
+    };
+    match enforce::start(policy, tx) {
+        Err(e) => r.activity.push(format!("enforce block: not available ({e})")),
+        Ok(run) => {
+            let during = connected(&listener);
+            drop(run);
+            std::thread::sleep(Duration::from_millis(300));
+            let after = connected(&listener);
+            r.activity.push(format!("enforce block: curl connected before: {before}; with the filter: {during}; after it ended: {after}"));
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -441,6 +603,11 @@ pub fn run(json: bool) -> i32 {
     file_latency(&mut r);
     activity_probe(&mut r);
     traffic_probe(&mut r);
+    traffic_download_probe(&mut r);
+    r.activity.extend(crate::process::ProcessMonitor::refresh_costs());
+    enforce_kill_probe(&mut r);
+    #[cfg(any(target_os = "linux", windows))]
+    enforce_block_probe(&mut r);
     #[cfg(windows)]
     handle_probe(&mut r);
     own_cost(&mut r);

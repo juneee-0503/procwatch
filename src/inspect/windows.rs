@@ -112,6 +112,34 @@ Get-CimInstance Win32_Service -Filter "ProcessId={pid}" -ErrorAction SilentlyCon
     info
 }
 
+/// Names of the token's enabled privileges. SeDebugPrivilege and friends are
+/// what let a process reach into others.
+unsafe fn enabled_privileges(token: windows_sys::Win32::Foundation::HANDLE) -> Vec<String> {
+    use windows_sys::Win32::Security::{GetTokenInformation, LookupPrivilegeNameW, TokenPrivileges, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED};
+    let mut buf = vec![0u64; 512];
+    let mut len = 0;
+    if GetTokenInformation(token, TokenPrivileges, buf.as_mut_ptr() as *mut _, (buf.len() * 8) as u32, &mut len) == 0 {
+        return Vec::new();
+    }
+    // TOKEN_PRIVILEGES: a count, then that many entries, 4-byte aligned.
+    let count = (buf[0] & 0xffff_ffff) as usize;
+    let first = (buf.as_ptr() as *const u8).add(4) as *const LUID_AND_ATTRIBUTES;
+    let room = (buf.len() * 8 - 4) / size_of::<LUID_AND_ATTRIBUTES>();
+    let mut out = Vec::new();
+    for i in 0..count.min(room) {
+        let e = std::ptr::read_unaligned(first.add(i));
+        if e.Attributes & SE_PRIVILEGE_ENABLED == 0 {
+            continue;
+        }
+        let mut name = [0u16; 128];
+        let mut n = name.len() as u32;
+        if LookupPrivilegeNameW(std::ptr::null(), &e.Luid, name.as_mut_ptr(), &mut n) != 0 {
+            out.push(String::from_utf16_lossy(&name[..n as usize]));
+        }
+    }
+    out
+}
+
 /// Integrity level and elevation, read from the process token. A query
 /// handle is all this needs; nothing of the process itself is touched.
 fn token_facts(pid: u32) -> Vec<(String, String)> {
@@ -135,6 +163,10 @@ fn token_facts(pid: u32) -> Vec<(String, String)> {
         let size = std::mem::size_of::<TOKEN_ELEVATION>() as u32;
         if GetTokenInformation(token, TokenElevation, &mut elevation as *mut _ as *mut _, size, &mut len) != 0 {
             out.push(("Elevated".to_string(), if elevation.TokenIsElevated != 0 { "yes" } else { "no" }.to_string()));
+        }
+        let enabled = enabled_privileges(token);
+        if !enabled.is_empty() {
+            out.push(("Enabled privileges".to_string(), enabled.join(", ")));
         }
         // u64s: the buffer must be aligned for the structure it holds.
         let mut buf = [0u64; 16];

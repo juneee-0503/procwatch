@@ -274,6 +274,8 @@ mod linux {
                 last.insert(inode, (rx, tx));
             }
             self.last = last;
+            let owners: std::collections::HashSet<u32> = self.owners.values().copied().collect();
+            self.totals.retain(|pid, _| owners.contains(pid));
             Some(self.totals.clone())
         }
     }

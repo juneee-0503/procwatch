@@ -40,6 +40,7 @@ mod process;
 mod profile;
 mod activity;
 mod coverage;
+mod enforce;
 #[cfg(windows)]
 mod etw;
 #[cfg(windows)]
@@ -117,6 +118,10 @@ Usage:
                                     run without a screen and stream new events as ECS JSON lines;
                                     --activity adds file, registry and network operations
                                     (administrator / root)
+  procwatch --enforce-check POLICY  show what a blocking policy would do, and refuse unsafe ones
+  procwatch --enforce POLICY [--output FILE] [--minutes N]
+                                    apply a policy (audit mode only logs); needs root/administrator.
+                                    Everything ends when procwatch exits. See docs/enforcement.md
   procwatch --coverage [--json]     list the MITRE ATT&CK techniques the rules look for
   procwatch --help";
 
@@ -203,6 +208,26 @@ fn main() -> anyhow::Result<()> {
             std::process::exit(soak::run(minutes));
         }
         Some("--selftest") => std::process::exit(selftest::run(args.iter().any(|a| a == "--json"))),
+        Some("--enforce-check") => {
+            let Some(file) = args.get(1) else {
+                eprintln!("--enforce-check needs a policy file\n\n{USAGE}");
+                std::process::exit(2);
+            };
+            std::process::exit(enforce::check(std::path::Path::new(file)));
+        }
+        Some("--enforce") => {
+            let Some(file) = args.get(1) else {
+                eprintln!("--enforce needs a policy file\n\n{USAGE}");
+                std::process::exit(2);
+            };
+            let value = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1));
+            let minutes = value("--minutes").map(|m| m.parse::<u64>());
+            if matches!(minutes, Some(Err(_))) {
+                eprintln!("--minutes needs a number\n\n{USAGE}");
+                std::process::exit(2);
+            }
+            std::process::exit(enforce::run(std::path::Path::new(file), value("--output").map(std::path::Path::new), minutes.and_then(Result::ok)));
+        }
         Some("--coverage") => std::process::exit(coverage::run(args.iter().any(|a| a == "--json"))),
         Some("--monitor") => {
             let value = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1));
@@ -648,7 +673,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 _ => app.mode = Mode::Normal,
             }
         }
-        Mode::Health => app.mode = Mode::Normal,
+        Mode::Health | Mode::ActivitySummary => app.mode = Mode::Normal,
         Mode::Workspace => workspace_key(app, key),
         Mode::Palette { input, cursor } => {
             let list = palette::matches(&input);
@@ -879,6 +904,8 @@ fn normal_key(app: &mut App, key: KeyEvent) {
         Tab::Activity => match key.code {
             KeyCode::Char('c') => app.toggle_capture(),
             KeyCode::Char('x') => app.clear_activity(),
+            KeyCode::Char('s') => app.mode = Mode::ActivitySummary,
+            KeyCode::Char('e') => app.save_activity(),
             _ => {}
         },
         Tab::Timeline => match key.code {

@@ -1,0 +1,25 @@
+# procwatch enforcement policy. See docs/enforcement.md.
+#
+#   procwatch --enforce-check rules/policy/example.yml
+#   sudo procwatch --enforce rules/policy/example.yml --output decisions.jsonl
+#
+# Start in audit mode: it logs what would have been blocked, and blocks
+# nothing. Change to `enforce` only after reading that log.
+mode: audit
+
+# Enforcement ends by itself after this long (0 = until stopped).
+expires_minutes: 60
+
+rules:
+  # Linux: refuse to execute anything from these folders. Preventive.
+  - id: no-exec-from-tmp
+    on: exec
+    action: block
+    path: ["/tmp/*", "/var/tmp/*", "/dev/shm/*"]
+    note: Droppers usually run from world-writable folders.
+
+  # Every platform: end a process seconds after it starts. Reactive.
+  - id: end-known-bad-tool
+    on: start
+    action: kill
+    path: ["*/mimikatz.exe", "*/xmrig"]

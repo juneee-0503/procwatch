@@ -4,6 +4,10 @@
 Process Explorer 的精简终端版。附带一个 Linux 后端作为"自检用的第三平台",
 方便在任何开发机上先把整体架构跑通。
 
+## 文档
+
+完整文档在 [docs/](docs/README.md):[快速开始](docs/getting-started.md)、[用户指南](docs/user-guide.md)、[命令行参考](docs/cli.md)、[活动采集](docs/activity-capture.md)、[拦截与策略](docs/enforcement.md)、[检测](docs/detection.md)、[调查与证据](docs/investigation.md)、[与专业工具对比](docs/comparison.md)、[故障排查](docs/troubleshooting.md)、[架构](docs/architecture.md)、[开发](docs/development.md)。
+
 ## 构建状态
 
 macOS(aarch64)上 `cargo build` / `cargo test` / `cargo clippy --all-targets` 零警告,并在真实终端中
@@ -179,6 +183,7 @@ cargo build --release
 ./target/release/procwatch --soak 10            # 10 分钟无界面稳定性测试
 ./target/release/procwatch --monitor --output events.jsonl   # 无界面持续采集,输出 ECS JSON 行
 ./target/release/procwatch --coverage           # 规则覆盖的 MITRE ATT&CK 技术
+./target/release/procwatch --enforce-check rules/policy/example.yml   # 检查拦截策略,不做改变
 ./target/release/procwatch --replay             # 回放本机记录的事件历史
 ./target/release/procwatch --run -- ./sample    # 仅限隔离分析虚拟机:启动并从第一条指令开始追踪
 ./target/release/procwatch --case procwatch-case-20261102-101500   # 继续已有案件
@@ -192,7 +197,7 @@ cargo build --release
 | 键 | 作用 |
 |---|---|
 | `↑↓` `PgUp` `PgDn` `Home` `End` | 移动 |
-| `1`–`9`、`0` | Processes / Performance / Network / Files / Persistence / Timeline / Logs / Trace / Alerts / Case |
+| `1`–`9`、`0`、`` ` `` | Processes / Performance / Network / Files / Persistence / Timeline / Logs / Trace / Alerts / Case / Activity |
 | `m` | 把当前选中项记录为调查发现 |
 | 操作菜单 → Investigate | 分析可执行文件 / 采集进程证据(可复制可执行文件)/ 记录发现 / 隔离可执行文件 |
 | Files 页 | `a` 分析选中文件,`A` 输入路径分析,`Q` 隔离,`w` 切换"打开的文件 / 文件变更" |
@@ -363,7 +368,7 @@ cargo build --release
 
 与 Procmon 的差别,使用前应当知道:
 
-- 这些来源都不用内核驱动,所以**不能拦截或阻止任何操作**,也拿不到驱动才有的返回状态、调用栈和进程启动前的事件。
+- 这些来源都不用内核驱动,所以拿不到驱动才有的返回状态、调用栈和进程启动前的事件。
 - 注册表**只记录写操作**:读取量比写入高几个数量级。
 - 相同操作在 250 ms 内合并,显示为 `×n`;每秒超过 2 万条的部分被丢弃,丢弃数显示在页面和采集健康页,不会悄悄丢失。
 - 缓冲区保留最近 20 万条。开启采集有实际开销,默认关闭。
@@ -373,7 +378,11 @@ cargo build --release
 
 向自启动注册表位置写入时触发 PW-022,并且能指出是哪个进程写的。
 
-与专业工具相比仍然没有的:拦截能力、完整的 YARA 语法。内存取证和在线信誉查询是有意不做的。
+### 拦截
+
+`--enforce POLICY` 按策略阻止操作:Linux 上事前阻止执行和打开文件(fanotify 权限事件),Windows 上事前阻止程序联网(WFP),三平台都能在进程启动后结束它。默认只审计;会匹配系统必需文件的规则直接拒绝;procwatch 退出后所有拦截自动消失。Windows 的文件和注册表拦截需要内核驱动,没有实现。详见 [docs/enforcement.md](docs/enforcement.md)。
+
+与专业工具相比仍然没有的:Windows 文件和注册表拦截、调用栈、完整的 YARA 语法。内存取证和在线信誉查询是有意不做的。
 
 ### 仍未完成 / 未验证
 - Windows 上 sysinfo 的进程列表刷新平均约 1.2 秒、最长 5.3 秒,所以采样实际只有约每 2 秒一次。它在后台线程,不影响界面。原因未定位;曾怀疑是重试读取受保护进程,但数据否定了这个判断。界面卡顿已解决:单次快照最长从 3186 ms 降到约 100 ms。

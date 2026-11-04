@@ -32,6 +32,8 @@ const NET_KEYWORDS: u64 = 0x10 | 0x20;
 /// closes must not grow without limit.
 const MAX_OBJECTS: usize = 200_000;
 
+const MAX_TRAFFIC_PIDS: usize = 16_384;
+
 /// Where network events go while an activity capture runs.
 static SINK: Mutex<Option<SharedBatcher>> = Mutex::new(None);
 
@@ -136,7 +138,16 @@ pub fn start_traffic(tx: Sender<WorkerMsg>, stop: Arc<AtomicBool>) -> Result<Use
     let _ = std::thread::Builder::new().name("traffic".into()).spawn(move || {
         while !stop.load(Ordering::Relaxed) {
             std::thread::sleep(std::time::Duration::from_secs(2));
-            let now = totals.lock().map(|t| t.clone()).unwrap_or_default();
+            let now = totals
+                .lock()
+                .map(|mut t| {
+                    // Exited processes' entries; rates only need the live ones.
+                    if t.len() > MAX_TRAFFIC_PIDS {
+                        t.clear();
+                    }
+                    t.clone()
+                })
+                .unwrap_or_default();
             if !now.is_empty() && tx.send(WorkerMsg::Traffic(now)).is_err() {
                 return;
             }
@@ -180,7 +191,12 @@ pub fn start_activity(batcher: SharedBatcher) -> Result<UserTrace, String> {
                     let size = u64::from(p.try_parse::<u32>("IOSize").unwrap_or(0));
                     Activity::new(pid, Class::File, if id == 15 { "read" } else { "write" }, name.clone()).with_bytes(size)
                 }
-                _ => Activity::new(pid, Class::File, if id == 26 { "delete" } else { "rename" }, dos_path(&text(&p, &["FilePath", "FileName"]))),
+                _ => {
+                    // Some builds leave the path out; the object still has one.
+                    let given = dos_path(&text(&p, &["FilePath", "FileName"]));
+                    let name = if given.is_empty() { pointer(&p, "FileObject").and_then(|o| open_files.get(&o).cloned()).unwrap_or_default() } else { given };
+                    Activity::new(pid, Class::File, if id == 26 { "delete" } else { "rename" }, name)
+                }
             };
             if let Ok(mut b) = files.lock() {
                 b.push(event);

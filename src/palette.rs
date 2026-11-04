@@ -29,6 +29,8 @@ pub static ENTRIES: &[Entry] = &[
     e("Go to Activity (file, registry and network operations)", None, '`', "`"),
     e("Start or stop activity capture", Some(Tab::Activity), 'c', "Act c"),
     e("Clear captured activity", Some(Tab::Activity), 'x', "Act x"),
+    e("Activity summary: busiest processes and targets", Some(Tab::Activity), 's', "Act s"),
+    e("Save captured activity to the case", Some(Tab::Activity), 'e', "Act e"),
     e("Investigation workspace for the selected process", None, 'W', "W"),
     e("Deep trace the selected process (event-driven)", None, 'D', "D"),
     e("Investigation graph of the selected item", None, 'l', "l"),

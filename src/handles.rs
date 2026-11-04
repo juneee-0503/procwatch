@@ -155,6 +155,7 @@ fn enumerate(pid: u32, handles: Vec<(usize, u16)>, deadline: Instant) -> Result<
     // Raw handles aren't Send; this one stays open until every worker is done.
     let shared = process as isize;
     let (mut start, mut stalls) = (0usize, 0usize);
+    let mut finished = false;
     let mut out = Vec::new();
     'all: while start < handles.len() && stalls < MAX_STALLS {
         let (tx, rx) = mpsc::channel();
@@ -181,7 +182,10 @@ fn enumerate(pid: u32, handles: Vec<(usize, u16)>, deadline: Instant) -> Result<
                     start = i + 1;
                     out.extend(item);
                 }
-                Err(mpsc::RecvTimeoutError::Disconnected) => break 'all,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    finished = true;
+                    break 'all;
+                }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     stalls += 1;
                     start += 1; // past the handle it is stuck on
@@ -190,10 +194,10 @@ fn enumerate(pid: u32, handles: Vec<(usize, u16)>, deadline: Instant) -> Result<
             }
         }
     }
-    // After a stall a worker still holds this handle value, but it is blocked
-    // in a call on its own duplicate and never touches the process again
-    // until it returns; leaking one handle is safer than closing under it.
-    if stalls == 0 {
+    // Unless the last worker ran to its end, one may still use this handle.
+    // Closing it could let the value be reused under that worker, so a
+    // leaked handle is the safe outcome of a stall or the deadline.
+    if finished && stalls == 0 {
         unsafe { CloseHandle(process) };
     }
     out.sort_by(|a, b| a.kind.cmp(&b.kind).then_with(|| a.name.cmp(&b.name)));
