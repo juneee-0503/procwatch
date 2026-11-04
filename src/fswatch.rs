@@ -27,6 +27,14 @@ fn ser_time<S: serde::Serializer>(t: &DateTime<Local>, s: S) -> Result<S::Ok, S:
     s.serialize_str(&t.to_rfc3339())
 }
 
+const MAX_PER_SECOND: u32 = 2000;
+static DROPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// File events discarded so far because they arrived too fast.
+pub fn dropped() -> u64 {
+    DROPPED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Folders watched when the user hasn't configured any.
 pub fn default_paths() -> Vec<String> {
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_default();
@@ -63,6 +71,7 @@ pub fn autostart_location(path: &str) -> bool {
 /// can't be watched are reported back in the error list.
 pub fn start(paths: &[String], tx: Sender<WorkerMsg>) -> (Option<notify::RecommendedWatcher>, Vec<String>) {
     let mut errors = Vec::new();
+    let (mut window, mut sent) = (std::time::Instant::now(), 0u32);
     let handler = move |res: notify::Result<notify::Event>| {
         let Ok(ev) = res else { return };
         let kind = match ev.kind {
@@ -74,6 +83,16 @@ pub fn start(paths: &[String], tx: Sender<WorkerMsg>) -> (Option<notify::Recomme
             _ => return,
         };
         for p in ev.paths {
+            // A build or unpack in a watched folder can emit far more than
+            // anyone can read; don't let that bury everything else.
+            if window.elapsed() >= std::time::Duration::from_secs(1) {
+                (window, sent) = (std::time::Instant::now(), 0);
+            }
+            sent += 1;
+            if sent > MAX_PER_SECOND {
+                DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                continue;
+            }
             let _ = tx.send(WorkerMsg::Fs(FsEvent { time: Local::now(), kind, path: p.display().to_string(), pid: None }));
         }
     };

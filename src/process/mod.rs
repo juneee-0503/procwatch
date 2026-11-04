@@ -206,7 +206,12 @@ pub struct ProcessMonitor {
     networks: Networks,
     user_names: HashMap<Uid, String>,
     last_refresh: Instant,
+    /// Per pid: its start time and how often its details were requested.
+    detail_tries: HashMap<u32, (u64, u8)>,
 }
+
+/// Fields of protected processes never become readable, so stop asking.
+const DETAIL_TRIES: u8 = 3;
 
 impl ProcessMonitor {
     pub fn new() -> Self {
@@ -220,6 +225,41 @@ impl ProcessMonitor {
             networks: Networks::new_with_refreshed_list(),
             user_names: HashMap::new(),
             last_refresh: Instant::now(),
+            detail_tries: HashMap::new(),
+        }
+    }
+
+    /// Changes between samples.
+    fn light_kind() -> ProcessRefreshKind {
+        ProcessRefreshKind::new().with_cpu().with_memory().with_disk_usage()
+    }
+
+    /// Static fields of processes that lack them. Refreshing these for every
+    /// process retries every unreadable one on every sample, which on
+    /// Windows costs an open, a token query and a memory read each time.
+    fn fill_details(&mut self) {
+        let mut need: Vec<Pid> = Vec::new();
+        let mut alive: HashSet<u32> = HashSet::with_capacity(self.detail_tries.len());
+        for (pid, p) in self.sys.processes() {
+            if p.thread_kind().is_some() {
+                continue;
+            }
+            let id = pid.as_u32();
+            alive.insert(id);
+            let t = self.detail_tries.entry(id).or_insert((p.start_time(), 0));
+            if t.0 != p.start_time() {
+                *t = (p.start_time(), 0);
+            }
+            let complete = p.exe().is_some() && !p.cmd().is_empty() && p.user_id().is_some();
+            if !complete && t.1 < DETAIL_TRIES {
+                t.1 += 1;
+                need.push(*pid);
+            }
+        }
+        self.detail_tries.retain(|pid, _| alive.contains(pid));
+        if !need.is_empty() {
+            let kind = ProcessRefreshKind::new().with_exe(UpdateKind::OnlyIfNotSet).with_cmd(UpdateKind::OnlyIfNotSet).with_cwd(UpdateKind::OnlyIfNotSet).with_user(UpdateKind::OnlyIfNotSet);
+            self.sys.refresh_processes_specifics(ProcessesToUpdate::Some(&need), kind);
         }
     }
 
@@ -256,8 +296,10 @@ impl ProcessMonitor {
         self.sys.refresh_cpu_usage();
         self.sys.refresh_memory();
         lap.mark("sampler: cpu and memory");
-        self.sys.refresh_processes_specifics(ProcessesToUpdate::All, Self::refresh_kind());
+        self.sys.refresh_processes_specifics(ProcessesToUpdate::All, Self::light_kind());
         lap.mark("sampler: process list");
+        self.fill_details();
+        lap.mark("sampler: process details");
         self.networks.refresh();
         lap.mark("sampler: network stats");
         let elapsed = self.last_refresh.elapsed().as_secs_f64().max(0.001);
@@ -547,6 +589,24 @@ pub fn cpu_time(secs: f64) -> String {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+
+    #[test]
+    fn a_process_started_between_samples_gets_its_details() {
+        let mut m = ProcessMonitor::new();
+        let _ = m.snapshot();
+        let exe = std::env::current_exe().unwrap();
+        let mut child = std::process::Command::new(&exe).arg("--help").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap();
+        let pid = child.id();
+        let (tree, _) = m.snapshot();
+        let _ = child.wait();
+        // It may already have exited; if it was seen, it must be complete.
+        if let Some(n) = tree.get(pid) {
+            assert!(n.info.exe_path.is_some() || !n.info.cmd.is_empty(), "{:?}", n.info.name);
+        }
+        let (tree, _) = m.snapshot();
+        let me = tree.get(std::process::id()).expect("own process");
+        assert!(me.info.exe_path.is_some() && !me.info.cmd.is_empty());
+    }
 
     pub fn info(pid: u32, ppid: Option<u32>) -> ProcessInfo {
         ProcessInfo {

@@ -528,9 +528,11 @@ impl App {
                 self.ir.intel.request(&m, false);
             }
         }
-        let exe = self.tree.get(key.pid).and_then(|n| n.info.exe_path.clone());
-        let static_libs = exe.and_then(|e| crate::binfmt::analyze(std::path::Path::new(&e)).ok()).map(|d| d.structure.libraries).filter(|l| !l.is_empty());
-        self.ir.ws = WorkspaceState { key: Some(key), tab: 0, cursor: 0, scroll: 0, dossier: Dossier::default(), static_libs };
+        // Reads up to 32 MB of the file: in the background.
+        if let Some(exe) = self.tree.get(key.pid).and_then(|n| n.info.exe_path.clone()) {
+            crate::sampler::spawn_static_libs(self.tx.clone(), key, exe);
+        }
+        self.ir.ws = WorkspaceState { key: Some(key), tab: 0, cursor: 0, scroll: 0, dossier: Dossier::default(), static_libs: None };
         self.ir.ws.dossier = self.dossier(key);
         self.mode = Mode::Workspace;
     }
@@ -538,7 +540,7 @@ impl App {
     /// Refresh the open workspace's dossier (called while it is shown).
     pub fn refresh_workspace(&mut self) {
         if let Some(k) = self.ir.ws.key {
-            if self.ir.timeline_dirty {
+            if self.timeline_rebuild_due() {
                 self.rebuild_timeline();
             }
             let cursor_id = self.ir.ws.dossier.events.get(self.ir.ws.cursor).map(|i| self.ir.timeline[*i].id);

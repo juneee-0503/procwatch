@@ -232,7 +232,27 @@ fn environment(pid: u32) -> Result<Vec<(String, String)>, String> {
 /// easily prints >64 KiB) can't deadlock on a full pipe while we wait.
 #[allow(dead_code)] // unused on platforms without a shell-based backend
 pub fn run_command(cmd: &mut Command, timeout: Duration) -> anyhow::Result<Output> {
-    run_command_capped(cmd, timeout, usize::MAX)
+    run_command_capped(cmd, timeout, MAX_OUTPUT)
+}
+
+/// Output kept from one tool; more means something is wrong with it.
+const MAX_OUTPUT: usize = 256 << 20;
+/// How long pipes may stay open after the tool itself has exited.
+const PIPE_SETTLE: Duration = Duration::from_secs(2);
+
+/// Escape text for a PowerShell single-quoted string. PowerShell also ends
+/// such a string at the typographic quotes, and paths are attacker-chosen:
+/// doubling only `'` would let a file name run commands with our rights.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn ps_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    for c in s.chars() {
+        if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}') {
+            out.push(c);
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Like [`run_command`], but stops reading (and kills the child) once
@@ -250,32 +270,34 @@ pub fn run_command_capped(cmd: &mut Command, timeout: Duration, max_bytes: usize
     let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
 
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
+    type Shared = Arc<Mutex<Vec<u8>>>;
     let capped = Arc::new(AtomicBool::new(false));
-    fn drain<R: Read + Send + 'static>(pipe: Option<R>, max: usize, capped: Arc<AtomicBool>) -> thread::JoinHandle<Vec<u8>> {
-        thread::spawn(move || {
-            let mut buf = Vec::new();
-            if let Some(mut p) = pipe {
-                let mut chunk = [0u8; 64 * 1024];
-                loop {
-                    match p.read(&mut chunk) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            buf.extend_from_slice(&chunk[..n]);
-                            if buf.len() >= max {
-                                buf.truncate(max);
-                                capped.store(true, Ordering::Relaxed);
-                                break;
-                            }
+    fn drain<R: Read + Send + 'static>(pipe: Option<R>, max: usize, capped: Arc<AtomicBool>) -> (Shared, thread::JoinHandle<()>) {
+        let shared: Shared = Arc::default();
+        let out = shared.clone();
+        let reader = thread::spawn(move || {
+            let Some(mut p) = pipe else { return };
+            let mut chunk = [0u8; 64 * 1024];
+            loop {
+                match p.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let Ok(mut buf) = out.lock() else { break };
+                        buf.extend_from_slice(&chunk[..n]);
+                        if buf.len() >= max {
+                            buf.truncate(max);
+                            capped.store(true, Ordering::Relaxed);
+                            break;
                         }
                     }
                 }
             }
-            buf
-        })
+        });
+        (shared, reader)
     }
-    let out_reader = drain(child.stdout.take(), max_bytes, capped.clone());
-    let err_reader = drain(child.stderr.take(), 1 << 20, Arc::new(AtomicBool::new(false)));
+    let (out_buf, out_reader) = drain(child.stdout.take(), max_bytes, capped.clone());
+    let (err_buf, err_reader) = drain(child.stderr.take(), 1 << 20, Arc::new(AtomicBool::new(false)));
 
     let deadline = Instant::now() + timeout;
     let status = loop {
@@ -295,15 +317,37 @@ pub fn run_command_capped(cmd: &mut Command, timeout: Duration, max_bytes: usize
         thread::sleep(Duration::from_millis(20));
     };
 
-    Ok(Output {
-        status,
-        stdout: out_reader.join().unwrap_or_default(),
-        stderr: err_reader.join().unwrap_or_default(),
-    })
+    // A background grandchild can hold the pipes open long after the child
+    // exits; joining the readers would then wait forever, defeating the
+    // timeout. Give them a moment and take what they have.
+    let settle = Instant::now() + PIPE_SETTLE;
+    while !(out_reader.is_finished() && err_reader.is_finished()) && Instant::now() < settle {
+        thread::sleep(Duration::from_millis(5));
+    }
+    let take = |b: &Shared| b.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default();
+    Ok(Output { status, stdout: take(&out_buf), stderr: take(&err_buf) })
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn powershell_quoting_covers_every_quote_character() {
+        assert_eq!(super::ps_quote("C:\\a b\\x.exe"), "C:\\a b\\x.exe");
+        assert_eq!(super::ps_quote("it's"), "it''s");
+        for q in ['\u{2018}', '\u{2019}', '\u{201a}', '\u{201b}'] {
+            assert_eq!(super::ps_quote(&format!("a{q};calc;{q}b")), format!("a{q}{q};calc;{q}{q}b"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_background_grandchild_cannot_hold_the_call_open() {
+        let t = std::time::Instant::now();
+        let out = super::run_command(std::process::Command::new("/bin/sh").args(["-c", "echo done; sleep 30 &"]), std::time::Duration::from_secs(20)).unwrap();
+        assert!(String::from_utf8_lossy(&out.stdout).contains("done"));
+        assert!(t.elapsed() < std::time::Duration::from_secs(10), "{:?}", t.elapsed());
+    }
+
     #[test]
     fn inspects_own_process() {
         let me = std::process::id();

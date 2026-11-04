@@ -47,7 +47,7 @@ try {{
     }}
     if ($s.TimeStamperCertificate) {{ Write-Output ("SIGD=Timestamped by|" + $s.TimeStamperCertificate.Subject) }}
 }} catch {{ Write-Output ("NOTE=signature: " + $_.Exception.Message) }}"#,
-            path.replace('\'', "''")
+            super::ps_quote(path)
         ),
         None => "Write-Output 'NOTE=signature: executable path unavailable'".to_string(),
     };
@@ -128,7 +128,7 @@ if ($s.SignerCertificate) {{
     Write-Output ("SIGD=Valid until|" + $s.SignerCertificate.NotAfter)
     Write-Output ("SIGD=Signature type|" + $s.SignatureType)
 }}"#,
-        path.replace('\'', "''")
+        super::ps_quote(path)
     );
     let out = run_command(Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &script]), TIMEOUT)?;
     let text = String::from_utf8_lossy(&out.stdout);

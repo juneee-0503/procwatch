@@ -351,7 +351,7 @@ pub fn case(frame: &mut Frame, app: &mut App, area: Rect) {
             if case.conclusion.is_empty() { muted("none yet — press C") } else { Span::raw(case.conclusion.clone()) },
         ]),
         {
-            let chain = case.chain_status();
+            let chain = case.chain_status_cached();
             let reg = case.register();
             let partial = reg.iter().filter(|r| r.status == crate::case::Status::Partial).count();
             let failed = reg.iter().filter(|r| r.status == crate::case::Status::Failed).count();

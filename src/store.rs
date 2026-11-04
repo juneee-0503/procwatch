@@ -18,6 +18,8 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_BYTES: u64 = 256 << 20;
 pub const MAX_DAYS: i64 = 14;
+/// Prune this often during a long session, not only at startup.
+const PRUNE_EVERY: u64 = 16 << 20;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcRec {
@@ -73,11 +75,14 @@ pub struct Writer {
     out: Option<BufWriter<File>>,
     pub written: u64,
     pub error: Option<String>,
+    /// Size of today's file: it can't be pruned, so it has its own limit.
+    day_bytes: u64,
+    pruned_at: u64,
 }
 
 impl Writer {
     pub fn open(dir: PathBuf) -> Writer {
-        let mut w = Writer { dir, day: String::new(), out: None, written: 0, error: None };
+        let mut w = Writer { dir, day: String::new(), out: None, written: 0, error: None, day_bytes: 0, pruned_at: 0 };
         if let Err(e) = fs::create_dir_all(&w.dir) {
             w.error = Some(format!("{}: {e}", w.dir.display()));
         }
@@ -98,8 +103,13 @@ impl Writer {
             let path = self.dir.join(format!("events-{day}.jsonl"));
             match OpenOptions::new().create(true).append(true).open(&path) {
                 Ok(f) => {
+                    let rotated = !self.day.is_empty();
+                    self.day_bytes = f.metadata().map(|m| m.len()).unwrap_or(0);
                     self.out = Some(BufWriter::new(f));
                     self.day = day;
+                    if rotated {
+                        self.prune();
+                    }
                 }
                 Err(e) => {
                     self.error = Some(format!("{}: {e}", path.display()));
@@ -114,11 +124,26 @@ impl Writer {
         if self.error.is_some() && self.out.is_none() && self.written > 0 {
             return;
         }
+        if self.day_bytes >= MAX_BYTES && t.format("%Y%m%d").to_string() == self.day {
+            if self.error.is_none() {
+                self.flush();
+                self.error = Some(format!("history paused until tomorrow: today's file reached {} MB", MAX_BYTES >> 20));
+            }
+            return;
+        }
         let line = Line { t: t.to_rfc3339_opts(chrono::SecondsFormat::Millis, false), rec };
         let Ok(text) = serde_json::to_string(&line) else { return };
         if let Some(o) = self.file_for(&t) {
-            if writeln!(o, "{text}").is_ok() {
-                self.written += text.len() as u64 + 1;
+            if let Err(e) = writeln!(o, "{text}") {
+                self.error = Some(e.to_string());
+                return;
+            }
+            let n = text.len() as u64 + 1;
+            self.written += n;
+            self.day_bytes += n;
+            if self.written - self.pruned_at >= PRUNE_EVERY {
+                self.pruned_at = self.written;
+                self.prune();
             }
         }
     }
@@ -208,6 +233,36 @@ pub fn read(path: &Path, from: Option<DateTime<Local>>, to: Option<DateTime<Loca
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("procwatch-store-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        d
+    }
+
+    #[test]
+    fn a_long_session_prunes_at_rotation_and_caps_the_day() {
+        let dir = temp_dir("limits");
+        let mut w = Writer::open(dir.clone());
+        let rec = || Rec::File { kind: "created".into(), path: "/x".into() };
+        let today = Local::now();
+        w.write(today, rec());
+        w.flush();
+        // Old file appearing after startup, as it would in a session running for weeks.
+        let old = dir.join("events-20000101.jsonl");
+        fs::write(&old, "x\n").unwrap();
+        w.write(today + chrono::Duration::days(1), rec());
+        assert!(!old.exists(), "rotation must prune");
+
+        w.day_bytes = MAX_BYTES;
+        let before = w.written;
+        w.write(today + chrono::Duration::days(1), rec());
+        assert_eq!(w.written, before, "a full day stops growing");
+        assert!(w.error.as_deref().is_some_and(|e| e.contains("paused")));
+        w.write(today + chrono::Duration::days(2), rec());
+        assert!(w.written > before, "the next day writes again");
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn writes_reads_and_prunes() {

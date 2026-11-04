@@ -222,6 +222,8 @@ pub struct Ir {
     pub log_offset: usize,
     pub timeline: Vec<TimelineItem>,
     pub timeline_dirty: bool,
+    /// When the timeline was last rebuilt, and how long that took.
+    last_rebuild: Option<(Instant, std::time::Duration)>,
     pub clusters: Vec<crate::correlate::Cluster>,
     pub cluster_selected: usize,
     pub tl_selected: usize,
@@ -245,6 +247,10 @@ pub struct Ir {
     pub resolver: dns::Resolver,
     pub resolvers: Vec<String>,
     pub dns_cache: Option<Result<Vec<(String, String)>, String>>,
+    /// A DNS collection is running.
+    dns_pending: bool,
+    /// DNS has been collected at least once (evidence needs the resolvers).
+    dns_asked: bool,
     pub net_dns_view: bool,
     pub case: Option<Case>,
     pub case_focus_quarantine: bool,
@@ -345,6 +351,7 @@ impl Ir {
             log_offset: 0,
             timeline: Vec::new(),
             timeline_dirty: true,
+            last_rebuild: None,
             clusters: Vec::new(),
             cluster_selected: 0,
             tl_selected: 0,
@@ -366,6 +373,8 @@ impl Ir {
             resolver: dns::Resolver::new(),
             resolvers: Vec::new(),
             dns_cache: None,
+            dns_pending: false,
+            dns_asked: false,
             net_dns_view: false,
             case: None,
             case_focus_quarantine: false,
@@ -886,8 +895,11 @@ impl App {
                 self.sigma_on_fs(&e);
                 if crate::fswatch::autostart_location(&e.path) && !self.replaying() {
                     let owner = self.file_owner_near(&e.path, e.time);
+                    // Attribution looks for the newest write: drop the oldest.
+                    if self.ir.persist_writers.len() >= 200 {
+                        self.ir.persist_writers.remove(0);
+                    }
                     self.ir.persist_writers.push((e.path.clone(), e.time, owner));
-                    self.ir.persist_writers.truncate(200);
                     self.ir.persist_rescan_at = Some(Instant::now() + std::time::Duration::from_secs(3));
                 }
                 if let Some(st) = self.ir.store.as_mut() {
@@ -965,6 +977,11 @@ impl App {
                 self.ir.artifacts = all;
                 self.ir.timeline_dirty = true;
             }
+            WorkerMsg::Dns { resolvers, cache } => {
+                self.ir.dns_pending = false;
+                self.ir.resolvers = resolvers;
+                self.ir.dns_cache = Some(cache);
+            }
             WorkerMsg::Deep(evs) => self.deep_on_events(evs),
             WorkerMsg::DeepSnap { pid, start, modules, files } => self.deep_on_snap(pid, start, modules, files),
             WorkerMsg::Yara { results, scanned, failed } => {
@@ -995,6 +1012,13 @@ impl App {
         }
     }
 
+    /// On Windows this runs PowerShell for seconds, so never on this thread.
+    fn collect_dns(&mut self) {
+        self.ir.dns_asked = true;
+        self.ir.dns_pending = true;
+        sampler::spawn_dns(self.tx.clone());
+    }
+
     pub(super) fn ir_on_tick(&mut self) -> bool {
         let mut dirty = false;
         if self.replaying() {
@@ -1016,6 +1040,9 @@ impl App {
             self.ir.persist_auto = true;
             self.scan_persistence();
         }
+        if !self.ir.dns_asked && !self.ir.dns_pending {
+            self.collect_dns();
+        }
         match self.tab {
             Tab::Persistence if self.ir.persistence.is_none() => {
                 self.scan_persistence();
@@ -1029,13 +1056,12 @@ impl App {
                 self.fetch_logs();
                 dirty = true;
             }
-            Tab::Timeline if self.ir.timeline_dirty => {
+            Tab::Timeline if self.timeline_rebuild_due() => {
                 self.rebuild_timeline();
                 dirty = true;
             }
-            Tab::Network if self.ir.net_dns_view && self.ir.dns_cache.is_none() => {
-                self.ir.resolvers = dns::resolvers();
-                self.ir.dns_cache = Some(dns::client_cache());
+            Tab::Network if self.ir.net_dns_view && self.ir.dns_cache.is_none() && !self.ir.dns_pending => {
+                self.collect_dns();
                 dirty = true;
             }
             _ => {}
@@ -1308,7 +1334,7 @@ impl App {
             Tab::Files => {
                 let idx = *self.visible_files().get(self.file_selected)?;
                 let h = self.files.as_ref()?.result.as_ref().ok()?.get(idx)?;
-                h.path.starts_with('/').then(|| h.path.clone()).or_else(|| (h.path.len() > 2 && &h.path[1..3] == ":\\").then(|| h.path.clone()))
+                h.path.starts_with('/').then(|| h.path.clone()).or_else(|| (h.path.get(1..3) == Some(":\\")).then(|| h.path.clone()))
             }
             Tab::Persistence => self.selected_persist().and_then(|i| i.target.clone()),
             _ => self.selected_pid().and_then(|p| self.tree.get(p)).and_then(|n| n.info.exe_path.clone()),
@@ -1317,7 +1343,15 @@ impl App {
 
     // ── timeline ───────────────────────────────────────────────────────
 
+    /// Automatic rebuilds run on the UI thread, so they may take at most
+    /// about 5% of it however large the timeline grows. Anything the user
+    /// asks for directly rebuilds at once.
+    pub(super) fn timeline_rebuild_due(&self) -> bool {
+        self.ir.timeline_dirty && self.ir.last_rebuild.is_none_or(|(at, cost)| at.elapsed() >= (cost * 20).min(std::time::Duration::from_secs(30)))
+    }
+
     pub fn rebuild_timeline(&mut self) {
+        let began = Instant::now();
         let mut lap = crate::perf::Lap::new();
         let mut whole = crate::perf::Lap::new();
         // New events arrive at the top; keep the selected event (and its
@@ -1590,6 +1624,7 @@ impl App {
         self.ir.clusters = clusters;
         self.ir.timeline_dirty = false;
         whole.mark("timeline: rebuild total");
+        self.ir.last_rebuild = Some((Instant::now(), began.elapsed()));
         let mut recorded = false;
         for m in behaviour {
             let first = m.events.first().cloned().unwrap_or_default();
@@ -1886,7 +1921,7 @@ impl App {
             "uptime_secs": self.stats.uptime_secs,
             "memory_total": self.stats.mem_total,
             "collected_at": Local::now().to_rfc3339(),
-            "dns_resolvers": dns::resolvers(),
+            "dns_resolvers": self.ir.resolvers,
             "reverse_dns": self.ir.resolver.known(),
         });
         let persistence = self.persist_items().to_vec();

@@ -88,12 +88,8 @@ pub fn platform() -> Vec<Source> {
     #[cfg(target_os = "linux")]
     {
         v.push(Source::new("eBPF / audit events", Status::NotUsed, "not used; process and network events are sampled from /proc"));
-        let journal = std::process::Command::new("journalctl").args(["-n", "1", "-q"]).output();
-        match journal {
-            Ok(o) if o.status.success() => v.push(Source::new("systemd journal", Status::Available, "readable")),
-            Ok(_) => v.push(Source::new("systemd journal", Status::Partial, "only your own entries (add to the systemd-journal group or run as root)")),
-            Err(_) => v.push(Source::new("systemd journal", Status::Missing, "journalctl not found")),
-        }
+        let (status, detail) = journal();
+        v.push(Source::new("systemd journal", status, detail));
     }
     #[cfg(windows)]
     {
@@ -108,6 +104,26 @@ pub fn platform() -> Vec<Source> {
     }
     v.push(Source::new("Process memory contents", Status::NotUsed, "never read or dumped, by design; use a dedicated acquisition tool and analyse the image offline"));
     v
+}
+
+/// Checked once, in the background: this list is rebuilt on every draw of
+/// the health page, and a tool must not run there.
+#[cfg(target_os = "linux")]
+fn journal() -> (Status, &'static str) {
+    use std::sync::{Once, OnceLock};
+    static RESULT: OnceLock<(Status, &'static str)> = OnceLock::new();
+    static START: Once = Once::new();
+    START.call_once(|| {
+        std::thread::spawn(|| {
+            let r = crate::inspect::run_command(std::process::Command::new("journalctl").args(["-n", "1", "-q"]), std::time::Duration::from_secs(10));
+            let _ = RESULT.set(match r {
+                Ok(o) if o.status.success() => (Status::Available, "readable"),
+                Ok(_) => (Status::Partial, "only your own entries (add to the systemd-journal group or run as root)"),
+                Err(_) => (Status::Missing, "journalctl not found or not responding"),
+            });
+        });
+    });
+    RESULT.get().copied().unwrap_or((Status::NotLoaded, "checking…"))
 }
 
 #[cfg(test)]

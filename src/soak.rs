@@ -136,6 +136,8 @@ fn msg_name(m: &crate::sampler::WorkerMsg) -> &'static str {
         Yara { .. } => "msg: Yara",
         Memory { .. } => "msg: Memory",
         Deep(_) => "msg: Deep",
+        Dns { .. } => "msg: Dns",
+        StaticLibs { .. } => "msg: StaticLibs",
         DeepSnap { .. } => "msg: DeepSnap",
         Error(_) => "msg: Error",
         Evidence(_) => "msg: Evidence",
@@ -162,7 +164,7 @@ pub fn run(minutes: u64) -> i32 {
     // Soak runs never write to the user's event history.
     let cfg = Config { interval_ms: 1000, history: false, ..Config::load() };
     let (tx, rx) = mpsc::channel();
-    let ctl = Arc::new(SamplerCtl { interval_ms: AtomicU64::new(cfg.interval_ms), paused: AtomicBool::new(false), refresh_now: AtomicBool::new(false) });
+    let ctl = Arc::new(SamplerCtl { interval_ms: AtomicU64::new(cfg.interval_ms), paused: AtomicBool::new(false), refresh_now: AtomicBool::new(false), snapshots_queued: Default::default() });
     if let Err(e) = sampler::spawn_sampler(tx.clone(), ctl.clone()) {
         eprintln!("soak: couldn't start sampler: {e}");
         return 2;

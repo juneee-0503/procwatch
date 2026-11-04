@@ -60,6 +60,10 @@ pub enum WorkerMsg {
     FileList(Result<Vec<crate::os::Hit>, String>),
     /// Open files of the processes being traced.
     TraceFiles(HashMap<u32, Result<Vec<crate::inspect::OpenFile>, String>>),
+    /// Configured resolvers and the OS DNS cache.
+    Dns { resolvers: Vec<String>, cache: Result<Vec<(String, String)>, String> },
+    /// Libraries an executable links against, for an open workspace.
+    StaticLibs { key: crate::model::ProcKey, libs: Option<Vec<String>> },
     /// Result of a file/port search across all processes.
     Found { query: String, result: Result<Vec<crate::os::Hit>, String> },
     /// Result of applying one action to a batch of processes.
@@ -72,13 +76,22 @@ pub struct SamplerCtl {
     pub interval_ms: AtomicU64,
     pub paused: AtomicBool,
     pub refresh_now: AtomicBool,
+    /// Snapshots sent but not handled yet.
+    pub snapshots_queued: AtomicU64,
 }
 
 impl SamplerCtl {
+    /// The UI handled a snapshot.
+    pub fn snapshot_handled(&self) {
+        let _ = self.snapshots_queued.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
+    }
+
     pub fn interval(&self) -> Duration {
         Duration::from_millis(self.interval_ms.load(Ordering::Relaxed))
     }
 }
+
+const MAX_QUEUED_SNAPSHOTS: u64 = 2;
 
 /// What a bounded drain left behind.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -116,6 +129,12 @@ pub fn spawn_sampler(tx: Sender<WorkerMsg>, ctl: Arc<SamplerCtl>) -> std::io::Re
             thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL.max(Duration::from_millis(250)));
             loop {
                 let started = Instant::now();
+                // A slow UI gets the newest state, not a growing pile of
+                // large snapshots.
+                if ctl.snapshots_queued.load(Ordering::Relaxed) >= MAX_QUEUED_SNAPSHOTS {
+                    thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
                 // A failure in one sample (e.g. an OS API returning
                 // something unexpected) must not stop monitoring.
                 let sample = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -127,7 +146,10 @@ pub fn spawn_sampler(tx: Sender<WorkerMsg>, ctl: Arc<SamplerCtl>) -> std::io::Re
                     Snapshot { tree, stats, connections }
                 }));
                 let msg = match sample {
-                    Ok(snap) => WorkerMsg::Snapshot(Box::new(snap)),
+                    Ok(snap) => {
+                        ctl.snapshots_queued.fetch_add(1, Ordering::Relaxed);
+                        WorkerMsg::Snapshot(Box::new(snap))
+                    }
                     Err(e) => WorkerMsg::Error(format!("sampling failed: {}", panic_text(&*e))),
                 };
                 if tx.send(msg).is_err() {
@@ -246,6 +268,27 @@ pub fn spawn_trace_poller(tx: Sender<WorkerMsg>, targets: Arc<std::sync::Mutex<V
             }
         }
     });
+}
+
+pub fn spawn_dns(tx: Sender<WorkerMsg>) {
+    worker(
+        "dns".into(),
+        tx,
+        || WorkerMsg::Dns { resolvers: crate::dns::resolvers(), cache: crate::dns::client_cache() },
+        |e| WorkerMsg::Dns { resolvers: Vec::new(), cache: Err(format!("DNS collection crashed: {e}")) },
+    );
+}
+
+pub fn spawn_static_libs(tx: Sender<WorkerMsg>, key: crate::model::ProcKey, exe: String) {
+    worker(
+        "static-libs".into(),
+        tx,
+        move || {
+            let libs = crate::binfmt::analyze(std::path::Path::new(&exe)).ok().map(|d| d.structure.libraries).filter(|l| !l.is_empty());
+            WorkerMsg::StaticLibs { key, libs }
+        },
+        move |_| WorkerMsg::StaticLibs { key, libs: None },
+    );
 }
 
 pub fn spawn_stack(tx: Sender<WorkerMsg>, pid: u32, start_time: u64) {

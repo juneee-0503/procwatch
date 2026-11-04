@@ -135,9 +135,21 @@ impl Config {
 
 /// Write-then-rename so a crash never leaves a truncated file.
 pub fn write_atomic(path: &std::path::Path, text: &str) -> std::io::Result<()> {
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, text)?;
-    fs::rename(&tmp, path)
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    // Unique, so a second instance or thread can't rename a half-written
+    // file into place; synced, so a crash can't leave an empty one there.
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let tmp = path.with_extension(format!("tmp{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+    let result = fs::File::create(&tmp).and_then(|mut f| {
+        f.write_all(text.as_bytes())?;
+        f.sync_all()
+    });
+    let result = result.and_then(|()| fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
 }
 
 #[cfg(test)]

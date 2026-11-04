@@ -583,7 +583,11 @@ impl App {
             "File changes",
             if self.ir.watch_errors.is_empty() { Status::Partial } else { Status::Denied },
             if self.ir.watch_errors.is_empty() {
-                format!("{} watched folders; changes elsewhere aren't seen, and events carry no process", self.ir.watch_paths.len())
+                let dropped = match crate::fswatch::dropped() {
+                    0 => String::new(),
+                    n => format!("; {n} events dropped during bursts"),
+                };
+                format!("{} watched folders; changes elsewhere aren't seen, and events carry no process{dropped}", self.ir.watch_paths.len())
             } else {
                 format!("couldn't watch: {}", self.ir.watch_errors.join("; "))
             },

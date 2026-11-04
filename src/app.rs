@@ -793,7 +793,10 @@ impl App {
 
     pub fn on_worker_msg(&mut self, msg: WorkerMsg) {
         match msg {
-            WorkerMsg::Snapshot(snap) => self.on_snapshot(*snap),
+            WorkerMsg::Snapshot(snap) => {
+                self.ctl.snapshot_handled();
+                self.on_snapshot(*snap);
+            }
             WorkerMsg::Gpu(g) => self.gpu = Some(g),
             WorkerMsg::Inspected { pid, start_time, info } => {
                 self.deep_pending.remove(&pid);
@@ -861,9 +864,16 @@ impl App {
             | WorkerMsg::Artifacts { .. }
             | WorkerMsg::Yara { .. }
             | WorkerMsg::Deep(_)
+            | WorkerMsg::Dns { .. }
             | WorkerMsg::DeepSnap { .. }
             | WorkerMsg::Memory { .. }
             | WorkerMsg::Evidence(_)) => self.ir_on_msg(msg),
+            WorkerMsg::StaticLibs { key, libs } => {
+                if self.ir.ws.key == Some(key) {
+                    self.ir.ws.static_libs = libs;
+                    self.refresh_workspace();
+                }
+            }
             WorkerMsg::Error(e) => self.set_status(StatusLevel::Error, e),
             WorkerMsg::Found { query, result } => {
                 if let Some(f) = self.find.as_mut().filter(|f| f.query == query) {
@@ -2450,7 +2460,7 @@ mod tests {
         let ctl = Arc::new(SamplerCtl {
             interval_ms: AtomicU64::new(1500),
             paused: AtomicBool::new(false),
-            refresh_now: AtomicBool::new(false),
+            refresh_now: AtomicBool::new(false), snapshots_queued: Default::default(),
         });
         let mut app = App::new(tx, ctl, Config { view: ViewMode::List, sort: Col::Cpu, sort_desc: true, ..Config::default() });
         app.tree = crate::process::tests::sample();

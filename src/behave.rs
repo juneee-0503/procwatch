@@ -24,6 +24,7 @@
 //! modifiers `|contains`, `|startswith`, `|endswith`; `{name}` refers to a
 //! captured value. Count steps: `count: 5` with `distinct: name`.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use chrono::{DateTime, Local};
@@ -218,33 +219,44 @@ pub fn load() -> (Vec<Rule>, Vec<String>) {
     (rules, errors)
 }
 
-fn resolve(v: &str, caps: &HashMap<String, String>) -> String {
-    let mut out = v.to_string();
-    for (k, val) in caps {
-        out = out.replace(&format!("{{{k}}}"), val);
+/// A value with `{name}` references filled in, lowercased. None when it
+/// refers to something not captured. `caps` holds lowercased values.
+fn resolve<'a>(v: &'a str, caps: &'a HashMap<String, String>) -> Option<Cow<'a, str>> {
+    if !v.contains('{') {
+        return Some(if v.chars().any(char::is_uppercase) { Cow::Owned(v.to_lowercase()) } else { Cow::Borrowed(v) });
     }
-    out.to_lowercase()
+    if let Some(val) = v.strip_prefix('{').and_then(|r| r.strip_suffix('}')).and_then(|k| caps.get(k)) {
+        return Some(Cow::Borrowed(val));
+    }
+    let mut out = String::with_capacity(v.len());
+    let mut rest = v;
+    while let Some((i, j)) = rest.find('{').and_then(|i| Some((i, i + rest[i..].find('}')?))) {
+        out.push_str(&rest[..i].to_lowercase());
+        out.push_str(caps.get(&rest[i + 1..j])?);
+        rest = &rest[j + 1..];
+    }
+    out.push_str(&rest.to_lowercase());
+    Some(Cow::Owned(out))
 }
 
-fn cond_ok(c: &Cond, e: &Ev, caps: &HashMap<String, String>) -> bool {
-    let Some(actual) = e.fields.get(c.field.as_str()).map(|v| v.to_lowercase()) else { return false };
+/// Field values of one event, lowercased once rather than per comparison.
+type Lowered<'a> = BTreeMap<&'a str, String>;
+
+fn cond_ok(c: &Cond, fields: &Lowered, caps: &HashMap<String, String>) -> bool {
+    let Some(actual) = fields.get(c.field.as_str()) else { return false };
     c.values.iter().any(|v| {
-        let want = resolve(v, caps);
-        // A reference to an uncaptured name never matches.
-        if want.contains('{') && want.contains('}') {
-            return false;
-        }
+        let Some(want) = resolve(v, caps) else { return false };
         match c.op {
-            "contains" => actual.contains(&want),
-            "startswith" => actual.starts_with(&want),
-            "endswith" => actual.ends_with(&want),
-            _ => actual == want,
+            "contains" => actual.contains(want.as_ref()),
+            "startswith" => actual.starts_with(want.as_ref()),
+            "endswith" => actual.ends_with(want.as_ref()),
+            _ => *actual == *want,
         }
     })
 }
 
-fn step_ok(s: &Step, e: &Ev, caps: &HashMap<String, String>) -> bool {
-    s.event == e.kind && s.conds.iter().all(|c| cond_ok(c, e, caps))
+fn step_ok(s: &Step, e: &Ev, fields: &Lowered, caps: &HashMap<String, String>) -> bool {
+    s.event == e.kind && s.conds.iter().all(|c| cond_ok(c, fields, caps))
 }
 
 /// Scope anchor: the first matched process and its parent.
@@ -271,100 +283,121 @@ struct Partial {
     start: DateTime<Local>,
     scope: Option<Anchor>,
     pid: Option<u32>,
+    /// As seen, for the evidence text.
     caps: HashMap<String, String>,
+    /// Lowercased, for matching.
+    lower_caps: HashMap<String, String>,
     events: Vec<String>,
     distinct: BTreeSet<String>,
 }
 
+impl Partial {
+    fn capture(&mut self, step: &Step, e: &Ev) {
+        for (name, field) in &step.capture {
+            if let Some(v) = e.fields.get(field.as_str()) {
+                self.caps.insert(name.clone(), v.clone());
+                self.lower_caps.insert(name.clone(), v.to_lowercase());
+            }
+        }
+    }
+}
+
+/// Live partials per step of a rule.
 const MAX_PARTIALS: usize = 2000;
 
 /// Run every rule over `events` (oldest first).
+///
+/// Partials wait in one list per step, so an event only touches those
+/// waiting for its kind. File writes start a partial each and thousands can
+/// be live, while the step they wait for (a process start) is rare.
 pub fn evaluate(rules: &[Rule], events: &[Ev]) -> Vec<Match> {
+    let lowered: Vec<Lowered> = events.iter().map(|e| e.fields.iter().map(|(k, v)| (*k, v.to_lowercase())).collect()).collect();
+    let none = HashMap::new();
     let mut out = Vec::new();
     for r in rules {
-        let mut partials: Vec<Partial> = Vec::new();
+        let mut waiting: Vec<Vec<Partial>> = vec![Vec::new(); r.steps.len()];
         let mut done: BTreeSet<String> = BTreeSet::new();
         let window = chrono::Duration::seconds(r.within_secs);
-        for e in events {
-            partials.retain(|p| e.time - p.start <= window);
-            let in_scope = |p: &Partial, e: &Ev| match (r.scope.as_str(), p.scope) {
-                (_, None) | ("any", _) => true,
-                ("process", Some(a)) => e.pid == Some(a.pid),
-                (_, Some(a)) => a.tree(e),
-            };
+        let in_scope = |p: &Partial, e: &Ev| match (r.scope.as_str(), p.scope) {
+            (_, None) | ("any", _) => true,
+            ("process", Some(a)) => e.pid == Some(a.pid),
+            (_, Some(a)) => a.tree(e),
+        };
+        for (e, fields) in events.iter().zip(&lowered) {
+            if !r.steps.iter().any(|s| s.event == e.kind) {
+                continue;
+            }
             let mut next: Vec<Partial> = Vec::new();
-            // Count steps advance in place: keeping the original as well
-            // would double the partial on every matching event.
-            let mut consumed: Vec<usize> = Vec::new();
-            for (idx, p) in partials.iter().enumerate() {
-                let s = &r.steps[p.step];
-                if s.event != e.kind || !in_scope(p, e) {
+            for (at, s) in r.steps.iter().enumerate() {
+                if s.event != e.kind {
                     continue;
                 }
-                if !step_ok(s, e, &p.caps) {
-                    continue;
-                }
-                let mut q = p.clone();
-                if s.count > 1 {
-                    let key = s.distinct.as_ref().and_then(|d| e.fields.get(d.as_str()).cloned()).unwrap_or_else(|| e.id.clone());
-                    if !q.distinct.insert(key.to_lowercase()) {
+                let list = &mut waiting[at];
+                list.retain(|p| e.time - p.start <= window);
+                // Count steps advance in place: keeping the original as well
+                // would double the partial on every matching event.
+                let mut consumed: Vec<usize> = Vec::new();
+                for (idx, p) in list.iter().enumerate() {
+                    if !in_scope(p, e) || !step_ok(s, e, fields, &p.lower_caps) {
                         continue;
                     }
-                    q.events.push(e.id.clone());
-                    consumed.push(idx);
-                    if q.distinct.len() < s.count {
-                        next.push(q);
-                        continue;
+                    let mut q = p.clone();
+                    if s.count > 1 {
+                        let key = s.distinct.as_ref().and_then(|d| e.fields.get(d.as_str()).cloned()).unwrap_or_else(|| e.id.clone());
+                        if !q.distinct.insert(key.to_lowercase()) {
+                            continue;
+                        }
+                        q.events.push(e.id.clone());
+                        consumed.push(idx);
+                        if q.distinct.len() < s.count {
+                            next.push(q);
+                            continue;
+                        }
+                        q.distinct.clear();
+                    } else {
+                        q.events.push(e.id.clone());
                     }
-                    q.distinct.clear();
-                } else {
-                    q.events.push(e.id.clone());
-                }
-                for (name, field) in &s.capture {
-                    if let Some(v) = e.fields.get(field.as_str()) {
-                        q.caps.insert(name.clone(), v.clone());
+                    q.capture(s, e);
+                    q.pid = q.pid.or(e.pid);
+                    if q.scope.is_none() && r.scope != "any" {
+                        q.scope = Anchor::of(e);
                     }
+                    q.step += 1;
+                    next.push(q);
                 }
-                q.pid = q.pid.or(e.pid);
-                if q.scope.is_none() && r.scope != "any" {
-                    q.scope = Anchor::of(e);
+                if !consumed.is_empty() {
+                    let (mut idx, mut used) = (0, consumed.iter().copied().peekable());
+                    list.retain(|_| {
+                        let hit = used.next_if_eq(&idx).is_some();
+                        idx += 1;
+                        !hit
+                    });
                 }
-                q.step += 1;
-                next.push(q);
             }
             // A new sequence can start at this event.
             let first = &r.steps[0];
-            if step_ok(first, e, &HashMap::new()) {
-                let mut p = Partial { step: 0, start: e.time, scope: if r.scope == "any" { None } else { Anchor::of(e) }, pid: e.pid, caps: HashMap::new(), events: Vec::new(), distinct: BTreeSet::new() };
+            if step_ok(first, e, fields, &none) {
+                let mut p = Partial {
+                    step: 0,
+                    start: e.time,
+                    scope: if r.scope == "any" { None } else { Anchor::of(e) },
+                    pid: e.pid,
+                    caps: HashMap::new(),
+                    lower_caps: HashMap::new(),
+                    events: vec![e.id.clone()],
+                    distinct: BTreeSet::new(),
+                };
                 if first.count > 1 {
                     let key = first.distinct.as_ref().and_then(|d| e.fields.get(d.as_str()).cloned()).unwrap_or_else(|| e.id.clone());
                     p.distinct.insert(key.to_lowercase());
-                    p.events.push(e.id.clone());
-                    if first.count > 1 {
-                        next.push(p);
-                    }
                 } else {
-                    p.events.push(e.id.clone());
-                    for (name, field) in &first.capture {
-                        if let Some(v) = e.fields.get(field.as_str()) {
-                            p.caps.insert(name.clone(), v.clone());
-                        }
-                    }
+                    p.capture(first, e);
                     p.step = 1;
-                    next.push(p);
                 }
+                next.push(p);
             }
-            // Keep unmatched partials alive, add advanced ones; complete ones
-            // become matches (once per first event). In place: up to
-            // MAX_PARTIALS are live, and most events touch none of them.
-            if !consumed.is_empty() {
-                let (mut idx, mut used) = (0, consumed.iter().copied().peekable());
-                partials.retain(|_| {
-                    let hit = used.next_if_eq(&idx).is_some();
-                    idx += 1;
-                    !hit
-                });
-            }
+            // Complete sequences become matches (once per first event);
+            // the rest wait for their next step.
             for q in next {
                 if q.step >= r.steps.len() {
                     let first_event = q.events.first().cloned().unwrap_or_default();
@@ -383,12 +416,13 @@ pub fn evaluate(rules: &[Rule], events: &[Ev]) -> Vec<Match> {
                         });
                     }
                 } else {
-                    partials.push(q);
+                    let list = &mut waiting[q.step];
+                    list.push(q);
+                    if list.len() > MAX_PARTIALS {
+                        let drop = list.len() - MAX_PARTIALS;
+                        list.drain(..drop);
+                    }
                 }
-            }
-            if partials.len() > MAX_PARTIALS {
-                let drop = partials.len() - MAX_PARTIALS;
-                partials.drain(..drop);
             }
         }
     }
@@ -462,6 +496,30 @@ mod tests {
         assert!(m.iter().any(|x| x.rule == "pw-seq-001"), "{m:?}");
         assert!(m.iter().any(|x| x.rule == "pw-seq-005"), "{m:?}");
         assert!(t.elapsed() < std::time::Duration::from_secs(5), "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn captured_paths_with_braces_and_case_differences_match() {
+        let dir = r"C:\Users\A\Temp\{6F9619FF-8B86-D011-B42D-00C04FC964FF}\Tool.EXE";
+        let evs = vec![
+            ev(0, "file_write", None, None, &[("path", dir)]),
+            ev(1, "process_start", Some(7), Some(1), &[("image", &dir.to_lowercase()), ("name", "tool.exe")]),
+        ];
+        assert!(evaluate(&builtin(), &evs).iter().any(|m| m.rule == "pw-seq-001"));
+        let caps: HashMap<String, String> = [("a".to_string(), "x{y}".to_string())].into();
+        assert_eq!(resolve("{a}", &caps).as_deref(), Some("x{y}"));
+        assert_eq!(resolve("Pre/{a}/End", &caps).as_deref(), Some("pre/x{y}/end"));
+        assert_eq!(resolve("{missing}", &caps), None);
+        assert_eq!(resolve("Plain", &caps).as_deref(), Some("plain"));
+    }
+
+    #[test]
+    fn a_later_step_expires_with_the_window() {
+        let evs = vec![
+            ev(0, "file_write", None, None, &[("path", "/tmp/x")]),
+            ev(100_000, "process_start", Some(7), Some(1), &[("image", "/tmp/x"), ("name", "x")]),
+        ];
+        assert!(!evaluate(&builtin(), &evs).iter().any(|m| m.rule == "pw-seq-001"));
     }
 
     #[test]

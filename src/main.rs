@@ -407,7 +407,7 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::Resu
     let ctl = Arc::new(SamplerCtl {
         interval_ms: AtomicU64::new(cfg.interval_ms),
         paused: AtomicBool::new(false),
-        refresh_now: AtomicBool::new(false),
+        refresh_now: AtomicBool::new(false), snapshots_queued: Default::default(),
     });
     let args: Vec<String> = std::env::args().collect();
     let replay: Option<Option<std::path::PathBuf>> = args

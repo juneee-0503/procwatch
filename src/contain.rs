@@ -42,7 +42,13 @@ pub fn quarantine(case: &Case, path: &Path) -> anyhow::Result<Quarantined> {
     let dir = case.dir.join("quarantine");
     fs::create_dir_all(&dir)?;
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let dest = dir.join(format!("{}_{}.quarantined", &sha[..16], safe(&name)));
+    // Same content from two places: both must stay restorable.
+    let mut dest = dir.join(format!("{}_{}.quarantined", &sha[..16], safe(&name)));
+    let mut n = 1;
+    while dest.exists() {
+        n += 1;
+        dest = dir.join(format!("{}_{}-{n}.quarantined", &sha[..16], safe(&name)));
+    }
     #[cfg(unix)]
     let mode = {
         use std::os::unix::fs::PermissionsExt;
@@ -80,7 +86,7 @@ pub fn quarantine(case: &Case, path: &Path) -> anyhow::Result<Quarantined> {
         mode,
         restored: false,
     };
-    fs::write(record_path(case, &sha), serde_json::to_string_pretty(&rec)?)?;
+    crate::config::write_atomic(&dest.with_extension("json"), &serde_json::to_string_pretty(&rec)?)?;
     let id = case.register_quarantine(&dest, &rec.original_path).map(|i| i.id).unwrap_or_else(|e| format!("(not registered: {e})"));
     case.log("quarantined file", &format!("{id} {} → {} sha256={sha}", rec.original_path, rec.stored_as))?;
     Ok(rec)
@@ -102,16 +108,46 @@ pub fn list(case: &Case) -> Vec<Quarantined> {
 
 /// Put a quarantined file back where it was, with its original mode.
 pub fn restore(case: &Case, q: &Quarantined) -> anyhow::Result<()> {
+    // Records are plain files in a case folder that may have come from
+    // elsewhere: nothing in them is trusted.
     let original = Path::new(&q.original_path);
+    if !original.is_absolute() {
+        anyhow::bail!("record has no absolute original path: {}", q.original_path);
+    }
+    if q.sha256.len() != 64 || !q.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+        anyhow::bail!("record has no valid SHA-256");
+    }
+    let rel = Path::new(&q.stored_as);
+    if !rel.starts_with("quarantine") || !rel.components().all(|c| matches!(c, std::path::Component::Normal(_))) {
+        anyhow::bail!("record points outside the quarantine folder: {}", q.stored_as);
+    }
     if original.exists() {
         anyhow::bail!("{} already exists — move it away first", q.original_path);
     }
-    let stored = case.dir.join(&q.stored_as);
+    let stored = case.dir.join(rel);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&stored, fs::Permissions::from_mode(0o600))?;
     }
+    #[cfg(not(unix))]
+    {
+        let mut p = fs::metadata(&stored)?.permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        p.set_readonly(false);
+        fs::set_permissions(&stored, p)?;
+    }
+    if !sha256_file(&stored)?.eq_ignore_ascii_case(&q.sha256) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&stored, fs::Permissions::from_mode(0o000));
+        }
+        anyhow::bail!("{} no longer matches its recorded hash; not restored", q.stored_as);
+    }
+    // Older cases keep one record per hash.
+    let legacy = record_path(case, &q.sha256);
+    let record = if legacy.exists() { legacy } else { stored.with_extension("json") };
     if let Some(dir) = original.parent() {
         fs::create_dir_all(dir)?;
     }
@@ -126,7 +162,7 @@ pub fn restore(case: &Case, q: &Quarantined) -> anyhow::Result<()> {
     }
     let mut rec = q.clone();
     rec.restored = true;
-    fs::write(record_path(case, &q.sha256), serde_json::to_string_pretty(&rec)?)?;
+    crate::config::write_atomic(&record, &serde_json::to_string_pretty(&rec)?)?;
     case.log("restored file", &format!("{} sha256={}", q.original_path, q.sha256))?;
     Ok(())
 }
@@ -135,6 +171,18 @@ pub fn restore(case: &Case, q: &Quarantined) -> anyhow::Result<()> {
 /// the case folder. `allow` is an optional management address that stays
 /// reachable. Returns the two paths. Nothing is executed.
 pub fn write_isolation_plan(case: &Case, allow: Option<&str>) -> anyhow::Result<(PathBuf, PathBuf)> {
+    if let Some(a) = allow {
+        // It is pasted into shell and firewall syntax.
+        let (ip, bits) = a.split_once('/').map_or((a, None), |(i, b)| (i, Some(b)));
+        let max = match ip.parse::<std::net::IpAddr>() {
+            Ok(std::net::IpAddr::V4(_)) => 32,
+            Ok(std::net::IpAddr::V6(_)) => 128,
+            Err(_) => anyhow::bail!("management address must be an IP or CIDR: {a}"),
+        };
+        if bits.is_some_and(|b| b.parse::<u8>().map_or(true, |n| n > max)) {
+            anyhow::bail!("management address must be an IP or CIDR: {a}");
+        }
+    }
     let dir = case.dir.join("response");
     fs::create_dir_all(&dir)?;
     let (iso_name, res_name, iso, res) = scripts(allow);
@@ -234,6 +282,70 @@ fn scripts(_allow: Option<&str>) -> (&'static str, &'static str, String, String)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_case(tag: &str) -> (Case, PathBuf) {
+        let root = std::env::temp_dir().join(format!("procwatch-contain-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        (Case::create(&root).unwrap(), root)
+    }
+
+    #[test]
+    fn identical_files_from_two_places_both_restore() {
+        let (case, root) = test_case("twins");
+        let (a, b) = (root.join("a"), root.join("b"));
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        let (fa, fb) = (a.join("same.bin"), b.join("same.bin"));
+        fs::write(&fa, b"payload").unwrap();
+        fs::write(&fb, b"payload").unwrap();
+        quarantine(&case, &fa).unwrap();
+        quarantine(&case, &fb).unwrap();
+        let held = list(&case);
+        assert_eq!(held.len(), 2, "{held:?}");
+        for q in &held {
+            restore(&case, q).unwrap();
+        }
+        assert!(fa.exists() && fb.exists());
+        assert!(list(&case).iter().all(|q| q.restored));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn restore_refuses_crafted_or_altered_records() {
+        let (case, root) = test_case("crafted");
+        let f = root.join("evil.bin");
+        fs::write(&f, b"payload").unwrap();
+        let q = quarantine(&case, &f).unwrap();
+        let outside = root.join("secret");
+        fs::write(&outside, b"secret").unwrap();
+        for bad in [
+            Quarantined { stored_as: "../secret".into(), ..q.clone() },
+            Quarantined { stored_as: outside.display().to_string(), ..q.clone() },
+            Quarantined { sha256: "short".into(), ..q.clone() },
+            Quarantined { original_path: "relative/path".into(), ..q.clone() },
+            Quarantined { sha256: "0".repeat(64), ..q.clone() },
+        ] {
+            assert!(restore(&case, &bad).is_err(), "{bad:?}");
+            assert!(!f.exists());
+        }
+        assert!(outside.exists());
+        restore(&case, &q).unwrap();
+        assert!(f.exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn isolation_plan_only_takes_addresses() {
+        let (case, root) = test_case("allow");
+        for bad in ["10.0.0.5; rm -rf /", "host.example", "10.0.0.5/33", "::1/129", "$(id)"] {
+            assert!(write_isolation_plan(&case, Some(bad)).is_err(), "{bad}");
+        }
+        for good in ["10.0.0.5", "10.0.0.0/24", "2001:db8::1"] {
+            assert!(write_isolation_plan(&case, Some(good)).is_ok(), "{good}");
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn quarantine_and_restore_round_trip() {

@@ -259,6 +259,29 @@ pub fn verify_chain(text: &str) -> ChainStatus {
     st
 }
 
+/// The chain value of the last record, without re-hashing the whole log on
+/// every append. Same result as `verify_chain(..).head`.
+fn last_chain(path: &Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    const TAIL: u64 = 64 * 1024;
+    let mut f = fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let start = len.saturating_sub(TAIL);
+    f.seek(SeekFrom::Start(start)).ok()?;
+    let mut tail = Vec::new();
+    f.read_to_end(&mut tail).ok()?;
+    let text = String::from_utf8_lossy(&tail);
+    // The first line of a partial read may be cut off.
+    let whole = if start > 0 { text.split_once('\n').map_or("", |(_, r)| r) } else { &text };
+    if let Some(chain) = whole.lines().rev().find_map(|l| l.rsplit_once(" | chain=").map(|(_, c)| c.trim().to_string())) {
+        return Some(chain);
+    }
+    if start == 0 {
+        return None;
+    }
+    Some(verify_chain(&fs::read_to_string(path).ok()?).head).filter(|h| !h.is_empty())
+}
+
 /// Serialises custody appends and register updates across threads.
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
@@ -334,7 +357,7 @@ impl Case {
     pub fn log(&self, action: &str, detail: &str) -> anyhow::Result<()> {
         let _g = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let path = self.dir.join("custody.log");
-        let prev = fs::read_to_string(&path).ok().map(|t| verify_chain(&t).head).filter(|h| !h.is_empty()).unwrap_or_else(|| GENESIS.into());
+        let prev = last_chain(&path).unwrap_or_else(|| GENESIS.into());
         let clean = |s: &str| s.replace(['\n', '\r'], " ");
         let body = format!("{} | {} | {} | {}", now(), clean(&self.examiner), clean(action), clean(detail));
         let chain = chain_next(&prev, &body);
@@ -364,6 +387,25 @@ impl Case {
 
     pub fn chain_status(&self) -> ChainStatus {
         verify_chain(&fs::read_to_string(self.dir.join("custody.log")).unwrap_or_default())
+    }
+
+    /// For display, which happens on every draw: re-hashes only when the
+    /// log changed. Sealing and verifying use [`Case::chain_status`].
+    pub fn chain_status_cached(&self) -> ChainStatus {
+        type Memo = Option<(PathBuf, u64, Option<std::time::SystemTime>, ChainStatus)>;
+        static MEMO: Mutex<Memo> = Mutex::new(None);
+        let path = self.dir.join("custody.log");
+        let meta = fs::metadata(&path).ok();
+        let (len, mtime) = (meta.as_ref().map_or(0, |m| m.len()), meta.as_ref().and_then(|m| m.modified().ok()));
+        let mut memo = MEMO.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((p, l, t, st)) = memo.as_ref() {
+            if *p == path && *l == len && *t == mtime {
+                return st.clone();
+            }
+        }
+        let st = self.chain_status();
+        *memo = Some((path, len, mtime, st.clone()));
+        st
     }
 
     // ── evidence register ──────────────────────────────────────────────
@@ -932,6 +974,27 @@ impl Case {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn appending_from_the_tail_matches_the_full_chain() {
+        let dir = std::env::temp_dir().join(format!("procwatch-tail-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let case = Case::create(&dir).unwrap();
+        // Longer than the tail that is read, with one huge record last.
+        for i in 0..400 {
+            case.log("action", &format!("{i} {}", "x".repeat(300))).unwrap();
+        }
+        case.log("big", &"y".repeat(100_000)).unwrap();
+        case.log("after", "still chained").unwrap();
+        let st = case.chain_status();
+        assert!(st.broken.is_none(), "{:?}", st.broken);
+        assert_eq!(last_chain(&case.dir.join("custody.log")).unwrap(), st.head);
+        assert_eq!(case.chain_status_cached().head, st.head);
+        case.log("newer", "").unwrap();
+        assert_ne!(case.chain_status_cached().head, st.head, "the cache follows the log");
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn case_lifecycle() {
