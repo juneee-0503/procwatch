@@ -108,6 +108,9 @@ pub fn cluster(events: &[Ev]) -> Vec<Cluster> {
     // attaching path-only events.
     let mut out = Vec::new();
     let window = Duration::seconds(WINDOW_SECS);
+    // Only these can attach by path; scanning all events for every burst
+    // goes quadratic when many log events each form their own burst.
+    let path_only: Vec<usize> = events.iter().enumerate().filter(|(_, e)| e.pid.is_none() && (e.source == "file" || e.source == "persist")).map(|(i, _)| i).collect();
     let mut roots: Vec<u32> = by_root.keys().copied().collect();
     roots.sort_unstable();
     for root in roots {
@@ -135,10 +138,8 @@ pub fn cluster(events: &[Ev]) -> Vec<Cluster> {
             let mut links = vec!["process lineage".to_string()];
             // Path links: a changed file that is (or a persistence entry
             // that launches) the executable of a cluster process.
-            for (j, e) in events.iter().enumerate() {
-                if e.pid.is_some() || !(e.source == "file" || e.source == "persist") {
-                    continue;
-                }
+            for &j in if exes.is_empty() { &[][..] } else { &path_only[..] } {
+                let e = &events[j];
                 if e.time < start - window || e.time > end + window {
                     continue;
                 }

@@ -5,7 +5,8 @@
 //! time. Fails if memory keeps growing after warm-up or a worker panics.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc};
+use std::collections::BTreeMap;
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ratatui::{backend::TestBackend, Terminal};
@@ -15,8 +16,34 @@ use crate::config::Config;
 use crate::sampler::{self, SamplerCtl};
 
 /// What the main loop is doing right now, for the watchdog.
-static PHASE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+static PHASE: Mutex<String> = Mutex::new(String::new());
 static BEAT: AtomicU64 = AtomicU64::new(0);
+/// Per message type: count, total and longest handling time.
+static HANDLED: Mutex<BTreeMap<&'static str, (u64, Duration, Duration)>> = Mutex::new(BTreeMap::new());
+
+fn record_handled(name: &'static str, took: Duration) {
+    if let Ok(mut h) = HANDLED.lock() {
+        let e = h.entry(name).or_default();
+        e.0 += 1;
+        e.1 += took;
+        e.2 = e.2.max(took);
+    }
+}
+
+/// Where message-handling time went, largest first.
+fn handled_report() -> Vec<String> {
+    let Ok(h) = HANDLED.lock() else { return Vec::new() };
+    let mut rows: Vec<_> = h.iter().collect();
+    rows.sort_by_key(|(_, v)| std::cmp::Reverse(v.1));
+    rows.iter()
+        .take(6)
+        .map(|(name, (n, total, max))| format!("  {name:<12} {n:>7} msgs  {:>9.1} s total  {:>8.1} ms longest", total.as_secs_f64(), max.as_secs_f64() * 1000.0))
+        .collect()
+}
+
+fn handled_total() -> Duration {
+    HANDLED.lock().map(|h| h.values().map(|v| v.1).sum()).unwrap_or_default()
+}
 
 fn phase(p: impl Into<String>) {
     if let Ok(mut s) = PHASE.lock() {
@@ -25,9 +52,10 @@ fn phase(p: impl Into<String>) {
     BEAT.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Fail fast with a diagnosis if the loop stops making progress, instead of
-/// hanging until an outer timeout.
-fn watchdog(limit: Duration) {
+/// Fail fast with a diagnosis if the loop stops making progress or runs past
+/// its end, instead of hanging until an outer timeout. Heartbeats alone
+/// can't show the latter: a loop stuck draining messages still beats.
+fn watchdog(limit: Duration, deadline: Instant) {
     let _ = std::thread::Builder::new().name("soak-watchdog".into()).spawn(move || {
         let mut last = BEAT.load(Ordering::Relaxed);
         let mut since = Instant::now();
@@ -37,9 +65,15 @@ fn watchdog(limit: Duration) {
             if now != last {
                 last = now;
                 since = Instant::now();
-            } else if since.elapsed() >= limit {
+            }
+            let stuck = since.elapsed() >= limit;
+            if stuck || Instant::now() >= deadline {
                 let p = PHASE.lock().map(|s| s.clone()).unwrap_or_default();
-                println!("soak: FAILED — main loop stuck for {} s in: {p}", since.elapsed().as_secs());
+                let why = if stuck { format!("main loop stuck for {} s", since.elapsed().as_secs()) } else { "still running past its end".to_string() };
+                println!("soak: FAILED — {why}, last in: {p}");
+                for l in handled_report() {
+                    println!("{l}");
+                }
                 std::process::exit(3);
             }
         }
@@ -182,14 +216,19 @@ pub fn run(minutes: u64) -> i32 {
     let mut frames = 0u64;
     let mut panics = Vec::new();
     let tabs = Tab::ALL;
-    watchdog(Duration::from_secs(90));
+    watchdog(Duration::from_secs(90), end + Duration::from_secs(60));
+    let mut cut_short = 0u64;
     println!("soak: {minutes} min, sampling every 1 s, churn workload {}", if child.is_some() { "running" } else { "unavailable" });
     println!("{:>7} {:>9} {:>6} {:>9} {:>7} {:>7} {:>11}", "minute", "RSS MB", "CPU%", "timeline", "net", "deep", "detections");
     while Instant::now() < end {
-        while let Ok(msg) = rx.try_recv() {
-            phase(format!("handling worker message {}", msg_name(&msg)));
+        let drained = sampler::drain_for(&rx, Duration::from_millis(100), |msg| {
+            let name = msg_name(&msg);
+            phase(format!("handling worker message {name}"));
+            let t = Instant::now();
             app.on_worker_msg(msg);
-        }
+            record_handled(name, t.elapsed());
+        });
+        cut_short += drained.more as u64;
         phase("loop top");
         if let Some(m) = crate::WORKER_PANIC.lock().ok().and_then(|mut m| m.take()) {
             panics.push(m);
@@ -241,7 +280,9 @@ pub fn run(minutes: u64) -> i32 {
             samples.push(s);
             last_sample = Instant::now();
         }
-        std::thread::sleep(Duration::from_millis(20));
+        if !drained.more {
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
     phase("stopping the workload");
     if let Some(w) = child.as_mut() {
@@ -254,10 +295,20 @@ pub fn run(minutes: u64) -> i32 {
     let growth = rss - base;
     let limit = (base * 0.5).max(64.0);
     println!("frames rendered: {frames} · final RSS {rss:.1} MB · growth after warm-up {growth:+.1} MB (limit {limit:.0} MB)");
+    let busy = handled_total().as_secs_f64() / start.elapsed().as_secs_f64().max(1.0);
+    println!("message handling: {:.0}% of the run · drain cut short {cut_short} times", busy * 100.0);
+    for l in handled_report() {
+        println!("{l}");
+    }
     for p in &panics {
         println!("PANIC: {p}");
     }
-    if !panics.is_empty() || growth > limit {
+    // Falling behind must not pass just because the drain is bounded.
+    let behind = busy > 0.8;
+    if behind {
+        println!("message handling can't keep up with the workers");
+    }
+    if !panics.is_empty() || growth > limit || behind {
         println!("soak: FAILED");
         1
     } else {

@@ -48,7 +48,7 @@ mod ui;
 
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64};
-use std::sync::mpsc::{self, TryRecvError};
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -460,16 +460,14 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::Resu
     let mut dirty = true;
     let mut last_tick = Instant::now();
     loop {
-        // Drain everything the workers produced since the last frame.
-        loop {
-            match rx.try_recv() {
-                Ok(msg) => {
-                    app.on_worker_msg(msg);
-                    dirty = true;
-                }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => anyhow::bail!("sampler thread stopped unexpectedly"),
-            }
+        // Handle what the workers produced, but never so long that keys and
+        // drawing starve: under a flood the rest waits for the next pass.
+        let drained = sampler::drain_for(&rx, Duration::from_millis(40), |msg| {
+            app.on_worker_msg(msg);
+            dirty = true;
+        });
+        if drained.disconnected {
+            anyhow::bail!("sampler thread stopped unexpectedly");
         }
 
         if let Some(msg) = WORKER_PANIC.lock().ok().and_then(|mut m| m.take()) {
@@ -489,7 +487,7 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::Resu
             dirty = false;
         }
 
-        let timeout = tick_rate.saturating_sub(last_tick.elapsed()).min(Duration::from_millis(50));
+        let timeout = if drained.more { Duration::ZERO } else { tick_rate.saturating_sub(last_tick.elapsed()).min(Duration::from_millis(50)) };
         if event::poll(timeout)? {
             // Handle a burst of input (held key, mouse wheel) before
             // redrawing once.
