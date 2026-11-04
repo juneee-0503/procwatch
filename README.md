@@ -7,8 +7,9 @@ Process Explorer 的精简终端版。附带一个 Linux 后端作为"自检用�
 ## 构建状态
 
 macOS(aarch64)上 `cargo build` / `cargo test` / `cargo clippy --all-targets` 零警告,并在真实终端中
-逐屏驱动验证;Windows(`x86_64-pc-windows-msvc`)与 Linux(`x86_64-unknown-linux-gnu`)目标通过
-`cargo clippy --target …` 零警告类型检查。Windows 上的原生调用与 PowerShell 脚本尚未在 Windows 真机运行过。
+逐屏驱动验证。Linux 与 Windows 在 GitHub Actions 上实际运行:clippy、单元测试、解析器模糊测试、`--selftest`、
+`--soak 2` 和规则校验全部通过(提交 `1160a9e`,CI 运行 41842370540)。这两个平台只在 CI 的无界面环境里跑过,
+尚未在真实系统上交互使用;Windows 上是 Windows Server 虚拟机,不是桌面系统。
 
 ## 界面
 
@@ -280,9 +281,23 @@ cargo build --release
 ## 可信度、底层能力与特色功能(本轮)
 
 ### 可信度
-- **持续集成**:`.github/workflows/ci.yml` 在 Linux、macOS、Windows 三个平台上执行:`clippy -D warnings`、全部单元测试、解析器模糊测试、`--selftest`、`--soak 2`、规则校验。Windows/Linux 的真实运行结果以 CI 为准。
+- **持续集成**:`.github/workflows/ci.yml` 在 Linux、macOS、Windows 三个平台上执行:`clippy -D warnings`、全部单元测试、解析器模糊测试、`--selftest`、`--soak 2`、规则校验。三平台实测结果见下表(提交 `1160a9e`,CI 虚拟机上的单次运行,不代表所有环境)。
+
+  | | macOS | Linux | Windows |
+  |---|---|---|---|
+  | 单元测试(另有 5 个模糊测试) | 98 | 96 | 93 |
+  | 深度追踪方式 | kqueue | procfs 轮询(20 ms) | ETW 或 ToolHelp(100 ms) |
+  | 抓到最短命进程 | 0 ms 档 4/4 | 0 ms 档 1/4(上一轮 0/4),50 ms 档 4/4 | ~30 ms 档 4/4(同档采样 0/4) |
+  | 事件顺序错误 | 0 | 0 | 0 |
+  | PID 复用保护 | 全部正确 | 全部正确 | 全部正确 |
+  | 文件变化通知延迟 | 18 ms | <1 ms | <1 ms |
+  | soak 2 分钟:最终内存 / 预热后增长 | 41.5 MB / +1.7 MB | 22.8 MB / +2.0 MB | 31.4 MB / +2.4 MB |
+  | soak 消息处理占比 | 1% | 0% | 9% |
+  | soak 单次快照处理最长 | 32.6 ms | 14.9 ms | **2222 ms** |
+
+  测试数量不同是因为部分测试只在对应平台编译(Unix 进程测试、Mach-O、codesign 等)。延迟 `<1 ms` 是取整后显示 0 的结果。
 - **解析器模糊测试**(`src/fuzz.rs`):对所有读取不可信数据的解析器(PE/Mach-O/ELF、Prefetch/Xpress、ShimCache、注册表 hive、EVTX、YARA/Sigma 规则、IOC、shell 历史、base64)做确定性变异测试,要求不崩溃、单个输入 2 秒内完成。已发现并修复两个真实问题:YARA 转义序列遇到多字节 UTF-8 时崩溃;universal Mach-O 的 slice 指回自身时无限递归。运行:`cargo test --release fuzz_ -- --ignored`(`PW_FUZZ_ITERATIONS` 控制次数)。
-- **长时间稳定性**:`procwatch --soak MINUTES` 无界面运行完整流水线(采样、检测、深度追踪、时间线重建、离屏渲染所有页面),在无害的进程更替负载下记录内存、CPU 和缓冲区大小;内存持续增长或后台线程崩溃即失败。本机 3 分钟:常驻内存约 60–70 MB,预热后增长 ≤10 MB(深度追踪缓冲区填充至上限前)。
+- **长时间稳定性**:`procwatch --soak MINUTES` 无界面运行完整流水线(采样、检测、深度追踪、时间线重建、离屏渲染所有页面),在无害的进程更替负载下记录内存、CPU 和缓冲区大小;内存持续增长、后台线程崩溃、消息处理占用超过运行时间 80% 或超过结束时间仍未退出,都判为失败;输出里列出各类消息的数量和耗时。本机 3 分钟:常驻内存约 60–70 MB,预热后增长 ≤10 MB(深度追踪缓冲区填充至上限前)。
 
 ### 底层能力
 - **持久事件历史**:所有观测到的事件(进程启动/退出、网络、文件、深度追踪、模块/文件快照差异、检测、自启动项变化,以及每 10 分钟一次的进程表快照)按天写入 JSON Lines,位于用户数据目录(macOS `~/Library/Application Support/procwatch/events`,Linux `~/.local/share/procwatch/events`,Windows `%LOCALAPPDATA%\\procwatch\\events`),上限 256 MB / 14 天,设置文件 `history = off` 可关闭。案件采集时会把本次会话的历史复制为 `evidence/events.jsonl`。
@@ -303,7 +318,11 @@ cargo build --release
 - **命令面板**:`:` 或 `ctrl+k`,按名称模糊搜索并执行任何操作。
 
 ### 仍未完成 / 未验证
-- Windows 上的 ETW、`--run`、Amcache/BAM/Prefetch 实时采集,以及 Linux 的 fanotify,仅通过类型检查和单元测试;在真实系统上的结果需要看 CI 和实际使用。
+- Windows 上单次快照处理最长 2.2 秒(其他平台最长约 33 ms),这段时间界面无响应:消息循环的时间预算只能在两条消息之间生效,打断不了单条消息。原因尚未定位;soak 期间 Windows 每 2 秒左右才完成一次快照(2 分钟 58 次)。
+- Windows 上 soak 早先多次跑不到终点。为消息循环加上时间预算、去掉 `cluster` 的全量扫描后才跑通,但两项改动是一起上线的,没有单独验证究竟是哪一项解决了问题。
+- Linux 的 procfs 轮询会漏掉 20 ms 以内的进程(0 ms 档 4 个只抓到 0–1 个);需要 root 的 netlink proc connector 未实现。
+- Windows 上自测输出没有标明实际用的是 ETW 还是 ToolHelp;~30 ms 进程 4/4 被抓到说明很可能是 ETW,但这是推断。
+- Windows 的 `--run`、Amcache/BAM/Prefetch 实时采集,以及 Linux 的 fanotify,仅通过类型检查和单元测试,CI 没有运行这些路径。
 - macOS 的 `fs_usage` 归属需要 root,本轮只测了输出解析,没有以 root 实际运行。
 - Endpoint Security 需要苹果签发的授权,未接入;macOS 上 DNS 查询日志的域名被系统脱敏,无法做进程级 DNS 关联。
 
