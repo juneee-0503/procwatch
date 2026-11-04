@@ -36,9 +36,11 @@ jobs:
         env:
           PW_FUZZ_ITERATIONS: "3000"
       - name: Self-test (measured capture rates etc.)
+        timeout-minutes: 5
         run: ./target/release/procwatch --selftest
         shell: bash
       - name: Soak test (2 minutes, headless)
+        timeout-minutes: 8
         run: ./target/release/procwatch --soak 2
         shell: bash
       - name: Content rules and Sigma rules parse

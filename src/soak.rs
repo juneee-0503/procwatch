@@ -62,35 +62,55 @@ fn own_usage(sys: &mut sysinfo::System) -> (f64, f32) {
     sys.process(me).map(|p| (p.memory() as f64 / 1_048_576.0, p.cpu_usage())).unwrap_or((0.0, 0.0))
 }
 
-/// Harmless churn: a shell starting short-lived children. Detached from
-/// procwatch (procwatch never traces its own helpers); returns its pid.
-fn workload(minutes: u64) -> Option<u32> {
+/// Harmless churn: a shell starting short-lived children for the whole run.
+struct Workload {
+    pid: u32,
+    /// Start time, so a reused PID is never touched.
+    #[cfg(unix)]
+    start: u64,
+    #[cfg(windows)]
+    child: std::process::Child,
+}
+
+/// Detached from procwatch on Unix (it never traces its own helpers).
+fn workload(minutes: u64) -> Option<Workload> {
     #[cfg(unix)]
     {
         let loops = minutes * 60 * 5;
         let inner = format!("i=0; while [ $i -lt {loops} ]; do /bin/echo x >/dev/null; sleep 0.2; i=$((i+1)); done");
         let out = std::process::Command::new("/bin/sh").args(["-c", &format!("/bin/sh -c '{inner}' >/dev/null 2>&1 & echo $!")]).output().ok()?;
-        String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+        let pid: u32 = String::from_utf8_lossy(&out.stdout).trim().parse().ok()?;
+        Some(Workload { pid, start: crate::process::native::start_time(pid).unwrap_or(0) })
     }
     #[cfg(windows)]
     {
-        let loops = minutes * 60 * 2;
-        std::process::Command::new("cmd")
-            .args(["/C", &format!("for /L %i in (1,1,{loops}) do @(ver >NUL & ping -n 1 127.0.0.1 >NUL)")])
+        // ping -n 2 waits about a second, so this lasts the whole run.
+        let loops = minutes * 60 + 30;
+        let child = std::process::Command::new("cmd")
+            .args(["/C", &format!("for /L %i in (1,1,{loops}) do @(ver >NUL & ping -n 2 127.0.0.1 >NUL)")])
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
-            .ok()
-            .map(|c| c.id())
+            .ok()?;
+        Some(Workload { pid: child.id(), child })
     }
 }
 
-fn stop(pid: u32) {
+/// Stop the workload: by handle on Windows; on Unix only if the PID is
+/// still the same process. Never by bare PID — it may have been reused.
+fn stop(w: &mut Workload) {
     #[cfg(unix)]
-    unsafe {
-        libc::kill(pid as libc::pid_t, libc::SIGTERM);
+    if crate::process::native::start_time(w.pid).is_some_and(|s| s.abs_diff(w.start) <= 2) {
+        unsafe {
+            libc::kill(w.pid as libc::pid_t, libc::SIGTERM);
+        }
     }
     #[cfg(windows)]
-    let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).output();
+    {
+        let _ = w.child.kill();
+        let _ = w.child.wait();
+    }
 }
 
 fn msg_name(m: &crate::sampler::WorkerMsg) -> &'static str {
@@ -145,7 +165,12 @@ pub fn run(minutes: u64) -> i32 {
             return 2;
         }
     };
-    let child = workload(minutes);
+    let mut child = workload(minutes);
+    let child_pid = child.as_ref().map(|w| w.pid);
+    if let Some(p) = child_pid {
+        // Our child on Windows, but it is the thing under test.
+        app.ir.launched.insert(p);
+    }
     let mut traced = false;
     let mut sys = sysinfo::System::new();
     let start = Instant::now();
@@ -175,7 +200,7 @@ pub fn run(minutes: u64) -> i32 {
             last_tick = Instant::now();
         }
         if !traced {
-            if let Some(c) = child {
+            if let Some(c) = child_pid {
                 if app.tree.get(c).is_some() {
                     app.deep_enroll(c, "soak workload".into(), false);
                     traced = true;
@@ -186,7 +211,7 @@ pub fn run(minutes: u64) -> i32 {
         if last_draw.elapsed() >= Duration::from_secs(1) {
             app.tab = tabs[(frames as usize) % tabs.len()];
             if frames % 7 == 3 {
-                if let Some(c) = child {
+                if let Some(c) = child_pid {
                     phase("opening the workspace");
                     let k = app.proc_key(c);
                     app.open_workspace_for(k);
@@ -218,9 +243,11 @@ pub fn run(minutes: u64) -> i32 {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    if let Some(c) = child {
-        stop(c);
+    phase("stopping the workload");
+    if let Some(w) = child.as_mut() {
+        stop(w);
     }
+    phase("final measurements");
     let (rss, _) = own_usage(&mut sys);
     // Growth after warm-up (first sample past the first minute).
     let base = samples.iter().find(|s| s.minute >= 1.0).or(samples.first()).map(|s| s.rss_mb).unwrap_or(rss);

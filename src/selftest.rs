@@ -50,9 +50,9 @@ pub fn platform_status() -> (&'static str, &'static str) {
     if cfg!(target_os = "macos") {
         ("macOS", "verified on a real system (interactive and automated tests)")
     } else if cfg!(target_os = "linux") {
-        ("Linux", "compiles and passes unit tests; not yet verified interactively on a real system")
+        ("Linux", "unit tests, self-test and soak run in CI; not yet used interactively on a real system")
     } else if cfg!(windows) {
-        ("Windows", "compiles and passes unit tests on other platforms; NOT yet run on a real Windows system")
+        ("Windows", "unit tests, self-test and soak run in CI (Windows Server); not yet used interactively on a real system")
     } else {
         ("other", "unsupported")
     }

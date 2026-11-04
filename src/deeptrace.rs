@@ -6,7 +6,8 @@
 //!   and watched in turn, so short-lived children are seen even when they
 //!   live far less than one refresh. No special entitlement is needed.
 //! - Linux: `/proc/PID/task/*/children` and `/proc/PID/exe` polled every
-//!   50 ms for watched processes only.
+//!   20 ms for watched processes only, so children that live less than
+//!   that can be missed (`--selftest` measures it).
 //! - Windows: a ToolHelp process snapshot every 100 ms, filtered to
 //!   children of watched processes.
 //!
@@ -280,7 +281,7 @@ mod imp {
 mod imp {
     use super::*;
 
-    pub const METHOD: &str = "procfs polling every 50 ms";
+    pub const METHOD: &str = "procfs polling every 20 ms";
 
     fn exe(pid: u32) -> Option<String> {
         std::fs::read_link(format!("/proc/{pid}/exe")).ok().map(|p| p.display().to_string())
@@ -354,7 +355,7 @@ mod imp {
             if !send(out, &mut batch) {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(50));
+            std::thread::sleep(Duration::from_millis(20));
         }
     }
 }
@@ -571,14 +572,15 @@ mod imp {
 mod tests {
     use super::*;
 
-    /// Start a shell that spawns very short-lived children; the watcher
-    /// must see them although each lives only milliseconds.
+    /// Start a shell that spawns short-lived children; the watcher must see
+    /// them although each lives far less than a refresh. kqueue catches
+    /// millisecond lifetimes; polling needs them longer than its interval.
     #[test]
     fn sees_short_lived_children() {
         let (tx, rx) = std::sync::mpsc::channel();
         let w = Watcher::start(tx).expect("watcher");
         let mut sh = std::process::Command::new("/bin/sh")
-            .args(["-c", "sleep 0.3; for i in 1 2 3 4 5; do /usr/bin/true; done; sleep 0.3"])
+            .args(["-c", if cfg!(target_os = "macos") { "sleep 0.3; for i in 1 2 3 4 5; do /usr/bin/true; done; sleep 0.3" } else { "sleep 0.3; for i in 1 2 3 4 5; do sleep 0.1; done; sleep 0.3" }])
             .spawn()
             .unwrap();
         w.watch(sh.id());
@@ -595,8 +597,8 @@ mod tests {
                 break;
             }
         }
-        // sleep + 5×true + sleep = 7 children; allow a miss or two on a
-        // loaded machine, but far more than sampling would catch.
+        // sleep + 5 short ones + sleep = 7 children; allow a miss or two on
+        // a loaded machine, but far more than sampling would catch.
         assert!(spawns >= 5, "saw {spawns} spawns");
         assert_eq!(exits, 1, "parent exit seen exactly once");
     }

@@ -175,6 +175,12 @@ mod imp {
             let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else { continue };
             let Ok(fds) = fs::read_dir(entry.path().join("fd")) else { continue };
             let command = fs::read_to_string(entry.path().join("comm")).unwrap_or_default().trim().to_string();
+            // Like lsof: the working directory and executable count too.
+            for (link, fd, kind) in [("cwd", "cwd", "DIR"), ("exe", "txt", "REG")] {
+                if let Ok(t) = fs::read_link(entry.path().join(link)) {
+                    hits.push(Hit { pid, command: command.clone(), fd: fd.into(), kind: kind.into(), path: t.display().to_string() });
+                }
+            }
             for fd in fds.flatten() {
                 let Ok(target) = fs::read_link(fd.path()) else { continue };
                 let path = target.display().to_string();

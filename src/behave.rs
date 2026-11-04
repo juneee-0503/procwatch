@@ -293,7 +293,10 @@ pub fn evaluate(rules: &[Rule], events: &[Ev]) -> Vec<Match> {
                 (_, Some(a)) => a.tree(e),
             };
             let mut next: Vec<Partial> = Vec::new();
-            for p in &partials {
+            // Count steps advance in place: keeping the original as well
+            // would double the partial on every matching event.
+            let mut consumed = vec![false; partials.len()];
+            for (idx, p) in partials.iter().enumerate() {
                 let s = &r.steps[p.step];
                 if !in_scope(p, e) {
                     continue;
@@ -308,6 +311,7 @@ pub fn evaluate(rules: &[Rule], events: &[Ev]) -> Vec<Match> {
                         continue;
                     }
                     q.events.push(e.id.clone());
+                    consumed[idx] = true;
                     if q.distinct.len() < s.count {
                         next.push(q);
                         continue;
@@ -352,7 +356,7 @@ pub fn evaluate(rules: &[Rule], events: &[Ev]) -> Vec<Match> {
             }
             // Keep unmatched partials alive, add advanced ones; complete ones
             // become matches (once per first event).
-            let mut keep: Vec<Partial> = partials.into_iter().filter(|p| p.step < r.steps.len()).collect();
+            let mut keep: Vec<Partial> = partials.into_iter().zip(consumed).filter(|(p, used)| !used && p.step < r.steps.len()).map(|(p, _)| p).collect();
             for q in next {
                 if q.step >= r.steps.len() {
                     let first_event = q.events.first().cloned().unwrap_or_default();
