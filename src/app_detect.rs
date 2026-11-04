@@ -600,6 +600,16 @@ impl App {
                 format!("couldn't watch: {}", self.ir.watch_errors.join("; "))
             },
         ));
+        v.push(match (&self.ir.capture, &self.ir.capture_error) {
+            (Some(c), _) => Source::new("Process activity", Status::Available, format!("{}; {} events dropped under load", c.method, crate::activity::dropped())),
+            (None, Some(e)) => Source::new("Process activity", Status::Denied, e.clone()),
+            (None, None) => Source::new("Process activity", Status::NotLoaded, "not capturing: start it on the Activity page"),
+        });
+        v.push(match (self.ir.traffic_method(), &self.ir.traffic_error) {
+            (Some(m), _) => Source::new("Per-process traffic", Status::Available, m),
+            (None, Some(e)) => Source::new("Per-process traffic", Status::Denied, e.clone()),
+            (None, None) => Source::new("Per-process traffic", Status::NotLoaded, "starting"),
+        });
         v.push(match &self.ir.persistence {
             None => Source::new("Persistence", Status::NotLoaded, "open the Persistence page to scan"),
             Some(l) if l.pending => Source::new("Persistence", Status::NotLoaded, "scanning…"),

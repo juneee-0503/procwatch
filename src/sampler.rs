@@ -60,6 +60,10 @@ pub enum WorkerMsg {
     FileList(Result<Vec<crate::os::Hit>, String>),
     /// Open files of the processes being traced.
     TraceFiles(HashMap<u32, Result<Vec<crate::inspect::OpenFile>, String>>),
+    /// A batch of per-process file, registry and network operations.
+    Activity(Vec<crate::activity::Activity>),
+    /// Bytes per process since monitoring started.
+    Traffic(crate::netio::Totals),
     /// Configured resolvers and the OS DNS cache.
     Dns { resolvers: Vec<String>, cache: Result<Vec<(String, String)>, String> },
     /// Libraries an executable links against, for an open workspace.

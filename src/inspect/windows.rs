@@ -16,7 +16,7 @@ const TIMEOUT: Duration = Duration::from_secs(15);
 
 pub fn inspect(pid: u32, exe_path: Option<&str>, modules: bool) -> DeepInfo {
     let mut info = DeepInfo {
-        open_files: Err("per-handle enumeration needs Sysinternals handle.exe; the handle count is shown instead".into()),
+        open_files: crate::handles::for_process(pid),
         modules_loaded: modules,
         ..DeepInfo::default()
     };

@@ -35,6 +35,8 @@ pub struct ProcessInfo {
     pub cpu_time_secs: Option<f64>,
     /// Bytes per second over the last sampling interval.
     pub disk_read_rate: f64,
+    /// Network bytes per second, in and out; 0 when unknown.
+    pub net_rate: f64,
     pub disk_write_rate: f64,
     pub disk_read_total: u64,
     pub disk_write_total: u64,
@@ -71,6 +73,7 @@ impl ProcessInfo {
             cpu_time_secs: None,
             disk_read_rate: 0.0,
             disk_write_rate: 0.0,
+            net_rate: 0.0,
             disk_read_total: 0,
             disk_write_total: 0,
             footprint: None,
@@ -229,6 +232,12 @@ impl ProcessMonitor {
         }
     }
 
+    /// Process names by pid.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn names(&self) -> HashMap<u32, String> {
+        self.sys.processes().iter().map(|(pid, p)| (pid.as_u32(), p.name().to_string_lossy().into_owned())).collect()
+    }
+
     /// Changes between samples.
     fn light_kind() -> ProcessRefreshKind {
         ProcessRefreshKind::new().with_cpu().with_memory().with_disk_usage()
@@ -351,6 +360,7 @@ impl ProcessMonitor {
                 cpu_time_secs: n.cpu_time,
                 disk_read_rate: du.read_bytes as f64 / elapsed,
                 disk_write_rate: du.written_bytes as f64 / elapsed,
+                net_rate: 0.0,
                 disk_read_total: du.total_read_bytes,
                 disk_write_total: du.total_written_bytes,
                 footprint: n.footprint,
@@ -638,6 +648,7 @@ pub mod tests {
             cpu_time_secs: None,
             disk_read_rate: 0.0,
             disk_write_rate: 0.0,
+            net_rate: 0.0,
             disk_read_total: 0,
             disk_write_total: 0,
             footprint: None,

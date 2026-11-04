@@ -246,6 +246,65 @@ pub fn timeline(frame: &mut Frame, app: &mut App, area: Rect) {
 
 // ── logs ───────────────────────────────────────────────────────────────
 
+/// Per-process operations, in the manner of Process Monitor.
+pub fn activity(frame: &mut Frame, app: &mut App, area: Rect) {
+    let visible = app.visible_activity();
+    let mut extra: Vec<Span> = vec![muted("   ")];
+    match (&app.ir.capture, &app.ir.capture_error) {
+        (Some(c), _) => extra.push(Span::styled(format!("● capturing via {}", c.method), Style::new().fg(BAD))),
+        (None, Some(e)) => extra.push(Span::styled(format!("can't capture: {e}"), Style::new().fg(WARN))),
+        (None, None) => extra.push(muted("stopped — press c to capture")),
+    }
+    let dropped = crate::activity::dropped();
+    if dropped > 0 {
+        extra.push(Span::styled(format!("  {dropped} events dropped"), Style::new().fg(WARN)));
+    }
+    frame.render_widget(Paragraph::new(search_bar(app, "operations", visible.len(), extra)), Rect { height: 1, ..area });
+    app.hit.search = Rect { height: 1, width: area.width / 3, ..area };
+    frame.render_widget(
+        Paragraph::new(muted(" Newest first; ×n = n identical operations merged. Filter e.g. source:registry  name:powershell  kind:write  path:\\\\Run")),
+        Rect { y: area.y + 1, height: 1, ..area },
+    );
+    let table = Rect { y: area.y + 3, height: area.height.saturating_sub(3), ..area };
+    if visible.is_empty() {
+        frame.render_widget(Paragraph::new(muted(" Nothing captured. Windows needs administrator rights; Linux and macOS need root.")), table);
+        return;
+    }
+    let specs = [
+        ColSpec::new("Time", 12, false),
+        ColSpec::new("Process", 18, false),
+        ColSpec::new("PID", 7, true),
+        ColSpec::new("Class", 8, false),
+        ColSpec::new("Operation", 16, false),
+        ColSpec::new("Size", 9, true),
+        ColSpec::new("Target", 0, false),
+    ];
+    let height = table.height.saturating_sub(1) as usize;
+    app.ir.ac_selected = app.ir.ac_selected.min(visible.len() - 1);
+    app.ir.ac_offset = scroll_window(app.ir.ac_offset, app.ir.ac_selected, height, visible.len());
+    let target_w = (table.width as usize).saturating_sub(76);
+    let rows = visible
+        .iter()
+        .skip(app.ir.ac_offset)
+        .take(height)
+        .map(|i| {
+            let e = &app.ir.activity[*i];
+            let op = if e.count > 1 { format!("{} ×{}", e.op, e.count) } else { e.op.to_string() };
+            vec![
+                vec![muted(e.time.format("%H:%M:%S%.3f").to_string())],
+                vec![Span::raw(e.name.to_string())],
+                vec![muted(e.pid.to_string())],
+                vec![Span::styled(e.class.label(), source_style(e.class.label()))],
+                vec![Span::raw(op)],
+                vec![muted(if e.bytes > 0 { crate::ui::human_bytes(e.bytes) } else { String::new() })],
+                vec![Span::raw(truncate_left(&e.path, target_w))],
+            ]
+        })
+        .collect();
+    let mut scroll = 0;
+    app.hit.list_rows = draw_table(frame, table, &specs, rows, &mut scroll, Some(app.ir.ac_selected - app.ir.ac_offset));
+}
+
 pub fn logs(frame: &mut Frame, app: &mut App, area: Rect) {
     let visible = app.visible_logs();
     let window = match app.ir.log_minutes {

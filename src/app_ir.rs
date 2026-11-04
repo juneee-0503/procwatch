@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::{DateTime, Local};
@@ -25,6 +26,17 @@ use crate::persistence::{Item as PersistItem, Scan};
 
 const MAX_NET_EVENTS: usize = 5000;
 const MAX_FS_EVENTS: usize = 5000;
+/// Operations kept for the Activity page.
+const MAX_ACTIVITY: usize = 200_000;
+
+#[derive(Debug, Clone, Copy)]
+pub struct TrafficRate {
+    pub rx: u64,
+    pub tx: u64,
+    pub at: Instant,
+    pub rx_rate: f64,
+    pub tx_rate: f64,
+}
 
 /// One row of the unified timeline.
 #[derive(Debug, Clone)]
@@ -247,6 +259,23 @@ pub struct Ir {
     pub resolver: dns::Resolver,
     pub resolvers: Vec<String>,
     pub dns_cache: Option<Result<Vec<(String, String)>, String>>,
+    /// Per-process operations, newest last.
+    pub activity: VecDeque<crate::activity::Activity>,
+    /// Running capture; None when stopped.
+    pub capture: Option<crate::activity::Capture>,
+    /// Why the capture couldn't start.
+    pub capture_error: Option<String>,
+    pub ac_selected: usize,
+    pub ac_offset: usize,
+    /// Names shared by a process's events.
+    activity_names: HashMap<u32, Arc<str>>,
+    /// Operations for `--monitor` to stream.
+    pub activity_out: Option<Vec<crate::activity::Activity>>,
+    traffic: Option<crate::netio::Traffic>,
+    pub traffic_error: Option<String>,
+    traffic_asked: bool,
+    /// Per pid: last totals, when, and the rates they gave.
+    pub traffic_rates: HashMap<u32, TrafficRate>,
     /// A DNS collection is running.
     dns_pending: bool,
     /// DNS has been collected at least once (evidence needs the resolvers).
@@ -373,6 +402,17 @@ impl Ir {
             resolver: dns::Resolver::new(),
             resolvers: Vec::new(),
             dns_cache: None,
+            activity: VecDeque::new(),
+            capture: None,
+            capture_error: None,
+            ac_selected: 0,
+            ac_offset: 0,
+            activity_names: HashMap::new(),
+            activity_out: None,
+            traffic: None,
+            traffic_error: None,
+            traffic_asked: false,
+            traffic_rates: HashMap::new(),
             dns_pending: false,
             dns_asked: false,
             net_dns_view: false,
@@ -494,6 +534,28 @@ impl Filterable for crate::artifacts::Artifact {
     }
     fn text(&self) -> String {
         format!("{} {} {} {}", self.kind, self.subject, self.detail, self.user.as_deref().unwrap_or(""))
+    }
+}
+
+impl Ir {
+    pub fn traffic_method(&self) -> Option<&'static str> {
+        self.traffic.as_ref().map(|t| t.method)
+    }
+}
+
+impl Filterable for crate::activity::Activity {
+    fn field(&self, name: &str) -> Option<Vec<String>> {
+        match name {
+            "pid" => Some(vec![self.pid.to_string()]),
+            "name" => Some(vec![self.name.to_string()]),
+            "path" => Some(vec![self.path.clone()]),
+            "kind" | "type" => Some(vec![self.op.to_string()]),
+            "source" => Some(vec![self.class.label().to_string()]),
+            _ => None,
+        }
+    }
+    fn text(&self) -> String {
+        format!("{} {} {} {} {} {}", self.pid, self.name, self.class.label(), self.op, self.path, self.detail)
     }
 }
 
@@ -835,6 +897,11 @@ impl App {
             let fresh: Vec<(u32, Connection)> = opened.iter().map(|(p, c)| (*p, c.clone())).collect();
             self.sigma_on_sockets(&fresh);
             let mut add = Vec::new();
+            // Windows has exact events for these; elsewhere this is the source.
+            if self.ir.capture.is_some() && !cfg!(windows) {
+                let batch = opened.iter().filter(|(_, c)| c.state != ConnState::Listen).map(|(pid, c)| crate::activity::Activity::new(*pid, crate::activity::Class::Network, "connect", c.remote.clone()).with_detail(format!("{} from {}", c.protocol, c.local))).collect();
+                self.on_activity(batch);
+            }
             for (pid, c) in opened {
                 let kind = if c.state == ConnState::Listen { "listen" } else { "connect" };
                 add.push(NetEvent { time: t, kind, pid: *pid, name: self.name_of(*pid), conn: c.clone() });
@@ -986,6 +1053,8 @@ impl App {
                 self.ir.artifacts = all;
                 self.ir.timeline_dirty = true;
             }
+            WorkerMsg::Activity(batch) => self.on_activity(batch),
+            WorkerMsg::Traffic(totals) => self.on_traffic(totals),
             WorkerMsg::Dns { resolvers, cache } => {
                 self.ir.dns_pending = false;
                 self.ir.resolvers = resolvers;
@@ -1021,6 +1090,123 @@ impl App {
         }
     }
 
+    /// Start or stop capturing per-process operations.
+    pub fn toggle_capture(&mut self) {
+        if self.ir.capture.take().is_some() {
+            self.set_status(StatusLevel::Info, "Activity capture stopped".into());
+            return;
+        }
+        match crate::activity::start(self.tx.clone()) {
+            Ok(c) => {
+                self.ir.capture_error = None;
+                self.set_status(StatusLevel::Success, format!("Capturing activity: {}", c.method));
+                self.ir.capture = Some(c);
+            }
+            Err(e) => {
+                self.set_status(StatusLevel::Error, format!("Activity capture: {e}"));
+                self.ir.capture_error = Some(e);
+            }
+        }
+    }
+
+    pub fn clear_activity(&mut self) {
+        self.ir.activity.clear();
+        self.ir.ac_selected = 0;
+        self.ir.ac_offset = 0;
+    }
+
+    pub fn visible_activity(&self) -> Vec<usize> {
+        let f = Filter::parse(&self.query);
+        self.ir.activity.iter().enumerate().rev().filter(|(_, e)| f.matches(*e)).map(|(i, _)| i).collect()
+    }
+
+    fn on_activity(&mut self, batch: Vec<crate::activity::Activity>) {
+        use crate::activity::Class;
+        let tree = &self.tree;
+        self.ir.activity_names.retain(|pid, _| tree.nodes.contains_key(pid));
+        for mut a in batch {
+            let name = match self.ir.activity_names.get(&a.pid) {
+                Some(n) => n.clone(),
+                None => {
+                    let n: Arc<str> = Arc::from(self.name_of(a.pid));
+                    self.ir.activity_names.insert(a.pid, n.clone());
+                    n
+                }
+            };
+            a.name = name;
+            // A write to an autostart key, with the process that did it.
+            if a.class == Class::Registry && a.op != "delete key" && crate::activity::is_autostart_key(&a.path) {
+                if let Some(def) = crate::triage::rule("PW-022") {
+                    let hit = crate::triage::RuleHit::from_def(def, format!("{} {}", a.op, a.path));
+                    self.record_detection_pub(&hit, Entity::Process(self.proc_key(a.pid)), format!("{} ({})", a.name, a.pid), Some(a.pid), "activity");
+                }
+            }
+            // Traced processes' file changes join the timeline, attributed.
+            if a.class == Class::File && self.ir.deep.is_enrolled(a.pid) {
+                let kind = match a.op {
+                    "create" => Some("created"),
+                    "write" | "close after write" => Some("modified"),
+                    "delete" => Some("deleted"),
+                    "rename" | "rename to" => Some("renamed"),
+                    _ => None,
+                };
+                if let Some(kind) = kind {
+                    self.ir_on_msg(WorkerMsg::Fs(FsEvent { time: a.time, kind, path: a.path.clone(), pid: Some(a.pid) }));
+                }
+            }
+            if let Some(out) = self.ir.activity_out.as_mut() {
+                out.push(a.clone());
+            }
+            if self.ir.activity.len() >= MAX_ACTIVITY {
+                self.ir.activity.pop_front();
+            }
+            self.ir.activity.push_back(a);
+        }
+    }
+
+    fn on_traffic(&mut self, totals: crate::netio::Totals) {
+        let now = Instant::now();
+        for (pid, (rx, tx)) in totals {
+            let e = self.ir.traffic_rates.entry(pid).or_insert(TrafficRate { rx, tx, at: now, rx_rate: 0.0, tx_rate: 0.0 });
+            let secs = now.duration_since(e.at).as_secs_f64();
+            if secs > 0.0 {
+                e.rx_rate = rx.saturating_sub(e.rx) as f64 / secs;
+                e.tx_rate = tx.saturating_sub(e.tx) as f64 / secs;
+            }
+            (e.rx, e.tx, e.at) = (rx, tx, now);
+        }
+        let tree = &self.tree;
+        self.ir.traffic_rates.retain(|pid, _| tree.nodes.contains_key(pid));
+    }
+
+    /// New operations as ECS lines, for `--monitor --activity`.
+    pub fn take_activity_lines(&mut self) -> Vec<String> {
+        let host = sysinfo::System::host_name().unwrap_or_default();
+        let items = self.ir.activity_out.as_mut().map(std::mem::take).unwrap_or_default();
+        items
+            .iter()
+            .map(|a| {
+                let id = crate::model::short_id(crate::model::event_id(&[&a.time.to_rfc3339(), &a.pid.to_string(), a.op, &a.path]));
+                let (file, registry) = match a.class {
+                    crate::activity::Class::File => (Some(a.path.as_str()), None),
+                    crate::activity::Class::Registry => (None, Some(a.path.as_str())),
+                    crate::activity::Class::Network => (None, None),
+                };
+                let mut v = crate::stdexport::ecs_event(a.time, &id, a.class.label(), a.op, Some(a.pid), &a.name, &a.path, None, None, file, &host);
+                if let Some(r) = registry {
+                    v["registry"] = serde_json::json!({ "path": r });
+                }
+                if a.count > 1 {
+                    v["event"]["count"] = a.count.into();
+                }
+                if a.bytes > 0 {
+                    v["procwatch"] = serde_json::json!({ "bytes": a.bytes });
+                }
+                v.to_string()
+            })
+            .collect()
+    }
+
     /// On Windows this runs PowerShell for seconds, so never on this thread.
     fn collect_dns(&mut self) {
         self.ir.dns_asked = true;
@@ -1051,6 +1237,13 @@ impl App {
         }
         if !self.ir.dns_asked && !self.ir.dns_pending {
             self.collect_dns();
+        }
+        if !self.ir.traffic_asked && !cfg!(test) {
+            self.ir.traffic_asked = true;
+            match crate::netio::start(self.tx.clone()) {
+                Ok(t) => self.ir.traffic = Some(t),
+                Err(e) => self.ir.traffic_error = Some(e),
+            }
         }
         match self.tab {
             Tab::Persistence if self.ir.persistence.is_none() => {
@@ -2583,6 +2776,55 @@ mod net_tests {
         app.connections.insert(1, vec![c.clone()]);
         app.ir_on_snapshot();
         assert!(app.ir.conn_first_seen.contains_key(&(1, c)), "{:?}", app.ir.conn_first_seen.keys().collect::<Vec<_>>());
+    }
+}
+
+#[cfg(test)]
+mod activity_tests {
+    use super::*;
+    use crate::activity::{Activity, Class};
+
+    #[test]
+    fn operations_are_named_filtered_and_capped_with_autostart_writes_detected() {
+        let mut app = crate::app::tests_support::app();
+        let pid = *app.tree.nodes.keys().next().unwrap();
+        let name = app.name_of(pid);
+        app.ir.activity_out = Some(Vec::new());
+        app.on_worker_msg(WorkerMsg::Activity(vec![
+            Activity::new(pid, Class::File, "write", "/tmp/a").with_bytes(9),
+            Activity::new(pid, Class::Registry, "set value", r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run\evil"),
+            Activity::new(pid, Class::Registry, "set value", r"HKLM\SOFTWARE\Vendor\Setting"),
+        ]));
+        assert_eq!(app.ir.activity.len(), 3);
+        assert_eq!(&*app.ir.activity[0].name, name.as_str());
+        app.query = "source:registry".into();
+        assert_eq!(app.visible_activity().len(), 2);
+        app.query = "kind:write".into();
+        assert_eq!(app.visible_activity().len(), 1);
+        app.query.clear();
+        assert_eq!(app.ir.det.store.items.iter().filter(|d| d.rule_id == "PW-022").count(), 1, "only the autostart key");
+        let lines = app.take_activity_lines();
+        assert_eq!(lines.len(), 3);
+        let v: serde_json::Value = serde_json::from_str(&lines[1]).unwrap();
+        assert_eq!(v["event"]["category"][0], "registry");
+        assert!(v["registry"]["path"].as_str().unwrap().ends_with("evil"));
+        assert!(app.take_activity_lines().is_empty());
+        app.clear_activity();
+        assert!(app.ir.activity.is_empty());
+    }
+
+    #[test]
+    fn traffic_totals_become_rates_on_processes() {
+        let mut app = crate::app::tests_support::app();
+        let pid = *app.tree.nodes.keys().next().unwrap();
+        app.on_worker_msg(WorkerMsg::Traffic([(pid, (1000, 2000))].into()));
+        assert_eq!(app.ir.traffic_rates[&pid].rx_rate, 0.0, "the first total is a baseline");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        app.on_worker_msg(WorkerMsg::Traffic([(pid, (2000, 2000))].into()));
+        let r = app.ir.traffic_rates[&pid];
+        assert!(r.rx_rate > 1000.0 && r.tx_rate == 0.0, "{r:?}");
+        app.on_worker_msg(WorkerMsg::Traffic([(pid + 99_999, (1, 1))].into()));
+        assert!(!app.ir.traffic_rates.contains_key(&(pid + 99_999)), "gone processes are dropped");
     }
 }
 

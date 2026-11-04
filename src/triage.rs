@@ -76,6 +76,8 @@ pub static RULES: &[RuleDef] = &[
         "LD_PRELOAD, LD_AUDIT or DYLD_INSERT_LIBRARIES is set, so extra code loads into this process before its own."),
     rule!("PW-021", "Running from memory, with no file on disk", High, High, "T1620",
         "The executable is an anonymous in-memory file (memfd): nothing on disk can be scanned, which is the point of doing it."),
+    rule!("PW-022", "Autostart registry location written", Medium, High, "T1547.001",
+        "A process wrote to a registry key that makes programs run at startup or changes how they load. The capture names the writer."),
     rule!("PW-017", "Relaunched after termination", Medium, Medium, "T1543",
         "A program ended by procwatch started again. Autostart entries pointing at it are listed as candidates, not proven causes."),
 ];

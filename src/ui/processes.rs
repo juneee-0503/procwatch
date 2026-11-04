@@ -356,6 +356,7 @@ fn proc_cell(app: &App, col: Col, info: &ProcessInfo, row: &Row) -> Vec<Span<'st
         Col::Disk => rate(info.disk_read_rate + info.disk_write_rate),
         Col::DiskRead => rate(info.disk_read_rate),
         Col::DiskWrite => rate(info.disk_write_rate),
+        Col::Net => rate(info.net_rate),
         Col::CpuTime => info.cpu_time_secs.map(|t| Span::raw(cpu_time(t))).unwrap_or_else(|| muted("–")),
         Col::Started => Span::raw(start_label(info.start_time_secs)),
         Col::Priority => priority_span(info),

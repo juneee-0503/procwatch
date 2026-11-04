@@ -38,7 +38,13 @@ mod palette;
 mod persistence;
 mod process;
 mod profile;
+mod activity;
 mod coverage;
+#[cfg(windows)]
+mod etw;
+#[cfg(windows)]
+mod handles;
+mod netio;
 mod monitor;
 mod perf;
 mod sampler;
@@ -107,8 +113,10 @@ Usage:
   procwatch --scan PATH... [--yara DIR] [--json]
                                     match files (folders recursively) against YARA-subset content rules;
                                     exit status 1 if anything matched
-  procwatch --monitor [--output FILE] [--minutes N]
-                                    run without a screen and stream new events as ECS JSON lines
+  procwatch --monitor [--output FILE] [--minutes N] [--activity]
+                                    run without a screen and stream new events as ECS JSON lines;
+                                    --activity adds file, registry and network operations
+                                    (administrator / root)
   procwatch --coverage [--json]     list the MITRE ATT&CK techniques the rules look for
   procwatch --help";
 
@@ -206,7 +214,7 @@ fn main() -> anyhow::Result<()> {
                     std::process::exit(2);
                 }
             };
-            std::process::exit(monitor::run(value("--output").map(std::path::Path::new), minutes));
+            std::process::exit(monitor::run(value("--output").map(std::path::Path::new), minutes, args.iter().any(|a| a == "--activity")));
         }
         Some("--check-rules") => {
             let dir = args.get(1).map(std::path::PathBuf::from).or_else(sigma::default_dir);
@@ -722,7 +730,7 @@ fn normal_key(app: &mut App, key: KeyEvent) {
             app.mode = Mode::Help;
             return;
         }
-        KeyCode::Char(c @ '0'..='9') if !app.detail_full => {
+        KeyCode::Char(c @ ('0'..='9' | '`')) if !app.detail_full => {
             if let Some(t) = Tab::ALL.iter().find(|t| t.key() == c) {
                 app.switch_tab(*t);
             }
@@ -866,6 +874,11 @@ fn normal_key(app: &mut App, key: KeyEvent) {
                 }
             }
             KeyCode::Esc => app.query.clear(),
+            _ => {}
+        },
+        Tab::Activity => match key.code {
+            KeyCode::Char('c') => app.toggle_capture(),
+            KeyCode::Char('x') => app.clear_activity(),
             _ => {}
         },
         Tab::Timeline => match key.code {
@@ -1482,6 +1495,12 @@ fn handle_mouse(app: &mut App, m: MouseEvent) {
                         app.focus_pid(pid);
                     }
                 }
+            }
+        }
+        Tab::Activity => {
+            let idx = app.ir.ac_offset + row;
+            if idx < app.visible_activity().len() {
+                app.ir.ac_selected = idx;
             }
         }
         Tab::Persistence | Tab::Timeline | Tab::Logs => {

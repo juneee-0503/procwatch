@@ -23,6 +23,7 @@ pub enum Col {
     Disk,
     DiskRead,
     DiskWrite,
+    Net,
     CpuTime,
     Started,
     Priority,
@@ -30,7 +31,7 @@ pub enum Col {
 }
 
 impl Col {
-    pub const ALL: [Col; 21] = [
+    pub const ALL: [Col; 22] = [
         Col::Name,
         Col::Risk,
         Col::Signed,
@@ -48,6 +49,7 @@ impl Col {
         Col::Disk,
         Col::DiskRead,
         Col::DiskWrite,
+        Col::Net,
         Col::CpuTime,
         Col::Started,
         Col::Priority,
@@ -76,6 +78,7 @@ impl Col {
             Col::Disk => "Disk",
             Col::DiskRead => "Disk read",
             Col::DiskWrite => "Disk write",
+            Col::Net => "Network",
             Col::CpuTime => "CPU time",
             Col::Started => "Started",
             Col::Priority => "Priority",
@@ -102,6 +105,7 @@ impl Col {
             Col::Disk => "Disk read + write rate",
             Col::DiskRead => "Disk read rate",
             Col::DiskWrite => "Disk write rate",
+            Col::Net => "Network bytes per second, in plus out",
             Col::CpuTime => "Total CPU time used since start",
             Col::Started => "When the process started",
             Col::Priority => "Scheduling priority (from nice value)",
@@ -124,7 +128,7 @@ impl Col {
             Col::MemTrend => 12,
             Col::MemPct => 6,
             Col::Threads => 7,
-            Col::Disk | Col::DiskRead | Col::DiskWrite => 10,
+            Col::Disk | Col::DiskRead | Col::DiskWrite | Col::Net => 10,
             Col::CpuTime => 9,
             Col::Started => 8,
             Col::Priority => 9,
@@ -160,6 +164,7 @@ impl Col {
             Col::Disk => "disk",
             Col::DiskRead => "disk_read",
             Col::DiskWrite => "disk_write",
+            Col::Net => "net",
             Col::CpuTime => "cpu_time",
             Col::Started => "started",
             Col::Priority => "priority",
@@ -185,6 +190,7 @@ impl Col {
                 | Col::Disk
                 | Col::DiskRead
                 | Col::DiskWrite
+                | Col::Net
                 | Col::CpuTime
                 | Col::Started
                 | Col::Priority
@@ -216,6 +222,7 @@ impl Col {
             Col::Disk => (a.disk_read_rate + a.disk_write_rate).total_cmp(&(b.disk_read_rate + b.disk_write_rate)),
             Col::DiskRead => a.disk_read_rate.total_cmp(&b.disk_read_rate),
             Col::DiskWrite => a.disk_write_rate.total_cmp(&b.disk_write_rate),
+            Col::Net => a.net_rate.total_cmp(&b.net_rate),
             Col::CpuTime => opt(a.cpu_time_secs, b.cpu_time_secs),
             Col::Started => a.start_time_secs.cmp(&b.start_time_secs),
             // Higher priority = lower nice.

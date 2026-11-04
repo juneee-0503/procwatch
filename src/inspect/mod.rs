@@ -119,7 +119,9 @@ pub fn open_files(pid: u32) -> Result<Vec<OpenFile>, String> {
     return macos::open_files(pid).map_err(|e| e.to_string());
     #[cfg(target_os = "linux")]
     return linux::open_files(pid).map_err(|e| e.to_string());
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(windows)]
+    return crate::handles::for_process(pid);
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         let _ = pid;
         Err("open-file listing is not available on this platform".into())

@@ -70,10 +70,11 @@ pub enum Tab {
     Trace,
     Alerts,
     Case,
+    Activity,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 10] = [
+    pub const ALL: [Tab; 11] = [
         Tab::Processes,
         Tab::Performance,
         Tab::Network,
@@ -84,6 +85,7 @@ impl Tab {
         Tab::Trace,
         Tab::Alerts,
         Tab::Case,
+        Tab::Activity,
     ];
     pub fn title(self) -> &'static str {
         match self {
@@ -97,6 +99,7 @@ impl Tab {
             Tab::Trace => "Trace",
             Tab::Alerts => "Detect",
             Tab::Case => "Case",
+            Tab::Activity => "Activity",
         }
     }
 
@@ -113,13 +116,17 @@ impl Tab {
             Tab::Trace => "Trace",
             Tab::Alerts => "Detect",
             Tab::Case => "Case",
+            Tab::Activity => "Act",
         }
     }
 
-    /// Key that jumps to this page: 1–9, then 0.
+    /// Key that jumps to this page: 1–9, 0, then `.
     pub fn key(self) -> char {
-        let i = Self::ALL.iter().position(|t| *t == self).unwrap_or(0);
-        if i == 9 { '0' } else { char::from(b'1' + i as u8) }
+        match Self::ALL.iter().position(|t| *t == self).unwrap_or(0) {
+            9 => '0',
+            10 => '`',
+            i => char::from(b'1' + i as u8),
+        }
     }
 }
 
@@ -866,6 +873,8 @@ impl App {
             | WorkerMsg::Yara { .. }
             | WorkerMsg::Deep(_)
             | WorkerMsg::Dns { .. }
+            | WorkerMsg::Activity(_)
+            | WorkerMsg::Traffic(_)
             | WorkerMsg::DeepSnap { .. }
             | WorkerMsg::Memory { .. }
             | WorkerMsg::Evidence(_)) => self.ir_on_msg(msg),
@@ -924,6 +933,11 @@ impl App {
                 self.proc_hist.get(pid).and_then(|h| rules::growth_per_min(&h.mem, interval, min_samples));
         }
 
+        for (pid, node) in self.tree.nodes.iter_mut() {
+            if let Some(r) = self.ir.traffic_rates.get(pid) {
+                node.info.net_rate = r.rx_rate + r.tx_rate;
+            }
+        }
         lap.mark("snapshot: histories");
         // Alert rules.
         let started_refs: Vec<&ProcessInfo> = started.iter().collect();
@@ -1545,7 +1559,7 @@ impl App {
                         Col::Cpu => a.cpu.total_cmp(&b.cpu),
                         Col::Memory | Col::MemPct => a.mem.cmp(&b.mem),
                         Col::Threads => a.threads.cmp(&b.threads),
-                        Col::Disk | Col::DiskRead | Col::DiskWrite => a.disk.total_cmp(&b.disk),
+                        Col::Disk | Col::DiskRead | Col::DiskWrite | Col::Net => a.disk.total_cmp(&b.disk),
                         _ => b.name.to_lowercase().cmp(&a.name.to_lowercase()),
                     };
                     let ord = if self.sort_desc { ord.reverse() } else { ord };
@@ -1680,6 +1694,7 @@ impl App {
                 self.change_selected = step(self.change_selected, self.visible_changes().len())
             }
             Tab::Persistence => self.ir.persist_selected = step(self.ir.persist_selected, self.visible_persistence().len()),
+            Tab::Activity => self.ir.ac_selected = step(self.ir.ac_selected, self.visible_activity().len()),
             Tab::Timeline => self.ir.tl_selected = step(self.ir.tl_selected, self.visible_timeline().len()),
             Tab::Logs if self.ir.artifacts_view => self.ir.art_selected = step(self.ir.art_selected, self.visible_artifacts().len()),
             Tab::Logs => self.ir.log_selected = step(self.ir.log_selected, self.visible_logs().len()),

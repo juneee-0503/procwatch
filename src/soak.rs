@@ -137,6 +137,8 @@ fn msg_name(m: &crate::sampler::WorkerMsg) -> &'static str {
         Memory { .. } => "msg: Memory",
         Deep(_) => "msg: Deep",
         Dns { .. } => "msg: Dns",
+        Activity(_) => "msg: Activity",
+        Traffic(_) => "msg: Traffic",
         StaticLibs { .. } => "msg: StaticLibs",
         DeepSnap { .. } => "msg: DeepSnap",
         Error(_) => "msg: Error",
@@ -183,6 +185,9 @@ pub fn run(minutes: u64) -> i32 {
         // Our child on Windows, but it is the thing under test.
         app.ir.launched.insert(p);
     }
+    app.toggle_capture();
+    let capture = app.ir.capture.as_ref().map(|c| c.method).unwrap_or("unavailable");
+    println!("activity capture: {capture}");
     let mut traced = false;
     let mut sys = sysinfo::System::new();
     let start = Instant::now();
@@ -281,6 +286,7 @@ pub fn run(minutes: u64) -> i32 {
     println!("frames rendered: {frames} · final RSS {rss:.1} MB · growth after warm-up {growth:+.1} MB (limit {limit:.0} MB)");
     let busy = crate::perf::total("msg: ").as_secs_f64() / start.elapsed().as_secs_f64().max(1.0);
     println!("message handling: {:.0}% of the run · drain cut short {cut_short} times", busy * 100.0);
+    println!("activity: {} operations held, {} dropped; traffic: {} processes", app.ir.activity.len(), crate::activity::dropped(), app.ir.traffic_rates.len());
     println!("slowest work (by longest single run):");
     for l in crate::perf::report(REPORT_ROWS) {
         println!("{l}");

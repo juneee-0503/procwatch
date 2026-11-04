@@ -203,13 +203,27 @@ mod imp {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(windows)]
+mod imp {
+    use super::*;
+
+    pub fn scan() -> anyhow::Result<Vec<Hit>> {
+        let names = crate::process::ProcessMonitor::new().names();
+        let files = crate::handles::all_files(Duration::from_secs(45)).map_err(anyhow::Error::msg)?;
+        Ok(files
+            .into_iter()
+            .map(|(pid, f)| Hit { pid, command: names.get(&pid).cloned().unwrap_or_else(|| format!("pid {pid}")), fd: f.fd, kind: "REG".into(), path: f.name })
+            .collect())
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 mod imp {
     use super::*;
 
     pub fn scan() -> anyhow::Result<Vec<Hit>> {
         let _ = Duration::ZERO;
-        anyhow::bail!("listing open files needs Sysinternals handle.exe on Windows; ports can still be searched")
+        anyhow::bail!("listing open files is not available on this platform; ports can still be searched")
     }
 }
 

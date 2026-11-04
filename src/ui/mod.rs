@@ -55,6 +55,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Tab::Persistence if app.ir.persist_changes_view => analysis::changes(frame, app, body),
         Tab::Persistence => investigate::persistence(frame, app, body),
         Tab::Timeline => investigate::timeline(frame, app, body),
+        Tab::Activity => investigate::activity(frame, app, body),
         Tab::Logs if app.ir.artifacts_view => pivot::artifacts(frame, app, body),
         Tab::Logs => investigate::logs(frame, app, body),
         Tab::Trace => analysis::trace(frame, app, body),
@@ -240,6 +241,7 @@ fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
             Tab::Persistence if app.ir.persist_changes_view && app.baseline.is_none() => vec![h("b", "save baseline"), h("c", "autostart entries"), h("?", "help")],
             Tab::Persistence if app.ir.persist_changes_view => vec![h("↑↓", "select"), h("enter", "go to process"), h("b", "new baseline"), h("c", "autostart entries"), h("/", "filter")],
             Tab::Persistence => vec![h("↑↓", "select"), h("enter", "analyze target"), h("Q", "quarantine"), h("m", "finding"), h("c", "changes since baseline"), h("r", "rescan"), h("/", "filter")],
+            Tab::Activity => vec![h("c", "start / stop capture"), h("x", "clear"), h("↑↓", "select"), h("/", "filter")],
             Tab::Timeline => vec![
                 h("↑↓", "select"),
                 h("enter", "process"),

@@ -38,6 +38,8 @@ pub struct Report {
     pub file_event_latency_ms: Option<u64>,
     pub own_cpu_percent: Option<f32>,
     pub own_memory_mb: Option<f64>,
+    /// What each capture source saw of a known workload.
+    pub activity: Vec<String>,
     pub notes: Vec<String>,
 }
 
@@ -270,6 +272,135 @@ fn file_latency(r: &mut Report) {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A child does the work: a capture ignores procwatch's own operations.
+fn activity_workload(dir: &std::path::Path) {
+    #[cfg(unix)]
+    let _ = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg("cd \"$1\" && echo x > a.txt && echo y >> a.txt && cat a.txt > /dev/null && mv a.txt b.txt && rm b.txt")
+        .arg("sh")
+        .arg(dir)
+        .status();
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("cmd").args(["/C", "echo x> a.txt & type a.txt > NUL & ren a.txt b.txt & del b.txt"]).current_dir(dir).status();
+        let key = r"HKCU\Software\procwatch-selftest";
+        let _ = std::process::Command::new("reg").args(["add", key, "/v", "probe", "/d", "1", "/f"]).stdout(std::process::Stdio::null()).status();
+        let _ = std::process::Command::new("reg").args(["delete", key, "/f"]).stdout(std::process::Stdio::null()).status();
+    }
+}
+
+fn activity_probe(r: &mut Report) {
+    use crate::activity::Class;
+    let dir = std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()).join(format!("procwatch-selftest-activity-{}", std::process::id()));
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    match crate::activity::start(tx) {
+        Err(e) => r.activity.push(format!("capture: not available ({e})")),
+        Ok(c) => {
+            std::thread::sleep(Duration::from_millis(700));
+            activity_workload(&dir);
+            let mut ops: std::collections::BTreeMap<String, u32> = Default::default();
+            let needle = dir.display().to_string().to_lowercase();
+            let until = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < until {
+                if let Ok(crate::sampler::WorkerMsg::Activity(batch)) = rx.recv_timeout(Duration::from_millis(100)) {
+                    for a in batch {
+                        let ours = a.path.to_lowercase().contains(&needle) || a.path.to_lowercase().contains("procwatch-selftest");
+                        if ours && matches!(a.class, Class::File | Class::Registry) {
+                            *ops.entry(format!("{} {}", a.class.label(), a.op)).or_default() += a.count;
+                        }
+                    }
+                }
+            }
+            r.activity.push(format!("capture via {}: {}", c.method, if ops.is_empty() { "saw nothing of the workload".to_string() } else { ops.iter().map(|(k, n)| format!("{k} ×{n}")).collect::<Vec<_>>().join(", ") }));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn traffic_probe(r: &mut Report) {
+    use std::io::{Read, Write};
+    const SIZE: usize = 4 << 20;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let t = match crate::netio::start(tx) {
+        Ok(t) => t,
+        Err(e) => {
+            r.activity.push(format!("traffic: not available ({e})"));
+            return;
+        }
+    };
+    let Ok(listener) = std::net::TcpListener::bind("127.0.0.1:0") else { return };
+    let Ok(addr) = listener.local_addr() else { return };
+    let writer = std::thread::spawn(move || {
+        if let Ok(mut c) = std::net::TcpStream::connect(addr) {
+            let _ = c.write_all(&vec![0u8; SIZE]);
+            // Held open: a closed socket is gone from per-socket counters.
+            std::thread::sleep(Duration::from_secs(5));
+        }
+    });
+    if let Ok((mut c, _)) = listener.accept() {
+        let mut buf = vec![0u8; 1 << 16];
+        let mut got = 0;
+        while got < SIZE {
+            match c.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => got += n,
+            }
+        }
+    }
+    let me = std::process::id();
+    let mut seen = (0, 0);
+    let until = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < until {
+        if let Ok(crate::sampler::WorkerMsg::Traffic(m)) = rx.recv_timeout(Duration::from_millis(200)) {
+            if let Some(v) = m.get(&me) {
+                seen = *v;
+            }
+        }
+    }
+    let _ = writer.join();
+    r.activity.push(format!("traffic via {}: {} MiB moved over loopback, counted {:.1} MiB in, {:.1} MiB out", t.method, SIZE >> 20, seen.0 as f64 / 1_048_576.0, seen.1 as f64 / 1_048_576.0));
+}
+
+#[cfg(windows)]
+fn handle_probe(r: &mut Report) {
+    let path = std::env::temp_dir().join(format!("procwatch-handle-probe-{}", std::process::id()));
+    let Ok(_held) = std::fs::File::create(&path) else { return };
+    let me = std::process::id();
+    let t = Instant::now();
+    let mine = crate::handles::for_process(me);
+    let took = t.elapsed();
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    match mine {
+        Ok(items) => r.activity.push(format!("handles: {} named in this process in {} ms; held test file found: {}", items.len(), took.as_millis(), items.iter().any(|i| i.name.contains(&name)))),
+        Err(e) => r.activity.push(format!("handles: {e}")),
+    }
+    let mut child = match std::process::Command::new("ping").args(["-n", "6", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    match crate::handles::for_process(child.id()) {
+        Ok(items) => {
+            let kinds: std::collections::BTreeSet<&str> = items.iter().map(|i| i.kind.as_str()).collect();
+            r.activity.push(format!("handles of another process: {} named, kinds {kinds:?}", items.len()));
+        }
+        Err(e) => r.activity.push(format!("handles of another process: {e}")),
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    let t = Instant::now();
+    match crate::handles::all_files(Duration::from_secs(20)) {
+        Ok(f) => r.activity.push(format!("open files system-wide: {} in {} ms", f.len(), t.elapsed().as_millis())),
+        Err(e) => r.activity.push(format!("open files system-wide: {e}")),
+    }
+    drop(_held);
+    let _ = std::fs::remove_file(&path);
+}
+
 fn own_cost(r: &mut Report) {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
     let me = Pid::from_u32(std::process::id());
@@ -308,6 +439,10 @@ pub fn run(json: bool) -> i32 {
         pid_reuse_windows(&mut r);
     }
     file_latency(&mut r);
+    activity_probe(&mut r);
+    traffic_probe(&mut r);
+    #[cfg(windows)]
+    handle_probe(&mut r);
     own_cost(&mut r);
     if json {
         println!("{}", serde_json::to_string_pretty(&r).unwrap_or_default());
@@ -329,6 +464,10 @@ pub fn run(json: bool) -> i32 {
         println!("  target left running:            {}", yn(r.pid_reuse_target_survived));
         println!("  correct (pid, start) acted on:  {}", yn(r.checked_action_worked));
         println!("\nFile change notification latency: {}", r.file_event_latency_ms.map(|m| format!("{m} ms")).unwrap_or_else(|| "no event within 5 s".into()));
+        println!("\nActivity sources:");
+        for l in &r.activity {
+            println!("  {l}");
+        }
         println!("Own cost while sampling: {} CPU, {} memory", r.own_cpu_percent.map(|c| format!("{c:.1}%")).unwrap_or_default(), r.own_memory_mb.map(|m| format!("{m:.0} MB")).unwrap_or_default());
         for n in &r.notes {
             println!("note: {n}");

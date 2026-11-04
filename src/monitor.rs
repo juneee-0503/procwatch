@@ -32,7 +32,7 @@ fn open(out: Option<&Path>) -> std::io::Result<Box<dyn Write>> {
     })
 }
 
-pub fn run(out: Option<&Path>, minutes: Option<u64>) -> i32 {
+pub fn run(out: Option<&Path>, minutes: Option<u64>, activity: bool) -> i32 {
     let mut sink = match open(out) {
         Ok(s) => s,
         Err(e) => {
@@ -54,6 +54,14 @@ pub fn run(out: Option<&Path>, minutes: Option<u64>) -> i32 {
         return 2;
     }
     let mut app = App::new(tx, ctl, cfg);
+    if activity {
+        app.ir.activity_out = Some(Vec::new());
+        app.toggle_capture();
+        if let Some(e) = &app.ir.capture_error {
+            eprintln!("monitor: activity capture unavailable: {e}");
+            return 2;
+        }
+    }
     let started = Local::now();
     let end = minutes.map(|m| Instant::now() + Duration::from_secs(m.saturating_mul(60)));
     let mut seen: HashSet<u64> = HashSet::new();
@@ -75,7 +83,9 @@ pub fn run(out: Option<&Path>, minutes: Option<u64>) -> i32 {
             if app.timeline_rebuild_due() {
                 app.rebuild_timeline();
             }
-            for line in app.new_ecs_lines(started, &mut seen) {
+            let mut lines = app.new_ecs_lines(started, &mut seen);
+            lines.extend(app.take_activity_lines());
+            for line in lines {
                 // A closed pipe is the normal way for a reader to stop us.
                 if writeln!(sink, "{line}").is_err() {
                     return 0;

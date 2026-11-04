@@ -102,6 +102,13 @@ pub struct DeepState {
     pub attribution: String,
 }
 
+impl DeepState {
+    /// Is a live instance of `pid` being traced?
+    pub fn is_enrolled(&self, pid: u32) -> bool {
+        self.enrolled.iter().any(|(k, e)| k.pid == pid && e.ended.is_none())
+    }
+}
+
 /// A helper process stopped when procwatch exits.
 #[derive(Default)]
 pub struct Helper(pub Option<std::process::Child>);

@@ -28,7 +28,7 @@ pub fn unavailable_reason() -> Option<String> {
         return Some("needs root (run procwatch with sudo for per-process file attribution)".into());
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    return Some("not available on this platform (Windows would need ETW File I/O; not implemented)".into());
+    return Some("on Windows, file operations with their process come from the Activity page".into());
     #[allow(unreachable_code)]
     None
 }

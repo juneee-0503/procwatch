@@ -683,26 +683,6 @@ mod imp {
         }
     }
 
-    /// ETW image names are NT device paths; map the volume to a drive.
-    fn dos_path(nt: &str) -> String {
-        use windows_sys::Win32::Storage::FileSystem::QueryDosDeviceW;
-        if !nt.starts_with("\\Device\\") {
-            return nt.to_string();
-        }
-        for letter in b'A'..=b'Z' {
-            let drive: Vec<u16> = format!("{}:", letter as char).encode_utf16().chain(std::iter::once(0)).collect();
-            let mut buf = [0u16; 512];
-            let n = unsafe { QueryDosDeviceW(drive.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
-            if n > 0 {
-                let dev = String::from_utf16_lossy(&buf[..buf.iter().position(|c| *c == 0).unwrap_or(0)]);
-                if !dev.is_empty() && nt.starts_with(&dev) {
-                    return format!("{}:{}", letter as char, &nt[dev.len()..]);
-                }
-            }
-        }
-        nt.to_string()
-    }
-
     fn path(pid: u32) -> Option<String> {
         let h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
         if h.is_null() {
@@ -770,7 +750,7 @@ mod imp {
                                 pid,
                                 ppid: Some(ppid),
                                 start: crate::process::native::start_time(pid).unwrap_or(0),
-                                path: Some(dos_path(&image)),
+                                path: Some(crate::etw::dos_path(&image)),
                                 args: None,
                                 via: "ETW",
                             });
