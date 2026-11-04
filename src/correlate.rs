@@ -108,9 +108,13 @@ pub fn cluster(events: &[Ev]) -> Vec<Cluster> {
     // attaching path-only events.
     let mut out = Vec::new();
     let window = Duration::seconds(WINDOW_SECS);
-    // Only these can attach by path; scanning all events for every burst
-    // goes quadratic when many log events each form their own burst.
-    let path_only: Vec<usize> = events.iter().enumerate().filter(|(_, e)| e.pid.is_none() && (e.source == "file" || e.source == "persist")).map(|(i, _)| i).collect();
+    // Only these can attach by path; sorted by time so each burst looks at
+    // its own window. Scanning them all per burst costs seconds on Windows,
+    // where every `DateTime<Local>` addition asks the OS for the time zone.
+    let mut path_only: Vec<(i64, usize)> =
+        events.iter().enumerate().filter(|(_, e)| e.pid.is_none() && (e.source == "file" || e.source == "persist")).map(|(i, e)| (e.time.timestamp_micros(), i)).collect();
+    path_only.sort_unstable();
+    let window_us = WINDOW_SECS * 1_000_000;
     let mut roots: Vec<u32> = by_root.keys().copied().collect();
     roots.sort_unstable();
     for root in roots {
@@ -138,11 +142,10 @@ pub fn cluster(events: &[Ev]) -> Vec<Cluster> {
             let mut links = vec!["process lineage".to_string()];
             // Path links: a changed file that is (or a persistence entry
             // that launches) the executable of a cluster process.
-            for &j in if exes.is_empty() { &[][..] } else { &path_only[..] } {
+            let (from, to) = (start.timestamp_micros() - window_us, end.timestamp_micros() + window_us);
+            let first = if exes.is_empty() { path_only.len() } else { path_only.partition_point(|(t, _)| *t < from) };
+            for &(_, j) in path_only[first..].iter().take_while(|(t, _)| *t <= to) {
                 let e = &events[j];
-                if e.time < start - window || e.time > end + window {
-                    continue;
-                }
                 let path_hit = match e.subject {
                     Some(Entity::File(p)) => exes.contains(p),
                     _ => e.links.iter().any(|(r, t)| *r == Rel::Launches && matches!(t, Entity::File(p) if exes.contains(p))),

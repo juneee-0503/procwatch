@@ -284,8 +284,8 @@ pub fn evaluate(rules: &[Rule], events: &[Ev]) -> Vec<Match> {
     for r in rules {
         let mut partials: Vec<Partial> = Vec::new();
         let mut done: BTreeSet<String> = BTreeSet::new();
+        let window = chrono::Duration::seconds(r.within_secs);
         for e in events {
-            let window = chrono::Duration::seconds(r.within_secs);
             partials.retain(|p| e.time - p.start <= window);
             let in_scope = |p: &Partial, e: &Ev| match (r.scope.as_str(), p.scope) {
                 (_, None) | ("any", _) => true,
@@ -295,10 +295,10 @@ pub fn evaluate(rules: &[Rule], events: &[Ev]) -> Vec<Match> {
             let mut next: Vec<Partial> = Vec::new();
             // Count steps advance in place: keeping the original as well
             // would double the partial on every matching event.
-            let mut consumed = vec![false; partials.len()];
+            let mut consumed: Vec<usize> = Vec::new();
             for (idx, p) in partials.iter().enumerate() {
                 let s = &r.steps[p.step];
-                if !in_scope(p, e) {
+                if s.event != e.kind || !in_scope(p, e) {
                     continue;
                 }
                 if !step_ok(s, e, &p.caps) {
@@ -311,7 +311,7 @@ pub fn evaluate(rules: &[Rule], events: &[Ev]) -> Vec<Match> {
                         continue;
                     }
                     q.events.push(e.id.clone());
-                    consumed[idx] = true;
+                    consumed.push(idx);
                     if q.distinct.len() < s.count {
                         next.push(q);
                         continue;
@@ -355,8 +355,16 @@ pub fn evaluate(rules: &[Rule], events: &[Ev]) -> Vec<Match> {
                 }
             }
             // Keep unmatched partials alive, add advanced ones; complete ones
-            // become matches (once per first event).
-            let mut keep: Vec<Partial> = partials.into_iter().zip(consumed).filter(|(p, used)| !used && p.step < r.steps.len()).map(|(p, _)| p).collect();
+            // become matches (once per first event). In place: up to
+            // MAX_PARTIALS are live, and most events touch none of them.
+            if !consumed.is_empty() {
+                let (mut idx, mut used) = (0, consumed.iter().copied().peekable());
+                partials.retain(|_| {
+                    let hit = used.next_if_eq(&idx).is_some();
+                    idx += 1;
+                    !hit
+                });
+            }
             for q in next {
                 if q.step >= r.steps.len() {
                     let first_event = q.events.first().cloned().unwrap_or_default();
@@ -375,14 +383,13 @@ pub fn evaluate(rules: &[Rule], events: &[Ev]) -> Vec<Match> {
                         });
                     }
                 } else {
-                    keep.push(q);
+                    partials.push(q);
                 }
             }
-            if keep.len() > MAX_PARTIALS {
-                let drop = keep.len() - MAX_PARTIALS;
-                keep.drain(..drop);
+            if partials.len() > MAX_PARTIALS {
+                let drop = partials.len() - MAX_PARTIALS;
+                partials.drain(..drop);
             }
-            partials = keep;
         }
     }
     out
@@ -440,6 +447,21 @@ mod tests {
         evs = (0..5).map(|i| ev(i, "process_start", Some(200 + i as u32), Some(60), &[("name", "id")])).collect();
         evs.push(ev(6, "process_start", Some(300), Some(61), &[("name", "whoami")]));
         assert!(!evaluate(&rules, &evs).iter().any(|m| m.rule == "pw-seq-005"));
+    }
+
+    #[test]
+    fn a_write_among_thousands_still_matches_and_count_steps_advance() {
+        let mut evs: Vec<Ev> = (0..4000).map(|i| ev(i / 100, "file_write", None, None, &[("path", &format!("/Users/a/Downloads/f{i}"))])).collect();
+        evs.push(ev(50, "process_start", Some(7), Some(1), &[("image", "/Users/a/Downloads/f3999"), ("name", "f3999")]));
+        for (i, n) in ["whoami", "id", "uname", "hostname", "ifconfig", "ps", "netstat", "ls"].iter().enumerate() {
+            evs.push(ev(51 + i as i64, "process_start", Some(20 + i as u32), Some(7), &[("name", n)]));
+        }
+        evs.sort_by_key(|e| e.time);
+        let t = std::time::Instant::now();
+        let m = evaluate(&builtin(), &evs);
+        assert!(m.iter().any(|x| x.rule == "pw-seq-001"), "{m:?}");
+        assert!(m.iter().any(|x| x.rule == "pw-seq-005"), "{m:?}");
+        assert!(t.elapsed() < std::time::Duration::from_secs(5), "{:?}", t.elapsed());
     }
 
     #[test]

@@ -252,10 +252,14 @@ impl ProcessMonitor {
 
     /// Re-scan all processes and rebuild the parent/child tree.
     pub fn snapshot(&mut self) -> (ProcessTree, SystemStats) {
+        let mut lap = crate::perf::Lap::new();
         self.sys.refresh_cpu_usage();
         self.sys.refresh_memory();
+        lap.mark("sampler: cpu and memory");
         self.sys.refresh_processes_specifics(ProcessesToUpdate::All, Self::refresh_kind());
+        lap.mark("sampler: process list");
         self.networks.refresh();
+        lap.mark("sampler: network stats");
         let elapsed = self.last_refresh.elapsed().as_secs_f64().max(0.001);
         self.last_refresh = Instant::now();
 
@@ -269,6 +273,7 @@ impl ProcessMonitor {
             .map(|(pid, _)| pid.as_u32())
             .collect();
         let native = native::collect(&pids);
+        lap.mark("sampler: native details");
 
         let mut nodes: HashMap<u32, TreeNode> = HashMap::with_capacity(pids.len());
         let (mut disk_r, mut disk_w, mut threads, mut running) = (0f64, 0f64, 0u64, 0usize);
