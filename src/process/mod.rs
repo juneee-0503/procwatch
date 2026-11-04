@@ -594,18 +594,27 @@ pub mod tests {
     fn a_process_started_between_samples_gets_its_details() {
         let mut m = ProcessMonitor::new();
         let _ = m.snapshot();
-        let exe = std::env::current_exe().unwrap();
-        let mut child = std::process::Command::new(&exe).arg("--help").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap();
+        #[cfg(unix)]
+        let spawned = std::process::Command::new("/bin/sleep").arg("20").spawn();
+        #[cfg(windows)]
+        let spawned = std::process::Command::new("ping").args(["-n", "20", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn();
+        let mut child = spawned.unwrap();
         let pid = child.id();
-        let (tree, _) = m.snapshot();
-        let _ = child.wait();
-        // It may already have exited; if it was seen, it must be complete.
-        if let Some(n) = tree.get(pid) {
-            assert!(n.info.exe_path.is_some() || !n.info.cmd.is_empty(), "{:?}", n.info.name);
+        // A sample can land before it has exec'd, which is why details are
+        // retried; they must arrive within those retries.
+        let mut found = None;
+        for _ in 0..DETAIL_TRIES {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let (tree, _) = m.snapshot();
+            found = tree.get(pid).map(|n| (n.info.exe_path.clone(), n.info.cmd.clone()));
+            if found.as_ref().is_some_and(|(e, c)| e.is_some() && !c.is_empty()) {
+                break;
+            }
         }
-        let (tree, _) = m.snapshot();
-        let me = tree.get(std::process::id()).expect("own process");
-        assert!(me.info.exe_path.is_some() && !me.info.cmd.is_empty());
+        let _ = child.kill();
+        let _ = child.wait();
+        let (exe, cmd) = found.expect("child seen");
+        assert!(exe.is_some() && !cmd.is_empty(), "{exe:?} {cmd:?}");
     }
 
     pub fn info(pid: u32, ppid: Option<u32>) -> ProcessInfo {

@@ -83,7 +83,13 @@ pub struct SamplerCtl {
 impl SamplerCtl {
     /// The UI handled a snapshot.
     pub fn snapshot_handled(&self) {
-        let _ = self.snapshots_queued.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
+        let mut n = self.snapshots_queued.load(Ordering::Relaxed);
+        while n > 0 {
+            match self.snapshots_queued.compare_exchange_weak(n, n - 1, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => break,
+                Err(now) => n = now,
+            }
+        }
     }
 
     pub fn interval(&self) -> Duration {
@@ -424,6 +430,14 @@ mod drain_tests {
         let _ = feeder.join();
         assert!(d.more, "the queue never emptied, so the budget must have ended it");
         assert!(took < Duration::from_secs(2), "took {took:?}");
+    }
+
+    #[test]
+    fn the_snapshot_count_stops_at_zero() {
+        let ctl = SamplerCtl { interval_ms: AtomicU64::new(1000), paused: AtomicBool::new(false), refresh_now: AtomicBool::new(false), snapshots_queued: AtomicU64::new(1) };
+        ctl.snapshot_handled();
+        ctl.snapshot_handled();
+        assert_eq!(ctl.snapshots_queued.load(Ordering::Relaxed), 0);
     }
 
     #[test]
