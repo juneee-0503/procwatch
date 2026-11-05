@@ -163,7 +163,7 @@ pub fn start_activity(batcher: SharedBatcher) -> Result<UserTrace, String> {
         .any(FILE_KEYWORDS)
         .add_callback(move |r: &EventRecord, sl: &SchemaLocator| {
             let id = r.event_id();
-            if !matches!(id, 12 | 14 | 15 | 16 | 26 | 27 | 30) {
+            if !matches!(id, 12 | 14 | 15 | 16 | 17 | 26 | 27 | 30) {
                 return;
             }
             let Ok(schema) = sl.event_schema(r) else { return };
@@ -190,6 +190,14 @@ pub fn start_activity(batcher: SharedBatcher) -> Result<UserTrace, String> {
                     let Some(name) = pointer(&p, "FileObject").and_then(|o| open_files.get(&o)) else { return };
                     let size = u64::from(p.try_parse::<u32>("IOSize").unwrap_or(0));
                     Activity::new(pid, Class::File, if id == 15 { "read" } else { "write" }, name.clone()).with_bytes(size)
+                }
+                17 => {
+                    // SetInformation: only the delete dispositions matter.
+                    if !matches!(p.try_parse::<u32>("InfoClass"), Ok(13 | 64)) {
+                        return;
+                    }
+                    let Some(name) = pointer(&p, "FileObject").and_then(|o| open_files.get(&o)) else { return };
+                    Activity::new(pid, Class::File, "delete", name.clone())
                 }
                 _ => {
                     // Some builds leave the path out; the object still has one.

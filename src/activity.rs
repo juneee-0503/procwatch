@@ -358,7 +358,8 @@ mod linux {
         let mount_fds: Vec<libc::c_int> = mounts
             .iter()
             .filter_map(|m| CString::new(m.as_str()).ok())
-            .map(|c| unsafe { libc::open(c.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) })
+            // Not O_PATH: open_by_handle_at refuses such a descriptor.
+            .map(|c| unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) })
             .filter(|fd| *fd >= 0)
             .collect();
         let method = if names.is_some() { "fanotify (opens, writes, creates, deletes, renames)" } else { "fanotify (opens and writes; creates and deletes need Linux 5.9)" };

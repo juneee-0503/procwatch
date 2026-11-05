@@ -407,7 +407,9 @@ fn traffic_probe(r: &mut Report) {
 fn enforce_dir() -> Option<std::path::PathBuf> {
     let d = std::env::current_dir().ok()?.join(format!("procwatch-selftest-enforce-{}", std::process::id()));
     std::fs::create_dir_all(&d).ok()?;
-    std::fs::canonicalize(d).ok()
+    let real = std::fs::canonicalize(d).ok()?;
+    // Windows answers with \\\\?\\ paths, which aren't what a process reports.
+    Some(real.to_str().and_then(|p| p.strip_prefix(r"\\?\")).map_or(real.clone(), std::path::PathBuf::from))
 }
 
 /// Ending a process after it starts, on every platform.
