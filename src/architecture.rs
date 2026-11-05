@@ -4,6 +4,7 @@
 
 /// (module, what it may depend on)
 const LAYERS: &[(&str, &[&str])] = &[
+    ("kernel", &[]),
     ("common", &[]),
     ("network", &["common"]),
     ("performance", &["common"]),

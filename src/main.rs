@@ -10,6 +10,7 @@ mod engine;
 mod files;
 mod forensics;
 mod host;
+mod kernel;
 mod network;
 mod performance;
 mod process;
