@@ -223,7 +223,6 @@ pub struct Ir {
     pub beacons: HashMap<u32, (String, f64)>,
     prev_sockets: Option<HashSet<(u32, Connection)>>,
     pub fs_events: VecDeque<FsEvent>,
-    _watcher: Option<notify::RecommendedWatcher>,
     pub watch_paths: Vec<String>,
     pub watch_errors: Vec<String>,
     pub persistence: Option<Loaded<Scan>>,
@@ -272,8 +271,8 @@ pub struct Ir {
     pub dns_cache: Option<Result<Vec<(String, String)>, String>>,
     /// Per-process operations, newest last.
     pub activity: VecDeque<crate::activity::Activity>,
-    /// Running capture; None when stopped.
-    pub capture: Option<crate::activity::Capture>,
+    /// How the capture runs; None when stopped.
+    pub capture_method: Option<&'static str>,
     /// Why the capture couldn't start.
     pub capture_error: Option<String>,
     pub ac_selected: usize,
@@ -290,9 +289,8 @@ pub struct Ir {
     activity_names: HashMap<u32, Arc<str>>,
     /// Operations for `--monitor` to stream.
     pub activity_out: Option<Vec<crate::activity::Activity>>,
-    traffic: Option<crate::network::traffic::Traffic>,
+    pub traffic_how: Option<&'static str>,
     pub traffic_error: Option<String>,
-    traffic_asked: bool,
     /// Per pid: last totals, when, and the rates they gave.
     pub traffic_rates: HashMap<u32, TrafficRate>,
     /// A DNS collection is running.
@@ -364,9 +362,8 @@ pub struct SweepState {
 }
 
 impl Ir {
-    pub fn new(tx: Sender<WorkerMsg>, watch: &[String]) -> Self {
+    pub fn new(watch: &[String]) -> Self {
         let watch_paths = if watch.is_empty() { crate::files::watch::default_paths() } else { watch.to_vec() };
-        let (watcher, watch_errors) = crate::files::watch::start(&watch_paths, crate::common::emit::Emit::to(tx, WorkerMsg::Fs));
         Ir {
             intel: crate::files::intel::Intel::new(),
             triage: HashMap::new(),
@@ -379,9 +376,8 @@ impl Ir {
             beacons: HashMap::new(),
             prev_sockets: None,
             fs_events: VecDeque::new(),
-            _watcher: watcher,
             watch_paths,
-            watch_errors,
+            watch_errors: Vec::new(),
             persistence: None,
             persist_selected: 0,
             persist_prev: None,
@@ -422,7 +418,7 @@ impl Ir {
             resolvers: Vec::new(),
             dns_cache: None,
             activity: VecDeque::new(),
-            capture: None,
+            capture_method: None,
             capture_error: None,
             ac_selected: 0,
             ac_offset: 0,
@@ -433,9 +429,8 @@ impl Ir {
             ac_view_at: None,
             activity_names: HashMap::new(),
             activity_out: None,
-            traffic: None,
+            traffic_how: None,
             traffic_error: None,
-            traffic_asked: false,
             traffic_rates: HashMap::new(),
             dns_pending: false,
             dns_asked: false,

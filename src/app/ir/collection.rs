@@ -121,7 +121,11 @@ impl App {
         }
         let prev = self.ir.logs.take().map(|l| l.result).unwrap_or(Ok(Vec::new()));
         self.ir.logs = Some(Loaded { pending: true, fetched: Instant::now(), result: prev });
-        crate::engine::jobs::spawn_logs(self.tx.clone(), self.ir.log_minutes, self.ir.log_scope);
+        use crate::host::logs::module::{Fetch, FETCH};
+        let request = Fetch { minutes: self.ir.log_minutes, scope: self.ir.log_scope };
+        if !self.publish_to("logs", FETCH, request) {
+            self.ir.logs = Some(Loaded { pending: false, fetched: Instant::now(), result: Err("the logs module isn't running".into()) });
+        }
     }
 
     pub fn log_entries(&self) -> &[logs::Entry] {

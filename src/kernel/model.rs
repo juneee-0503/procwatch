@@ -22,21 +22,6 @@ pub enum Unit {
     Watts,
 }
 
-impl Unit {
-    pub fn label(self) -> &'static str {
-        match self {
-            Unit::Bytes => "bytes",
-            Unit::BytesPerSecond => "bytes/s",
-            Unit::PerSecond => "/s",
-            Unit::Percent => "%",
-            Unit::Count => "",
-            Unit::Milliseconds => "ms",
-            Unit::Celsius => "°C",
-            Unit::Watts => "W",
-        }
-    }
-}
-
 /// One measurement. Names are dotted and platform-neutral: `cpu.run_queue`,
 /// `disk.queue_depth`. What a thing belongs to goes in labels: `device=sda`.
 #[derive(Debug, Clone, Serialize)]

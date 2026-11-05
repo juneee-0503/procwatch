@@ -19,6 +19,14 @@ pub struct Snapshot {
 pub enum WorkerMsg {
     Snapshot(Box<Snapshot>),
     Gpu(GpuSnapshot),
+    /// What the file watcher could and couldn't do.
+    WatchStatus(crate::files::module::WatchStatus),
+    /// Whether traffic counting runs, and how.
+    TrafficState(Result<&'static str, String>),
+    /// The capture method while running; why it couldn't start otherwise.
+    CaptureState(crate::activity::module::State),
+    /// A metric alert rule fired or cleared.
+    MetricAlert(crate::kernel::alerts::Alert),
     /// Scheduling, paging, disks, network errors, sensors.
     Metrics(Box<Metrics>),
     /// System services, or why they couldn't be listed.

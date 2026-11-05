@@ -12,7 +12,7 @@ use chrono::{DateTime, Local};
 use serde::Serialize;
 
 use super::*;
-use crate::process::deeptrace::{DtEvent, DtKind, Watcher};
+use crate::process::deeptrace::{DtEvent, DtKind};
 use crate::common::model::ProcKey;
 
 const MAX_EVENTS: usize = 20_000;
@@ -83,7 +83,8 @@ pub struct Snap {
 
 #[derive(Default)]
 pub struct DeepState {
-    pub watcher: Option<Watcher>,
+    /// Tracing has been asked for at least once.
+    pub traced: bool,
     pub enrolled: HashMap<ProcKey, Enrolled>,
     pub events: VecDeque<DtEvent>,
     pub changes: VecDeque<Change>,
@@ -129,11 +130,10 @@ impl Drop for Helper {
 }
 
 impl App {
-    fn deep_watcher(&mut self) -> Option<&Watcher> {
-        if self.ir.deep.watcher.is_none() {
-            self.ir.deep.watcher = Watcher::start(crate::engine::jobs::deep_output(&self.tx));
-        }
-        self.ir.deep.watcher.as_ref()
+    fn trace_request(&mut self, r: crate::process::trace_module::Request) -> bool {
+        let sent = self.publish_to("trace", crate::process::trace_module::REQUEST, r);
+        self.ir.deep.traced |= sent;
+        sent
     }
 
     /// Enroll a process (and its current descendants) in deep trace.
@@ -157,9 +157,7 @@ impl App {
             let key = self.proc_key(p);
             let why = if p == pid { reason.clone() } else { format!("descendant of {} ({pid})", self.name_of(pid)) };
             self.ir.deep.enrolled.entry(key).or_insert(Enrolled { reason: why, since: now, root, auto, ended: None });
-            if let Some(w) = self.deep_watcher() {
-                w.watch(p);
-            }
+            self.trace_request(crate::process::trace_module::Request::Watch(p));
         }
         if let Some(c) = &self.ir.case {
             let _ = c.log("deep trace", &format!("{} ({pid}) enrolled: {reason}", self.name_of(pid)));
@@ -174,9 +172,7 @@ impl App {
         let keys: Vec<ProcKey> = self.ir.deep.enrolled.iter().filter(|(k, e)| **k == root || e.root == root).map(|(k, _)| *k).collect();
         for k in keys {
             self.ir.deep.enrolled.remove(&k);
-            if let Some(w) = &self.ir.deep.watcher {
-                w.unwatch(k.pid);
-            }
+            self.trace_request(crate::process::trace_module::Request::Unwatch(k.pid));
         }
         self.set_status(StatusLevel::Info, format!("Deep trace stopped for {} ({pid})", self.name_of(pid)));
     }
@@ -196,7 +192,8 @@ impl App {
         let pid = launched.pid;
         let key = ProcKey { pid, start: crate::process::native::start_time(pid).unwrap_or(0) };
         self.ir.launched.insert(pid);
-        let attached = self.deep_watcher().map(|w| w.watch_sync(pid)).unwrap_or(false);
+        let (reply, confirmed) = std::sync::mpsc::channel();
+        let attached = self.trace_request(crate::process::trace_module::Request::WatchConfirmed(pid, reply)) && confirmed.recv_timeout(std::time::Duration::from_secs(3)).unwrap_or(false);
         self.ir.deep.enrolled.insert(key, Enrolled { reason: "launched by procwatch --run".into(), since: Local::now(), root: key, auto: false, ended: None });
         let sha = crate::files::info::sha256_file(Path::new(&launched.program)).unwrap_or_default();
         let _ = case.log(

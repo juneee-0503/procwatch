@@ -10,9 +10,11 @@ pub mod handles;
 pub mod inspect;
 pub mod launch;
 pub mod memory;
+pub mod module;
 pub mod native;
 pub mod open_files;
 pub mod trace;
+pub mod trace_module;
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};

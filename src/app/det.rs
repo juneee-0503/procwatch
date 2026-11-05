@@ -600,12 +600,12 @@ impl App {
                 format!("couldn't watch: {}", self.ir.watch_errors.join("; "))
             },
         ));
-        v.push(match (&self.ir.capture, &self.ir.capture_error) {
-            (Some(c), _) => Source::new("Process activity", Status::Available, format!("{}; {} events dropped under load", c.method, crate::activity::dropped())),
+        v.push(match (self.ir.capture_method, &self.ir.capture_error) {
+            (Some(m), _) => Source::new("Process activity", Status::Available, format!("{m}; {} events dropped under load", crate::activity::dropped())),
             (None, Some(e)) => Source::new("Process activity", Status::Denied, e.clone()),
             (None, None) => Source::new("Process activity", Status::NotLoaded, "not capturing: start it on the Activity page"),
         });
-        v.push(match (self.ir.traffic_method(), &self.ir.traffic_error) {
+        v.push(match (self.ir.traffic_how, &self.ir.traffic_error) {
             (Some(m), _) => Source::new("Per-process traffic", Status::Available, m),
             (None, Some(e)) => Source::new("Per-process traffic", Status::Denied, e.clone()),
             (None, None) => Source::new("Per-process traffic", Status::NotLoaded, "starting"),
@@ -653,14 +653,14 @@ impl App {
         v.push(Source::new(
             "Deep trace",
             if enrolled > 0 { Status::Available } else { Status::NotLoaded },
-            match &self.ir.deep.watcher {
-                Some(w) => format!(
+            match self.ir.deep.traced {
+                true => format!(
                     "{} · {live} live / {enrolled} traced instances · {} lifecycle events{} · modules every 20 s, open files every 3 s",
-                    w.method(),
+                    crate::process::deeptrace::method(),
                     self.ir.deep.events.len(),
                     if self.ir.deep.dropped > 0 { format!(", {} older events dropped (buffer full)", self.ir.deep.dropped) } else { String::new() }
                 ),
-                None => format!("idle — starts automatically for priority ≥ {} or with D on a process", super::deep::AUTO_PRIORITY),
+                false => format!("idle — starts automatically for priority ≥ {} or with D on a process", super::deep::AUTO_PRIORITY),
             },
         ));
         v.push(if self.ir.dns_obs.is_empty() {

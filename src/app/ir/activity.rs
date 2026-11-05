@@ -3,19 +3,35 @@
 use super::*;
 
 impl App {
-    /// Start or stop capturing per-process operations.
+    /// Ask the activity module to start or stop capturing.
     pub fn toggle_capture(&mut self) {
-        if self.ir.capture.take().is_some() {
-            self.set_status(StatusLevel::Info, "Activity capture stopped".into());
-            return;
+        use crate::activity::module::{Command, COMMAND};
+        let command = if self.ir.capture_method.is_some() { Command::Stop } else { Command::Start };
+        if !self.publish_to("activity", COMMAND, command) {
+            self.ir.capture_error = Some("the activity module isn't running".into());
+            self.set_status(StatusLevel::Error, "Activity capture: the activity module isn't running".into());
         }
-        match crate::activity::start(crate::common::emit::Emit::to(self.tx.clone(), WorkerMsg::Activity)) {
-            Ok(c) => {
+    }
+
+    /// For callers waiting on the module to come up.
+    pub fn publish_capture_start(&self) -> bool {
+        use crate::activity::module::{Command, COMMAND};
+        self.publish_to("activity", COMMAND, Command::Start)
+    }
+
+    pub(crate) fn on_capture_state(&mut self, state: crate::activity::module::State) {
+        match state {
+            Ok(Some(m)) => {
+                self.ir.capture_method = Some(m);
                 self.ir.capture_error = None;
-                self.set_status(StatusLevel::Success, format!("Capturing activity: {}", c.method));
-                self.ir.capture = Some(c);
+                self.set_status(StatusLevel::Success, format!("Capturing activity: {m}"));
+            }
+            Ok(None) => {
+                self.ir.capture_method = None;
+                self.set_status(StatusLevel::Info, "Activity capture stopped".into());
             }
             Err(e) => {
+                self.ir.capture_method = None;
                 self.set_status(StatusLevel::Error, format!("Activity capture: {e}"));
                 self.ir.capture_error = Some(e);
             }
@@ -157,7 +173,7 @@ impl App {
         let host = sysinfo::System::host_name().unwrap_or_default();
         let text: String = self.ir.activity.iter().map(|a| activity_line(a, &host) + "\n").collect();
         let (n, dropped) = (self.ir.activity.len(), crate::activity::dropped());
-        let mut prov = crate::forensics::case::Provenance::live(self.ir.capture.as_ref().map_or("procwatch activity capture", |c| c.method));
+        let mut prov = crate::forensics::case::Provenance::live(self.ir.capture_method.unwrap_or("procwatch activity capture"));
         if dropped > 0 {
             prov.problems.push(format!("{dropped} events were dropped during capture"));
         }

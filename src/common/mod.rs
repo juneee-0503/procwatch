@@ -7,6 +7,7 @@ pub mod emit;
 pub mod etw;
 pub mod filter;
 pub mod model;
+pub mod pacing;
 pub mod paths;
 pub mod perf;
 pub mod text;

@@ -3,6 +3,7 @@
 
 pub mod coverage;
 pub mod metrics;
+pub mod modules;
 pub mod monitor;
 pub mod selftest;
 pub mod soak;
@@ -51,6 +52,9 @@ Usage:
   procwatch --enforce POLICY [--output FILE] [--minutes N]
                                     apply a policy (audit mode only logs); needs root/administrator.
                                     Everything ends when procwatch exits. See docs/enforcement.md
+  procwatch --modules [--json]      list modules and what each supports on this system
+  procwatch --module-enable NAME    run a module from the next start
+  procwatch --module-disable NAME   leave a module out from the next start
   procwatch --metrics [--json]      one reading of scheduling, memory, disks, network, sensors, services
   procwatch --coverage [--json]     list the MITRE ATT&CK techniques the rules look for
   procwatch --help";
@@ -157,6 +161,14 @@ pub fn main() -> anyhow::Result<()> {
                 std::process::exit(2);
             }
             std::process::exit(enforce::run(std::path::Path::new(file), value("--output").map(std::path::Path::new), minutes.and_then(Result::ok)));
+        }
+        Some("--modules") => std::process::exit(modules::list(args.iter().any(|a| a == "--json"))),
+        Some(flag @ ("--module-enable" | "--module-disable")) => {
+            let Some(name) = args.get(1) else {
+                eprintln!("{flag} needs a module name\n\n{USAGE}");
+                std::process::exit(2);
+            };
+            std::process::exit(modules::set(name, flag == "--module-enable"));
         }
         Some("--metrics") => std::process::exit(metrics::run(args.iter().any(|a| a == "--json"))),
         Some("--coverage") => std::process::exit(coverage::run(args.iter().any(|a| a == "--json"))),

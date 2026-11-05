@@ -14,7 +14,7 @@ use chrono::Local;
 
 use crate::app::App;
 use crate::app::config::Config;
-use crate::engine::sampler::{self, SamplerCtl};
+use crate::common::pacing::{self as sampler, SamplerCtl};
 
 /// Event ids remembered to avoid repeats; beyond what the timeline holds.
 const MAX_SEEN: usize = 1_000_000;
@@ -47,16 +47,23 @@ pub fn run(out: Option<&Path>, minutes: Option<u64>, activity: bool) -> i32 {
         refresh_now: AtomicBool::new(false),
         snapshots_queued: Default::default(),
     });
-    if let Err(e) = sampler::spawn_sampler(tx.clone(), ctl.clone()) {
-        eprintln!("monitor: couldn't start sampler: {e}");
-        return 2;
-    }
+    let kernel = crate::engine::start(tx.clone(), ctl.clone(), crate::app::watch_paths(&cfg));
     let mut app = App::new(tx, ctl, cfg);
+    app.kernel = Some(kernel);
     if activity {
         app.ir.activity_out = Some(Vec::new());
-        app.toggle_capture();
-        if let Some(e) = &app.ir.capture_error {
-            eprintln!("monitor: activity capture unavailable: {e}");
+        // The module needs a moment to start, and answers asynchronously.
+        let until = Instant::now() + Duration::from_secs(5);
+        let mut asked = false;
+        while app.ir.capture_method.is_none() && app.ir.capture_error.is_none() && Instant::now() < until {
+            if !asked {
+                asked = app.publish_capture_start();
+            }
+            sampler::drain_for(&rx, Duration::from_millis(100), |m| app.on_worker_msg(m));
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if app.ir.capture_method.is_none() {
+            eprintln!("monitor: activity capture unavailable: {}", app.ir.capture_error.as_deref().unwrap_or("the module didn't start"));
             return 2;
         }
     }

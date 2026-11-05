@@ -101,6 +101,19 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             }
         }
         Mode::Health | Mode::ActivitySummary => app.mode = Mode::Normal,
+        Mode::Modules { cursor } => {
+            let names: Vec<&'static str> = app.kernel.as_ref().map(|k| k.status().iter().map(|s| s.name).collect()).unwrap_or_default();
+            match key.code {
+                KeyCode::Up => app.mode = Mode::Modules { cursor: cursor.saturating_sub(1) },
+                KeyCode::Down => app.mode = Mode::Modules { cursor: (cursor + 1).min(names.len().saturating_sub(1)) },
+                KeyCode::Char(' ') => {
+                    if let Some(n) = names.get(cursor) {
+                        app.toggle_module(n);
+                    }
+                }
+                _ => app.mode = Mode::Normal,
+            }
+        }
         Mode::Workspace => workspace_key(app, key),
         Mode::Palette { input, cursor } => {
             let list = palette::matches(&input);
@@ -180,6 +193,10 @@ fn normal_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('?') => {
             app.mode = Mode::Help;
+            return;
+        }
+        KeyCode::Char('M') => {
+            app.mode = Mode::Modules { cursor: 0 };
             return;
         }
         KeyCode::Char(c @ ('0'..='9' | '`')) if !app.detail_full => {

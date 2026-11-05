@@ -13,6 +13,14 @@ use std::sync::Arc;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::time::Duration;
 
+mod probes;
+#[cfg(target_os = "linux")]
+use probes::linux;
+#[cfg(target_os = "macos")]
+use probes::macos;
+#[cfg(windows)]
+use probes::windows;
+
 use crate::common::emit::Emit;
 
 /// Per pid: bytes received, bytes sent.
@@ -91,101 +99,23 @@ pub fn start(out: Emit<Totals>) -> Result<Traffic, String> {
     }
 }
 
+
 #[cfg(windows)]
-mod windows {
-    use super::*;
-    use std::net::IpAddr;
-    use std::sync::Mutex;
+pub use probes::windows::set_connection_sink;
 
-    use ferrisetw::parser::Parser;
-    use ferrisetw::provider::Provider;
-    use ferrisetw::schema_locator::SchemaLocator;
-    use ferrisetw::trace::UserTrace;
-    use ferrisetw::EventRecord;
-
-    use crate::common::etw::start;
-
-    const KERNEL_NETWORK: &str = "7DD42A49-5329-4832-8DFD-43D979153A88";
-    /// Kernel-Network keywords: IPv4 and IPv6.
-    const NET_KEYWORDS: u64 = 0x10 | 0x20;
-    const MAX_TRAFFIC_PIDS: usize = 16_384;
-
-    /// Who wants connection events, while an activity capture runs.
-    static SINK: Mutex<Option<Emit<ConnOp>>> = Mutex::new(None);
-
-    pub fn set_connection_sink(sink: Option<Emit<ConnOp>>) {
-        if let Ok(mut s) = SINK.lock() {
-            *s = sink;
-        }
+/// What this platform can count.
+pub fn capability() -> crate::kernel::Capability {
+    use crate::kernel::Capability;
+    if cfg!(windows) {
+        Capability::partly("traffic per process", "TCP and UDP, needs administrator; loopback isn't counted")
+    } else if cfg!(target_os = "linux") {
+        Capability::partly("traffic per process", "TCP only, and only processes whose sockets are readable")
+    } else if cfg!(target_os = "macos") {
+        Capability::yes("traffic per process")
+    } else {
+        Capability::no("traffic per process", "no probe for this platform")
     }
-
-    pub fn start_traffic(out: Emit<Totals>, stop: Arc<AtomicBool>) -> Result<UserTrace, String> {
-        let totals: Arc<Mutex<Totals>> = Arc::default();
-        let shared = totals.clone();
-        let provider = Provider::by_guid(KERNEL_NETWORK)
-            .any(NET_KEYWORDS)
-            .add_callback(move |r: &EventRecord, sl: &SchemaLocator| {
-                // The event says which process; the header is often System.
-                let id = r.event_id();
-                let (received, sent, op) = match id {
-                    11 | 27 | 43 | 59 => (true, false, ""),
-                    10 | 26 | 42 | 58 => (false, true, ""),
-                    12 | 28 => (false, false, "connect"),
-                    15 | 31 => (false, false, "accept"),
-                    13 | 29 => (false, false, "disconnect"),
-                    _ => return,
-                };
-                let Ok(schema) = sl.event_schema(r) else { return };
-                let p = Parser::create(r, &schema);
-                let Ok(pid) = p.try_parse::<u32>("PID") else { return };
-                if received || sent {
-                    let size = u64::from(p.try_parse::<u32>("size").unwrap_or(0));
-                    if let Ok(mut t) = shared.lock() {
-                        let e = t.entry(pid).or_default();
-                        if received {
-                            e.0 += size;
-                        } else {
-                            e.1 += size;
-                        }
-                    }
-                    return;
-                }
-                if let Ok(s) = SINK.lock() {
-                    if let Some(sink) = s.as_ref() {
-                        let ip = p.try_parse::<IpAddr>("daddr").map(|a| a.to_string()).unwrap_or_default();
-                        // Network byte order, whatever the schema says.
-                        let port = p.try_parse::<u16>("dport").map(u16::swap_bytes).unwrap_or(0);
-                        sink.send(ConnOp { pid, op, remote: format!("{ip}:{port}") });
-                    }
-                }
-            })
-            .build();
-        let trace = start("procwatch-traffic", vec![provider])?;
-        let _ = std::thread::Builder::new().name("traffic".into()).spawn(move || {
-            while !stop.load(Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_secs(2));
-                let now = totals
-                    .lock()
-                    .map(|mut t| {
-                        // Exited processes' entries; rates only need the live ones.
-                        if t.len() > MAX_TRAFFIC_PIDS {
-                            t.clear();
-                        }
-                        t.clone()
-                    })
-                    .unwrap_or_default();
-                if !now.is_empty() && !out.send(now) {
-                    return;
-                }
-            }
-        });
-        Ok(trace)
-    }
-
 }
-
-#[cfg(windows)]
-pub use windows::set_connection_sink;
 
 /// One `name.pid,bytes_in,bytes_out,` line of `nettop -P -x`.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -197,21 +127,6 @@ pub fn parse_nettop(line: &str) -> Option<(u32, u64, u64)> {
     Some((pid, rx, tx))
 }
 
-#[cfg(target_os = "macos")]
-mod macos {
-    use super::*;
-
-    /// One sample per run: nettop buffers its output when writing to a pipe,
-    /// so a long-running one delivers data many seconds late.
-    pub fn sample() -> Option<Totals> {
-        let mut cmd = std::process::Command::new("/usr/bin/nettop");
-        cmd.args(["-P", "-x", "-L", "1", "-J", "bytes_in,bytes_out"]);
-        let out = crate::common::command::run_command(&mut cmd, Duration::from_secs(8)).ok()?;
-        let text = String::from_utf8_lossy(&out.stdout);
-        let totals: Totals = text.lines().filter_map(parse_nettop).map(|(pid, rx, tx)| (pid, (rx, tx))).collect();
-        (!totals.is_empty()).then_some(totals)
-    }
-}
 
 // ── sock_diag messages (portable for tests) ────────────────────────────
 
@@ -294,95 +209,6 @@ pub fn parse_diag(mut buf: &[u8]) -> (Vec<(u32, u64, u64)>, bool) {
     (out, false)
 }
 
-#[cfg(target_os = "linux")]
-mod linux {
-    use super::*;
-
-    const NETLINK_SOCK_DIAG: libc::c_int = 4;
-
-    fn dump(family: u8, out: &mut Vec<(u32, u64, u64)>) -> Option<()> {
-        let fd = unsafe { libc::socket(libc::AF_NETLINK, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, NETLINK_SOCK_DIAG) };
-        if fd < 0 {
-            return None;
-        }
-        struct Close(libc::c_int);
-        impl Drop for Close {
-            fn drop(&mut self) {
-                unsafe { libc::close(self.0) };
-            }
-        }
-        let _close = Close(fd);
-        let timeout = libc::timeval { tv_sec: 1, tv_usec: 0 };
-        unsafe { libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_RCVTIMEO, &timeout as *const _ as *const libc::c_void, std::mem::size_of::<libc::timeval>() as libc::socklen_t) };
-        let req = diag_request(family);
-        if unsafe { libc::send(fd, req.as_ptr() as *const libc::c_void, req.len(), 0) } < 0 {
-            return None;
-        }
-        let mut buf = vec![0u8; 64 * 1024];
-        for _ in 0..10_000 {
-            let n = unsafe { libc::recv(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0) };
-            if n <= 0 {
-                return None;
-            }
-            let (sockets, done) = parse_diag(&buf[..n as usize]);
-            out.extend(sockets);
-            if done {
-                return Some(());
-            }
-        }
-        Some(())
-    }
-
-    /// Who owns each socket inode. Only processes we may read show up.
-    fn owners() -> HashMap<u32, u32> {
-        let mut map = HashMap::new();
-        for e in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
-            let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else { continue };
-            for fd in std::fs::read_dir(e.path().join("fd")).into_iter().flatten().flatten() {
-                if let Ok(link) = std::fs::read_link(fd.path()) {
-                    let link = link.to_string_lossy();
-                    if let Some(inode) = link.strip_prefix("socket:[").and_then(|s| s.strip_suffix(']')).and_then(|s| s.parse::<u32>().ok()) {
-                        map.entry(inode).or_insert(pid);
-                    }
-                }
-            }
-        }
-        map
-    }
-
-    #[derive(Default)]
-    pub struct Counter {
-        last: HashMap<u32, (u64, u64)>,
-        owners: HashMap<u32, u32>,
-        totals: Totals,
-    }
-
-    impl Counter {
-        pub fn sample(&mut self) -> Option<Totals> {
-            let mut sockets = Vec::new();
-            dump(libc::AF_INET as u8, &mut sockets)?;
-            let _ = dump(libc::AF_INET6 as u8, &mut sockets);
-            if sockets.iter().any(|(inode, ..)| !self.owners.contains_key(inode)) {
-                self.owners = owners();
-            }
-            let mut last = HashMap::with_capacity(sockets.len());
-            for (inode, rx, tx) in sockets {
-                // A socket seen for the first time adds what it moved so far.
-                let (prev_rx, prev_tx) = self.last.get(&inode).copied().unwrap_or((0, 0));
-                if let Some(pid) = self.owners.get(&inode) {
-                    let t = self.totals.entry(*pid).or_default();
-                    t.0 += rx.saturating_sub(prev_rx);
-                    t.1 += tx.saturating_sub(prev_tx);
-                }
-                last.insert(inode, (rx, tx));
-            }
-            self.last = last;
-            let owners: std::collections::HashSet<u32> = self.owners.values().copied().collect();
-            self.totals.retain(|pid, _| owners.contains(pid));
-            Some(self.totals.clone())
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {

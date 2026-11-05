@@ -5,20 +5,20 @@
 /// (module, what it may depend on)
 const LAYERS: &[(&str, &[&str])] = &[
     ("kernel", &[]),
-    ("common", &[]),
-    ("network", &["common"]),
-    ("performance", &["common"]),
-    ("process", &["common", "network"]),
-    ("files", &["common", "process"]),
-    ("host", &["common", "files", "process"]),
-    ("activity", &["common", "files", "network"]),
+    ("common", &["kernel"]),
+    ("network", &["common", "kernel"]),
+    ("performance", &["common", "kernel"]),
+    ("process", &["common", "kernel", "network"]),
+    ("files", &["common", "kernel", "process"]),
+    ("host", &["common", "files", "kernel", "process"]),
+    ("activity", &["common", "files", "kernel", "network"]),
     ("detection", &["common", "files", "host", "network", "process"]),
     ("forensics", &["common", "detection", "files", "host", "network", "process"]),
     ("response", &["activity", "common", "process"]),
-    ("engine", &["activity", "common", "files", "host", "network", "performance", "process"]),
-    ("app", &["activity", "common", "detection", "engine", "files", "forensics", "host", "network", "performance", "process"]),
-    ("ui", &["activity", "app", "common", "detection", "engine", "files", "forensics", "host", "network", "performance", "process"]),
-    ("cli", &["activity", "app", "common", "detection", "engine", "files", "forensics", "host", "network", "performance", "process", "response", "ui"]),
+    ("engine", &["activity", "common", "files", "host", "kernel", "network", "performance", "process"]),
+    ("app", &["activity", "common", "detection", "engine", "files", "forensics", "host", "kernel", "network", "performance", "process"]),
+    ("ui", &["activity", "app", "common", "detection", "engine", "files", "forensics", "host", "kernel", "network", "performance", "process"]),
+    ("cli", &["activity", "app", "common", "detection", "engine", "files", "forensics", "host", "kernel", "network", "performance", "process", "response", "ui"]),
 ];
 
 /// The part of a source file that isn't test code.
@@ -76,5 +76,39 @@ fn every_module_is_in_the_table() {
     for e in std::fs::read_dir(root).unwrap().flatten().filter(|e| e.path().is_dir()) {
         let name = e.file_name().to_string_lossy().into_owned();
         assert!(LAYERS.iter().any(|(m, _)| *m == name), "{name} is missing from LAYERS");
+    }
+}
+
+/// Modules talk over the bus. A module's own file may use its own domain,
+/// `common` and the kernel, and nothing else.
+#[test]
+fn module_files_reach_no_other_module() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    for (file, domain) in [
+        ("process/module.rs", "process"),
+        ("process/trace_module.rs", "process"),
+        ("network/module.rs", "network"),
+        ("performance/module.rs", "performance"),
+        ("files/module.rs", "files"),
+        ("host/logs/module.rs", "host"),
+        ("activity/module.rs", "activity"),
+    ] {
+        let text = std::fs::read_to_string(root.join(file)).unwrap();
+        for part in production(&text).split("crate::").skip(1) {
+            let used: String = part.chars().take_while(|c| c.is_ascii_lowercase() || *c == '_').collect();
+            assert!(["common", "kernel", domain].contains(&used.as_str()), "{file} uses {used}");
+        }
+    }
+}
+
+/// The kernel contains no collection: nothing that reads the system.
+#[test]
+fn the_kernel_collects_nothing() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/kernel");
+    for e in std::fs::read_dir(root).unwrap().flatten() {
+        let text = std::fs::read_to_string(e.path()).unwrap();
+        for banned in ["sysinfo", "netstat2", "/proc", "Command::new", "cfg(target_os", "cfg(windows)"] {
+            assert!(!production(&text).contains(banned), "{}: {banned}", e.path().display());
+        }
     }
 }

@@ -251,8 +251,8 @@ pub fn activity(frame: &mut Frame, app: &mut App, area: Rect) {
     app.refresh_activity_view();
     let total = app.visible_activity().len();
     let mut extra: Vec<Span> = vec![muted("   ")];
-    match (&app.ir.capture, &app.ir.capture_error) {
-        (Some(c), _) => extra.push(Span::styled(format!("● capturing via {}", c.method), Style::new().fg(BAD))),
+    match (app.ir.capture_method, &app.ir.capture_error) {
+        (Some(m), _) => extra.push(Span::styled(format!("● capturing via {m}"), Style::new().fg(BAD))),
         (None, Some(e)) => extra.push(Span::styled(format!("can't capture: {e}"), Style::new().fg(WARN))),
         (None, None) => extra.push(muted("stopped — press c to capture")),
     }

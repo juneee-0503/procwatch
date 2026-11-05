@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use crate::app::ViewMode;
 use crate::app::columns::Col;
 use crate::common::paths::{config_path as path, write_atomic};
-use crate::engine::sampler::{MAX_INTERVAL_MS, MIN_INTERVAL_MS};
+use crate::common::pacing::{MAX_INTERVAL_MS, MIN_INTERVAL_MS};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {

@@ -9,15 +9,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::messages::WorkerMsg;
-use crate::common::emit::Emit;
 use crate::common::panic_text;
 use crate::process::actions::{self, Action};
 use crate::process::inspect::{self, DeepInfo};
-
-/// Deep trace reporting into the worker channel.
-pub fn deep_output(tx: &Sender<WorkerMsg>) -> crate::process::deeptrace::Output {
-    crate::process::deeptrace::Output { events: Emit::to(tx.clone(), WorkerMsg::Deep), errors: Emit::to(tx.clone(), WorkerMsg::Error) }
-}
 
 /// Run `body` on a named thread; if it panics, report `on_panic(message)`
 /// instead of leaving the UI waiting forever for a result.
@@ -144,15 +138,6 @@ pub fn spawn_persistence(tx: Sender<WorkerMsg>, known: HashMap<String, crate::fi
         tx,
         move || WorkerMsg::Persistence(crate::host::persistence::scan_with(&known)),
         |e| WorkerMsg::Persistence(crate::host::persistence::Scan { items: Vec::new(), notes: vec![format!("scan crashed: {e}")] }),
-    );
-}
-
-pub fn spawn_logs(tx: Sender<WorkerMsg>, minutes: u32, scope: crate::host::logs::Scope) {
-    worker(
-        "logs".into(),
-        tx,
-        move || WorkerMsg::Logs(crate::host::logs::fetch(minutes, scope)),
-        |e| WorkerMsg::Logs(Err(format!("log reader crashed: {e}"))),
     );
 }
 

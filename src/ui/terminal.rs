@@ -16,7 +16,7 @@ use super::input::{handle_key, handle_mouse};
 use crate::app::config::Config;
 use crate::app::{self, App, Mode};
 use crate::common::WORKER_PANIC;
-use crate::engine::sampler::{self, SamplerCtl};
+use crate::common::pacing::{self as sampler, SamplerCtl};
 use crate::forensics::case;
 use crate::ui;
 
@@ -86,10 +86,9 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::Resu
         .iter()
         .position(|a| a == "--replay")
         .map(|i| args.get(i + 1).filter(|a| !a.starts_with("--")).map(std::path::PathBuf::from).or_else(crate::common::paths::data_dir));
-    if replay.is_none() {
-        sampler::spawn_sampler(tx.clone(), ctl.clone())?;
-    }
+    let kernel = replay.is_none().then(|| crate::engine::start(tx.clone(), ctl.clone(), crate::app::watch_paths(&cfg)));
     let mut app = App::new(tx, ctl, Config { history: cfg.history && replay.is_none(), ..cfg.clone() });
+    app.kernel = kernel;
     if let Some(path) = replay {
         let when = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).and_then(|s| parse_when(s));
         match path {

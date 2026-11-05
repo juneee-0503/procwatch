@@ -91,12 +91,6 @@ impl Filterable for crate::host::artifacts::Artifact {
     }
 }
 
-impl Ir {
-    pub fn traffic_method(&self) -> Option<&'static str> {
-        self.traffic.as_ref().map(|t| t.method)
-    }
-}
-
 impl Filterable for crate::activity::Activity {
     fn field(&self, name: &str) -> Option<Vec<String>> {
         match name {

@@ -41,6 +41,7 @@ pub static ENTRIES: &[Entry] = &[
     e("Find who has a file or port open", None, 'f', "f"),
     e("Pause / resume updates", None, 'p', "p"),
     e("Options", None, 'o', "o"),
+    e("Modules: status, capabilities, enable or disable", None, 'M', "M"),
     e("Help: keys and mouse", None, '?', "?"),
     e("Remote hosts and beaconing", Some(Tab::Network), 'h', "Net h"),
     e("DNS view", Some(Tab::Network), 'd', "Net d"),

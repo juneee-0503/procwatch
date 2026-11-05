@@ -253,7 +253,7 @@ impl App {
             self.sigma_on_sockets(&fresh);
             let mut add = Vec::new();
             // Windows has exact events for these; elsewhere this is the source.
-            if self.ir.capture.is_some() && !cfg!(windows) {
+            if self.ir.capture_method.is_some() && !cfg!(windows) {
                 let batch = opened.iter().filter(|(_, c)| c.state != ConnState::Listen).map(|(pid, c)| crate::activity::Activity::new(*pid, crate::activity::Class::Network, "connect", c.remote.clone()).with_detail(format!("{} from {}", c.protocol, c.local))).collect();
                 self.on_activity(batch);
             }
@@ -409,6 +409,17 @@ impl App {
                 self.ir.timeline_dirty = true;
             }
             WorkerMsg::Activity(batch) => self.on_activity(batch),
+            WorkerMsg::CaptureState(s) => self.on_capture_state(s),
+            WorkerMsg::WatchStatus(s) => {
+                self.ir.watch_errors = s.errors;
+                if !s.attribution.is_empty() {
+                    self.ir.deep.attribution = s.attribution;
+                }
+            }
+            WorkerMsg::TrafficState(s) => match s {
+                Ok(how) => self.ir.traffic_how = Some(how),
+                Err(e) => self.ir.traffic_error = Some(e),
+            },
             WorkerMsg::Traffic(totals) => self.on_traffic(totals),
             WorkerMsg::Dns { resolvers, cache } => {
                 self.ir.dns_pending = false;
@@ -475,13 +486,6 @@ impl App {
         }
         if !self.ir.dns_asked && !self.ir.dns_pending {
             self.collect_dns();
-        }
-        if !self.ir.traffic_asked && !cfg!(test) {
-            self.ir.traffic_asked = true;
-            match crate::network::traffic::start(crate::common::emit::Emit::to(self.tx.clone(), WorkerMsg::Traffic)) {
-                Ok(t) => self.ir.traffic = Some(t),
-                Err(e) => self.ir.traffic_error = Some(e),
-            }
         }
         if self.tab == Tab::Activity {
             self.refresh_activity_view();

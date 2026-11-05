@@ -5,5 +5,6 @@ pub mod attribution;
 pub mod binfmt;
 pub mod info;
 pub mod intel;
+pub mod module;
 pub mod watch;
 pub mod yara;

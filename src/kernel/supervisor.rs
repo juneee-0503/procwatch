@@ -5,7 +5,7 @@
 //! abandoned: its run is invalidated, so nothing more it publishes counts, and
 //! a new instance takes over. Whatever a module does, the kernel carries on.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -71,7 +71,6 @@ type Factory = Box<dyn Fn() -> Box<dyn Module> + Send + Sync>;
 
 struct Slot {
     name: &'static str,
-    description: &'static str,
     factory: Factory,
     /// Each run has a number; only the current one's output counts.
     run: Arc<AtomicU64>,
@@ -114,7 +113,6 @@ impl Registry {
         let capabilities = catch_unwind(AssertUnwindSafe(|| factory().capabilities())).unwrap_or_default();
         self.slots.push(Slot {
             name,
-            description,
             factory: Box::new(factory),
             run: Arc::default(),
             busy_since: Arc::default(),
@@ -317,8 +315,9 @@ impl Kernel {
             if let Ok(mut g) = s.state.lock() {
                 g.status.capabilities = caps;
             }
-            let events = self.0.bus.subscribe(&m.subscribes(), QUEUE);
-            let has_events = !m.subscribes().is_empty();
+            // No topics means no queue: an empty list would subscribe to all.
+            let topics = m.subscribes();
+            let events = (!topics.is_empty()).then(|| self.0.bus.subscribe(&topics, QUEUE));
             s.busy_since.store(self.now_ms(), Ordering::Relaxed);
             let started = m.start(&ctx);
             s.busy_since.store(0, Ordering::Relaxed);
@@ -339,14 +338,15 @@ impl Kernel {
                     Some(_) => next.saturating_duration_since(Instant::now()).min(WATCH_EVERY),
                     None => WATCH_EVERY,
                 };
-                if has_events {
-                    if let Ok(ev) = events.recv_timeout(wait) {
-                        s.busy_since.store(self.now_ms(), Ordering::Relaxed);
-                        m.on_event(&ev, &ctx);
-                        s.busy_since.store(0, Ordering::Relaxed);
+                match &events {
+                    Some(rx) => {
+                        if let Ok(ev) = rx.recv_timeout(wait) {
+                            s.busy_since.store(self.now_ms(), Ordering::Relaxed);
+                            m.on_event(&ev, &ctx);
+                            s.busy_since.store(0, Ordering::Relaxed);
+                        }
                     }
-                } else {
-                    std::thread::sleep(wait);
+                    None => std::thread::sleep(wait),
                 }
                 if let Some(every) = m.interval() {
                     if Instant::now() >= next && ctx.current() {
@@ -369,11 +369,6 @@ impl Kernel {
             }
         }
     }
-}
-
-/// Names with what they do, for listings.
-pub fn describe(statuses: &[ModuleStatus]) -> BTreeMap<&'static str, &'static str> {
-    statuses.iter().map(|s| (s.name, s.description)).collect()
 }
 
 #[cfg(test)]
@@ -525,6 +520,16 @@ mod tests {
         std::thread::sleep(Duration::from_millis(400));
         let s = &k.status()[0];
         assert_eq!((s.restarts, s.last_error.as_deref()), (0, Some("needs root")));
+        k.shutdown();
+    }
+
+    #[test]
+    fn modules_without_topics_take_no_share_of_the_bus() {
+        let (r, f) = registry();
+        let bus = Bus::default();
+        let k = r.start(bus.clone(), KernelConfig::default());
+        wait_for("publishing", || f.ticks.load(Ordering::SeqCst) > 300);
+        assert_eq!(bus.dropped(), 0, "nothing is queued for a module that reads no events");
         k.shutdown();
     }
 

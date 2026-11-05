@@ -12,7 +12,7 @@ use ratatui::{backend::TestBackend, Terminal};
 
 use crate::app::{App, Tab};
 use crate::app::config::Config;
-use crate::engine::sampler::{self, SamplerCtl};
+use crate::common::pacing::{self as sampler, SamplerCtl};
 
 /// What the main loop is doing right now, for the watchdog.
 static PHASE: Mutex<String> = Mutex::new(String::new());
@@ -138,6 +138,10 @@ fn msg_name(m: &crate::engine::messages::WorkerMsg) -> &'static str {
         Deep(_) => "msg: Deep",
         Dns { .. } => "msg: Dns",
         Metrics(_) => "msg: Metrics",
+        WatchStatus(_) => "msg: WatchStatus",
+        TrafficState(_) => "msg: TrafficState",
+        CaptureState(_) => "msg: CaptureState",
+        MetricAlert(_) => "msg: MetricAlert",
         Services(_) => "msg: Services",
         Activity(_) => "msg: Activity",
         Traffic(_) => "msg: Traffic",
@@ -169,11 +173,9 @@ pub fn run(minutes: u64) -> i32 {
     let cfg = Config { interval_ms: 1000, history: false, ..Config::load() };
     let (tx, rx) = mpsc::channel();
     let ctl = Arc::new(SamplerCtl { interval_ms: AtomicU64::new(cfg.interval_ms), paused: AtomicBool::new(false), refresh_now: AtomicBool::new(false), snapshots_queued: Default::default() });
-    if let Err(e) = sampler::spawn_sampler(tx.clone(), ctl.clone()) {
-        eprintln!("soak: couldn't start sampler: {e}");
-        return 2;
-    }
+    let kernel = crate::engine::start(tx.clone(), ctl.clone(), crate::app::watch_paths(&cfg));
     let mut app = App::new(tx, ctl, cfg);
+    app.kernel = Some(kernel.clone());
     let mut term = match Terminal::new(TestBackend::new(160, 45)) {
         Ok(t) => t,
         Err(e) => {
@@ -187,9 +189,7 @@ pub fn run(minutes: u64) -> i32 {
         // Our child on Windows, but it is the thing under test.
         app.ir.launched.insert(p);
     }
-    app.toggle_capture();
-    let capture = app.ir.capture.as_ref().map(|c| c.method).unwrap_or("unavailable");
-    println!("activity capture: {capture}");
+    let mut capture_asked = false;
     let mut traced = false;
     let mut sys = sysinfo::System::new();
     let start = Instant::now();
@@ -206,6 +206,10 @@ pub fn run(minutes: u64) -> i32 {
     println!("soak: {minutes} min, sampling every 1 s, churn workload {}", if child.is_some() { "running" } else { "unavailable" });
     println!("{:>7} {:>9} {:>6} {:>9} {:>7} {:>7} {:>11}", "minute", "RSS MB", "CPU%", "timeline", "net", "deep", "detections");
     while Instant::now() < end {
+        // The module comes up on its own schedule.
+        if !capture_asked {
+            capture_asked = app.publish_capture_start();
+        }
         let drained = sampler::drain_for(&rx, Duration::from_millis(100), |msg| {
             let name = msg_name(&msg);
             phase(format!("handling worker message {name}"));
@@ -289,6 +293,11 @@ pub fn run(minutes: u64) -> i32 {
     println!("frames rendered: {frames} · final RSS {rss:.1} MB · growth after warm-up {growth:+.1} MB (limit {limit:.0} MB)");
     let busy = crate::common::perf::total("msg: ").as_secs_f64() / start.elapsed().as_secs_f64().max(1.0);
     println!("message handling: {:.0}% of the run · drain cut short {cut_short} times", busy * 100.0);
+    for s in kernel.status() {
+        println!("module {:<12} {:<12} restarts {}{}", s.name, s.state.label(), s.restarts, s.last_error.map(|e| format!("  last error: {e}")).unwrap_or_default());
+    }
+    println!("bus: {} events published, {} dropped", kernel.bus().published(), kernel.bus().dropped());
+    println!("activity capture: {}", app.ir.capture_method.or(app.ir.capture_error.as_deref()).unwrap_or("unavailable"));
     println!("activity: {} operations held, {} dropped; traffic: {} processes", app.ir.activity.len(), crate::activity::dropped(), app.ir.traffic_rates.len());
     println!("slowest work (by longest single run):");
     for l in crate::common::perf::report(REPORT_ROWS) {

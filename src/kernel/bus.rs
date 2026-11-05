@@ -14,7 +14,10 @@ pub type Payload = Arc<dyn Any + Send + Sync>;
 #[derive(Clone)]
 pub struct Event {
     pub topic: &'static str,
+    /// Who published it and when: part of the contract for any subscriber.
+    #[allow(dead_code)]
     pub source: &'static str,
+    #[allow(dead_code)]
     pub at: SystemTime,
     pub payload: Payload,
 }

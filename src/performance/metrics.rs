@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use crate::common::emit::Emit;
+use crate::kernel::{Capability, Sample, Support, Unit};
 
 /// Cumulative counters of one disk.
 #[derive(Debug, Clone, Default)]
@@ -175,6 +175,7 @@ pub const INTERVAL: Duration = if cfg!(target_os = "linux") {
 
 /// Reads this system's sources, keeping what rates need.
 pub struct Collector {
+    probe: Box<dyn super::probes::Probe>,
     previous: Option<(Raw, Instant)>,
     components: sysinfo::Components,
     system: sysinfo::System,
@@ -182,7 +183,7 @@ pub struct Collector {
 
 impl Collector {
     pub fn new() -> Collector {
-        Collector { previous: None, components: sysinfo::Components::new_with_refreshed_list(), system: sysinfo::System::new() }
+        Collector { probe: super::probes::create(), previous: None, components: sysinfo::Components::new_with_refreshed_list(), system: sysinfo::System::new() }
     }
 
     /// One sample. The first has no rates.
@@ -193,49 +194,78 @@ impl Collector {
         m.total_memory = Some(self.system.total_memory());
         m.swap_used = Some(self.system.used_swap());
         m.swap_total = Some(self.system.total_swap());
-        let raw = super::platform::read(&mut m);
+        let raw = self.probe.read(&mut m);
         for c in self.components.list_mut() {
             c.refresh();
         }
         m.temperatures = self.components.iter().map(|c| (c.label(), c.temperature())).filter(|(_, t)| t.is_finite() && *t > 0.0).map(|(l, t)| Reading { label: l.to_string(), value: f64::from(t) }).collect();
-        if m.temperatures.is_empty() {
-            m.notes.push("temperature: no sensors readable here".into());
-        }
         let now = Instant::now();
         if let Some((before, at)) = &self.previous {
             derive(&raw, before, now.duration_since(*at).as_secs_f64(), &mut m);
         }
         self.previous = Some((raw, now));
-        if m.power.is_empty() {
-            m.notes.push(super::platform::POWER_NOTE.into());
+        for c in self.probe.capabilities() {
+            match c.support {
+                Support::Yes => {}
+                Support::Partly(why) | Support::No(why) => m.notes.push(format!("{}: {why}", c.name)),
+            }
+        }
+        if m.temperatures.is_empty() {
+            m.notes.push("temperature: no sensors readable here".into());
         }
         m
     }
+
+    pub fn capabilities(&self) -> Vec<Capability> {
+        self.probe.capabilities()
+    }
+
+    pub fn services(&self) -> Result<Vec<super::services::Service>, String> {
+        self.probe.services()
+    }
 }
 
-/// Report metrics and services until nobody listens.
-pub fn start(metrics: Emit<Box<Metrics>>, services: Emit<Result<Vec<super::services::Service>, String>>) {
-    let _ = std::thread::Builder::new().name("metrics".into()).spawn(move || {
-        const SERVICES_EVERY: Duration = Duration::from_secs(60);
-        let mut collector = Collector::new();
-        let mut listed: Option<Instant> = None;
-        loop {
-            // A parser bug must not end monitoring.
-            let sample = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| collector.sample()));
-            if let Ok(m) = sample {
-                if !metrics.send(Box::new(m)) {
-                    return;
-                }
-            }
-            if listed.is_none_or(|t| t.elapsed() >= SERVICES_EVERY) {
-                listed = Some(Instant::now());
-                if !services.send(super::services::collect()) {
-                    return;
-                }
-            }
-            std::thread::sleep(INTERVAL);
-        }
-    });
+/// The same figures under the unified model's names and units, which is what
+/// alert rules see on every platform.
+pub fn samples(m: &Metrics) -> Vec<Sample> {
+    let mut out = Vec::new();
+    let mut opt = |name: &'static str, v: Option<f64>, unit: Unit| out.extend(v.map(|v| Sample::new(name, v, unit)));
+    opt("cpu.context_switches", m.context_switches_per_sec, Unit::PerSecond);
+    opt("cpu.interrupts", m.interrupts_per_sec, Unit::PerSecond);
+    opt("cpu.run_queue", m.run_queue, Unit::Count);
+    opt("cpu.blocked", m.blocked, Unit::Count);
+    opt("cpu.pressure", m.cpu_pressure.map(f64::from), Unit::Percent);
+    opt("memory.available", m.available_memory.map(|v| v as f64), Unit::Bytes);
+    opt("memory.swap_used", m.swap_used.map(|v| v as f64), Unit::Bytes);
+    opt("memory.page_faults", m.page_faults_per_sec, Unit::PerSecond);
+    opt("memory.swap_in", m.swap_in_pages_per_sec, Unit::PerSecond);
+    opt("memory.swap_out", m.swap_out_pages_per_sec, Unit::PerSecond);
+    opt("memory.pressure", m.memory_pressure.map(f64::from), Unit::Percent);
+    opt("disk.pressure", m.io_pressure.map(f64::from), Unit::Percent);
+    opt("net.tcp_retransmits", m.retransmits_per_sec, Unit::PerSecond);
+    for d in &m.disks {
+        let device = || d.name.clone();
+        out.push(Sample::new("disk.read", d.read_rate, Unit::BytesPerSecond).label("device", device()));
+        out.push(Sample::new("disk.write", d.write_rate, Unit::BytesPerSecond).label("device", device()));
+        out.push(Sample::new("disk.iops", d.iops, Unit::PerSecond).label("device", device()));
+        out.extend(d.queue_depth.map(|v| Sample::new("disk.queue_depth", v, Unit::Count).label("device", device())));
+        out.extend(d.busy_pct.map(|v| Sample::new("disk.busy", v, Unit::Percent).label("device", device())));
+        out.extend(d.await_ms.map(|v| Sample::new("disk.await", v, Unit::Milliseconds).label("device", device())));
+    }
+    for n in &m.nics {
+        let nic = || n.name.clone();
+        out.push(Sample::new("net.rx", n.rx_rate, Unit::BytesPerSecond).label("interface", nic()));
+        out.push(Sample::new("net.tx", n.tx_rate, Unit::BytesPerSecond).label("interface", nic()));
+        out.push(Sample::new("net.errors", n.errors_per_sec, Unit::PerSecond).label("interface", nic()));
+        out.push(Sample::new("net.drops", n.drops_per_sec, Unit::PerSecond).label("interface", nic()));
+    }
+    for t in &m.temperatures {
+        out.push(Sample::new("sensor.temperature", t.value, Unit::Celsius).label("sensor", t.label.clone()));
+    }
+    for p in &m.power {
+        out.push(Sample::new("sensor.power", p.value, Unit::Watts).label("sensor", p.label.clone()));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -273,6 +303,16 @@ mod tests {
         let mut m = Metrics::default();
         derive(&now, &before, 1.0, &mut m);
         assert_eq!(m.context_switches_per_sec, Some(0.0));
+    }
+
+    #[test]
+    fn values_get_unified_names_and_units_and_absence_stays_absent() {
+        let m = Metrics { run_queue: Some(3.0), disks: vec![Disk { name: "sda".into(), queue_depth: Some(2.0), ..Default::default() }], ..Default::default() };
+        let s = samples(&m);
+        assert!(s.iter().any(|x| x.metric == "cpu.run_queue" && x.unit == Unit::Count));
+        assert!(s.iter().any(|x| x.metric == "disk.queue_depth" && x.labels[0].1 == "sda"));
+        assert!(!s.iter().any(|x| x.metric == "cpu.context_switches"), "unknown isn't zero");
+        assert!(!s.iter().any(|x| x.metric == "disk.busy"));
     }
 
     #[test]

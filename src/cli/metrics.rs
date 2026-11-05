@@ -2,7 +2,7 @@
 
 use crate::common::text::printable;
 use crate::performance::metrics::{Collector, INTERVAL};
-use crate::performance::services::{self, ServiceState};
+use crate::performance::services::ServiceState;
 use crate::process::{human_bytes, human_rate};
 
 pub fn run(json: bool) -> i32 {
@@ -11,7 +11,7 @@ pub fn run(json: bool) -> i32 {
     // Rates need two samples.
     std::thread::sleep(INTERVAL.min(std::time::Duration::from_secs(2)));
     let m = c.sample();
-    let list = services::collect();
+    let list = c.services();
     if json {
         let v = serde_json::json!({ "metrics": m, "services": list.as_ref().ok(), "services_error": list.as_ref().err() });
         println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());

@@ -2,6 +2,7 @@
 //! Equivalent to what `netstat -b` (Windows) or `lsof -i` (macOS) show.
 
 pub mod dns;
+pub mod module;
 pub mod traffic;
 
 use netstat2::{

@@ -20,7 +20,7 @@ use crate::process::actions::{Action, Sig};
 use crate::process::{ProcessInfo, ProcessTree, SystemStats};
 use crate::detection::rules::{self, Alert, Rule};
 use crate::process::trace::{Category, Trace};
-use crate::engine::sampler::{SamplerCtl, MAX_INTERVAL_MS, MIN_INTERVAL_MS};
+use crate::common::pacing::{SamplerCtl, MAX_INTERVAL_MS, MIN_INTERVAL_MS};
 use crate::engine::messages::{WorkerMsg};
 
 /// Wait this long after the selection stops moving before shelling out for
@@ -381,6 +381,8 @@ pub enum Mode {
     LaunchConfirm(Vec<String>),
     /// Most active processes, targets and operations in the capture.
     ActivitySummary,
+    /// Modules: what runs, what each supports here, turning them on and off.
+    Modules { cursor: usize },
     /// Command palette (`:` or ctrl+k).
     Palette { input: String, cursor: usize },
     /// IOC sweep results overlay.
@@ -532,6 +534,8 @@ pub struct App {
     pub stats: SystemStats,
     pub connections: HashMap<u32, Vec<Connection>>,
     pub gpu: Option<GpuSnapshot>,
+    /// The kernel, when modules are running (not in replay or tests).
+    pub kernel: Option<crate::kernel::Kernel>,
     pub metrics: Option<Box<crate::performance::metrics::Metrics>>,
     pub metrics_at: Option<Instant>,
     pub services: Option<Result<Vec<crate::performance::services::Service>, String>>,
@@ -639,6 +643,15 @@ pub struct App {
     layout_sig: String,
 }
 
+/// The folders to watch: the configured ones, or the defaults.
+pub fn watch_paths(cfg: &Config) -> Vec<String> {
+    if cfg.watch.is_empty() {
+        crate::files::watch::default_paths()
+    } else {
+        cfg.watch.clone()
+    }
+}
+
 impl App {
     pub fn new(tx: Sender<WorkerMsg>, ctl: Arc<SamplerCtl>, cfg: Config) -> Self {
         ctl.interval_ms.store(cfg.interval_ms, Ordering::Relaxed);
@@ -647,6 +660,7 @@ impl App {
             stats: SystemStats::default(),
             connections: HashMap::new(),
             gpu: None,
+            kernel: None,
             metrics: None,
             metrics_at: None,
             services: None,
@@ -698,14 +712,7 @@ impl App {
             file_selected: 0,
             file_offset: 0,
             ir: {
-                let mut ir = ir::Ir::new(tx.clone(), &cfg.watch);
-                #[cfg(target_os = "linux")]
-                if crate::files::attribution::unavailable_reason().is_none() && !cfg!(test) {
-                    ir.deep.attribution = match crate::files::attribution::start_fanotify(&ir.watch_paths, crate::common::emit::Emit::to(tx.clone(), WorkerMsg::Fs)) {
-                        Ok(()) => "fanotify on watched folders' mounts".into(),
-                        Err(e) => format!("fanotify unavailable: {e}"),
-                    };
-                }
+                let mut ir = ir::Ir::new(&cfg.watch);
                 if cfg.history && !cfg!(test) {
                     ir.profiles = Some(crate::detection::profile::Profiles::load());
                     ir.store = crate::common::paths::data_dir().map(crate::forensics::store::Writer::open);
@@ -1147,7 +1154,7 @@ mod tests {
     fn every_page_and_overlay_draws_at_any_terminal_size() {
         use ratatui::{backend::TestBackend, Terminal};
         let mut a = app();
-        let modes = [Mode::Normal, Mode::Help, Mode::Graph, Mode::Clusters, Mode::Health, Mode::StateAt, Mode::Sweep, Mode::ActivitySummary, Mode::FileReport, Mode::Workspace, Mode::Palette { input: "x".into(), cursor: 0 }];
+        let modes = [Mode::Normal, Mode::Help, Mode::Graph, Mode::Clusters, Mode::Health, Mode::StateAt, Mode::Sweep, Mode::ActivitySummary, Mode::Modules { cursor: 0 }, Mode::FileReport, Mode::Workspace, Mode::Palette { input: "x".into(), cursor: 0 }];
         for (w, h) in [(1, 1), (2, 2), (5, 3), (10, 4), (20, 5), (33, 9), (40, 10), (80, 24), (200, 60)] {
             let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
             for tab in Tab::ALL {

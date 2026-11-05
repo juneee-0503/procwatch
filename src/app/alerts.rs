@@ -3,6 +3,26 @@
 use super::*;
 
 impl App {
+    /// Send a request to a module; false if it isn't there to receive it.
+    pub(crate) fn publish_to<T: std::any::Any + Send + Sync>(&self, module: &str, topic: &'static str, payload: T) -> bool {
+        let Some(k) = &self.kernel else { return false };
+        if !k.status().iter().any(|s| s.name == module && s.state == crate::kernel::ModuleState::Running) {
+            return false;
+        }
+        k.bus().publish(topic, "app", std::sync::Arc::new(payload));
+        true
+    }
+
+    /// Turn a module on or off, and remember the choice.
+    pub fn toggle_module(&mut self, name: &str) {
+        let Some(k) = self.kernel.clone() else { return };
+        let enable = k.status().iter().find(|s| s.name == name).is_none_or(|s| s.state == crate::kernel::ModuleState::Disabled || s.state == crate::kernel::ModuleState::Failed);
+        k.set_enabled(name, enable);
+        if let Err(e) = crate::engine::save_config(&k.config()) {
+            self.set_status(StatusLevel::Error, format!("Couldn't save modules.conf: {e}"));
+        }
+    }
+
     // ── alerts ─────────────────────────────────────────────────────────
 
     pub(crate) fn add_alerts(&mut self, fired: Vec<Alert>) {

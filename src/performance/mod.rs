@@ -3,6 +3,7 @@
 
 pub mod gpu;
 pub mod metrics;
+pub mod module;
 mod parse;
-mod platform;
+mod probes;
 pub mod services;

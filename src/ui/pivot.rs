@@ -381,3 +381,46 @@ pub fn state_at(frame: &mut Frame, app: &mut App, screen: Rect) {
     let lines: Vec<Line> = lines.into_iter().skip(app.ir.state_scroll).collect();
     frame.render_widget(Paragraph::new(lines), inner);
 }
+
+/// What runs, how it's doing, and what each module can do on this system.
+pub fn modules(frame: &mut Frame, app: &mut App, screen: Rect, cursor: usize) {
+    use crate::kernel::{ModuleState, Support};
+    let inner = overlay(frame, screen, " Modules ".to_string());
+    let Some(k) = &app.kernel else {
+        frame.render_widget(Paragraph::new(muted(" No modules: this session is a replay.")), inner);
+        return;
+    };
+    let list = k.status();
+    let mut lines = Vec::new();
+    for (i, s) in list.iter().enumerate() {
+        let color = match s.state {
+            ModuleState::Running => OK,
+            ModuleState::Crashed | ModuleState::Failed => BAD,
+            ModuleState::Unavailable => WARN,
+            _ => TEXT_DIM,
+        };
+        let marker = if i == cursor { "▸ " } else { "  " };
+        lines.push(Line::from(vec![
+            Span::raw(format!("{marker}{:<13}", s.name)),
+            Span::styled(format!("{:<13}", s.state.label()), Style::new().fg(color)),
+            muted(if s.restarts > 0 { format!("{} restarts  ", s.restarts) } else { String::new() }),
+            muted(s.description),
+        ]));
+        if let Some(e) = &s.last_error {
+            lines.push(Line::from(Span::styled(format!("      {e}"), Style::new().fg(WARN))));
+        }
+        if i == cursor {
+            for c in &s.capabilities {
+                let (color, why) = match &c.support {
+                    Support::Yes => (OK, String::new()),
+                    Support::Partly(w) => (WARN, format!(" — {w}")),
+                    Support::No(w) => (TEXT_DIM, format!(" — {w}")),
+                };
+                lines.push(Line::from(vec![muted(format!("      {:<34}", c.name)), Span::styled(c.support.label(), Style::new().fg(color)), muted(why)]));
+            }
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(muted(format!(" Event bus: {} published, {} dropped", k.bus().published(), k.bus().dropped()))));
+    frame.render_widget(Paragraph::new(lines), inner);
+}

@@ -17,6 +17,11 @@ impl App {
                 self.metrics_at = Some(Instant::now());
             }
             WorkerMsg::Services(s) => self.services = Some(s),
+            WorkerMsg::MetricAlert(a) if a.firing => {
+                let message = format!("{} = {:.1} {}", a.metric, a.value, a.labels);
+                self.add_alerts(vec![crate::detection::rules::Alert { at: Local::now(), rule: a.rule, pid: 0, name: "system".into(), message }]);
+            }
+            WorkerMsg::MetricAlert(a) => self.set_status(StatusLevel::Info, format!("Cleared: {}", a.rule)),
             WorkerMsg::Inspected { pid, start_time, info } => {
                 self.deep_pending.remove(&pid);
                 let mut info = *info;
@@ -86,6 +91,9 @@ impl App {
             | WorkerMsg::Deep(_)
             | WorkerMsg::Dns { .. }
             | WorkerMsg::Activity(_)
+            | WorkerMsg::CaptureState(_)
+            | WorkerMsg::WatchStatus(_)
+            | WorkerMsg::TrafficState(_)
             | WorkerMsg::Traffic(_)
             | WorkerMsg::DeepSnap { .. }
             | WorkerMsg::Memory { .. }
