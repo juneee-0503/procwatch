@@ -8,7 +8,7 @@ use ferrisetw::native::ExtendedDataItem;
 use ferrisetw::parser::Parser;
 use ferrisetw::provider::{Provider, TraceFlags};
 use ferrisetw::schema_locator::SchemaLocator;
-use ferrisetw::trace::UserTrace;
+use ferrisetw::trace::{TraceTrait, UserTrace};
 use ferrisetw::EventRecord;
 
 use crate::activity::filter::CaptureConfig;
@@ -224,7 +224,7 @@ pub fn read_etl(path: &std::path::Path, out: crate::common::emit::Emit<Vec<Activ
     let names = Arc::new(Mutex::new(HashMap::new()));
     let seen = names.clone();
     let starts = batcher.clone();
-    FileTrace::new(path.to_path_buf(), move |r: &EventRecord, sl: &SchemaLocator| {
+    let (_trace, handle) = FileTrace::new(path.to_path_buf(), move |r: &EventRecord, sl: &SchemaLocator| {
         let id = r.provider_id();
         if id == file_id {
             files(r, sl);
@@ -244,8 +244,10 @@ pub fn read_etl(path: &std::path::Path, out: crate::common::emit::Emit<Vec<Activ
             }
         }
     })
-    .start_and_process()
+    .start()
     .map_err(|e| format!("{}: {e:?}", path.display()))?;
+    // On this thread: the results below have to wait for the whole file.
+    FileTrace::process_from_handle(handle).map_err(|e| format!("{}: {e:?}", path.display()))?;
     if let Ok(mut b) = batcher.lock() {
         pending.lock().map(|mut p| p.drain().for_each(|(_, held)| b.push(held.1))).ok();
         b.flush();

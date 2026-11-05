@@ -122,7 +122,7 @@ impl Batcher {
     }
 
     pub fn push(&mut self, a: Activity) {
-        if a.pid == self.me {
+        if a.pid == self.me && !self.offline {
             return; // our own reads would feed back forever
         }
         if self.config.verdict(a.class, a.op, &a.path, None) == filter::Verdict::Drop {

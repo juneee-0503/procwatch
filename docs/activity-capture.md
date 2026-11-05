@@ -109,7 +109,7 @@ procwatch --boot-log read
 procwatch --boot-log disable
 ```
 
-CI 无法重启,所以只验证了配置的写入和删除,以及用同类会话产生日志后的读取。真实重启尚未验证。
+CI 无法重启,所以只验证配置的写入和删除,以及用同类会话产生日志后的读取。真实重启尚未验证。
 
 Linux 上用 systemd 单元提前启动 `procwatch --monitor --activity` 可得到类似效果,早于该单元的事件看不到。
 

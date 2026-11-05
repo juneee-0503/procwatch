@@ -65,6 +65,7 @@ Usage:
   procwatch --boot-log enable|disable|status|read [FILE] [--json]
                                     Windows: record file, registry and process activity from early
                                     boot, and read it back; needs administrator
+  procwatch --ebpf-check            load the eBPF sensor and report what this kernel allows
   procwatch --defense-check [FILE]  check defense.yml and show what is watched
   procwatch --alarm-test            send a test alarm to every configured destination
   procwatch --unban-all             lift every address the agent banned
@@ -254,6 +255,7 @@ pub fn main() -> anyhow::Result<()> {
             std::process::exit(crate::activity::boot::run(action, file, args.iter().any(|a| a == "--json")));
         }
         Some("--defense-check") => std::process::exit(defense_check(args.get(1).map(std::path::Path::new))),
+        Some("--ebpf-check") => std::process::exit(crate::defense::ebpf::check()),
         Some("--alarm-test") => std::process::exit(alarm_test()),
         Some("--unban-all") => match crate::defense::ban::clear() {
             Ok(()) => {

@@ -113,6 +113,7 @@ fn walk(k: crate::host::artifacts::regf::Key, depth: usize, budget: &mut usize) 
 
 pub(crate) fn binaries(data: &[u8]) {
     let _ = crate::defense::sniff::parse_syn(data);
+    let _ = crate::defense::ebpf::event::decode(data);
     let text = String::from_utf8_lossy(data);
     let _ = crate::defense::netattack::parse_tcp(&text);
     for line in text.lines() {

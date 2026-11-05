@@ -9,6 +9,7 @@ pub mod ban;
 pub mod baseline;
 pub mod chain;
 pub mod config;
+pub mod ebpf;
 pub mod filter;
 pub mod host;
 pub mod module;

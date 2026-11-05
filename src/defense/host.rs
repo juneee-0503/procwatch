@@ -76,6 +76,30 @@ pub struct Saved {
     pub logins: HashMap<String, HashSet<IpAddr>>,
 }
 
+/// The remote end of a socket on a process's standard input or output. A
+/// shell's input is a terminal or pipe; a network socket there means whoever
+/// is at the other end is typing into it. The socket tables are only read
+/// when there is a socket to look up, because this runs for every shell.
+pub fn stream_peer(root: &Path, pid: u32, include_loopback: bool) -> Option<IpAddr> {
+    let fds = root.join("proc").join(pid.to_string()).join("fd");
+    let inodes: Vec<u64> = [0, 1]
+        .iter()
+        .filter_map(|n: &u32| {
+            let link = std::fs::read_link(fds.join(n.to_string())).ok()?;
+            link.to_str()?.strip_prefix("socket:[")?.strip_suffix(']')?.parse().ok()
+        })
+        .collect();
+    if inodes.is_empty() {
+        return None;
+    }
+    ["proc/net/tcp", "proc/net/tcp6"]
+        .iter()
+        .filter_map(|p| std::fs::read_to_string(root.join(p)).ok())
+        .flat_map(|t| parse_tcp(&t))
+        .find(|s| s.state == ESTABLISHED && inodes.contains(&s.inode) && (include_loopback || !s.remote.is_loopback()))
+        .map(|s| s.remote)
+}
+
 pub struct Host {
     root: PathBuf,
     pub saved: Saved,
@@ -178,18 +202,7 @@ impl Host {
         self.saved.modules = listed;
     }
 
-    fn sockets(&self) -> HashMap<u64, IpAddr> {
-        ["proc/net/tcp", "proc/net/tcp6"]
-            .iter()
-            .filter_map(|p| self.read(p))
-            .flat_map(|t| parse_tcp(&t))
-            .filter(|s| s.state == ESTABLISHED && (self.include_loopback || !s.remote.is_loopback()))
-            .map(|s| (s.inode, s.remote))
-            .collect()
-    }
-
     fn processes(&self, now: DateTime<Local>, out: &mut Vec<Threat>) {
-        let sockets = self.sockets();
         for e in std::fs::read_dir(self.root.join("proc")).into_iter().flatten().flatten() {
             let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else { continue };
             let Ok(exe) = std::fs::read_link(e.path().join("exe")) else { continue };
@@ -205,15 +218,7 @@ impl Host {
             if !INTERPRETERS.contains(&name) && !INTERPRETERS.contains(&base) {
                 continue;
             }
-            // A shell's input is a terminal or pipe; a network socket means
-            // whoever is at the other end is typing into it.
-            let stream = |fd: u32| -> Option<IpAddr> {
-                let link = std::fs::read_link(e.path().join("fd").join(fd.to_string())).ok()?;
-                let text = link.to_string_lossy().into_owned();
-                let inode = text.strip_prefix("socket:[")?.strip_suffix(']')?.parse::<u64>().ok()?;
-                sockets.get(&inode).copied()
-            };
-            if let Some(ip) = stream(0).or_else(|| stream(1)) {
+            if let Some(ip) = stream_peer(&self.root, pid, self.include_loopback) {
                 out.push(Threat::new(now, "reverse-shell", Severity::Critical, Stage::Execution, format!("{name} ({pid}) is driven over the network by {ip}")).of_pid(pid).source_ip(ip).with_evidence(&exe));
             }
         }
