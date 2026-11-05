@@ -11,9 +11,9 @@ use ratatui::{
 use super::spinner;
 use super::widgets::*;
 use crate::app::{App, Mode};
-use crate::baseline::ChangeKind;
+use crate::forensics::baseline::ChangeKind;
 use crate::process::{cpu_time, human_bytes};
-use crate::trace::{Category, Kind};
+use crate::process::trace::{Category, Kind};
 
 fn kind_style(k: Kind) -> Style {
     match k {
@@ -260,7 +260,7 @@ pub fn rule_input(frame: &mut Frame, app: &mut App, screen: Rect) {
             Span::styled(" ", Style::new().add_modifier(Modifier::REVERSED)),
         ]),
     ];
-    match (error, crate::rules::Rule::parse(input)) {
+    match (error, crate::detection::rules::Rule::parse(input)) {
         (Some(e), _) => lines.push(Line::from(Span::styled(format!("  {e}"), Style::new().fg(BAD)))),
         (None, Ok(r)) if !input.trim().is_empty() => lines.push(Line::from(Span::styled(format!("  → alert when {}", r.describe()), Style::new().fg(OK)))),
         _ => lines.push(Line::default()),

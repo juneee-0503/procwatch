@@ -14,6 +14,9 @@ mod widgets;
 
 pub use widgets::truncate;
 
+pub mod input;
+pub mod terminal;
+
 use std::sync::atomic::Ordering;
 
 use ratatui::{

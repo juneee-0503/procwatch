@@ -11,7 +11,7 @@ use ratatui::{
 use super::details::conn_state_style;
 use super::widgets::*;
 use crate::app::{App, Mode};
-use crate::filter::split_endpoint;
+use crate::common::filter::split_endpoint;
 use crate::network::ConnState;
 use crate::process::{human_bytes, human_duration, human_rate};
 
@@ -369,9 +369,9 @@ fn dns_view(frame: &mut Frame, app: &mut App, area: Rect) {
         Some(Err(why)) => (format!("Reverse names of connected peers — {why}"), app.ir.resolver.known()),
         None => ("Loading…".into(), Vec::new()),
     };
-    let f = crate::filter::Filter::parse(&app.query);
+    let f = crate::common::filter::Filter::parse(&app.query);
     struct Pair<'a>(&'a str, &'a str);
-    impl crate::filter::Filterable for Pair<'_> {
+    impl crate::common::filter::Filterable for Pair<'_> {
         fn field(&self, name: &str) -> Option<Vec<String>> {
             match name {
                 "ip" => Some(vec![self.0.to_string()]),

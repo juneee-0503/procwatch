@@ -96,7 +96,7 @@ fn iterations(default: usize) -> usize {
     std::env::var("PW_FUZZ_ITERATIONS").ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
-fn walk(k: crate::artifacts::regf::Key, depth: usize, budget: &mut usize) {
+fn walk(k: crate::host::artifacts::regf::Key, depth: usize, budget: &mut usize) {
     if depth > 8 || *budget == 0 {
         return;
     }
@@ -112,22 +112,22 @@ fn walk(k: crate::artifacts::regf::Key, depth: usize, budget: &mut usize) {
 }
 
 pub(crate) fn binaries(data: &[u8]) {
-    let _ = crate::binfmt::header(data);
-    let _ = crate::binfmt::structure(data);
-    let _ = crate::binfmt::indicators(data);
+    let _ = crate::files::binfmt::header(data);
+    let _ = crate::files::binfmt::structure(data);
+    let _ = crate::files::binfmt::indicators(data);
 }
 
 pub(crate) fn hive(data: &[u8]) {
-    if let Ok(h) = crate::artifacts::regf::Hive::parse(data.to_vec()) {
+    if let Ok(h) = crate::host::artifacts::regf::Hive::parse(data.to_vec()) {
         let mut budget = 2000;
         walk(h.root(), 0, &mut budget);
-        let _ = crate::artifacts::hives::amcache(&h, "fuzz");
-        let _ = crate::artifacts::hives::system(&h, "fuzz");
+        let _ = crate::host::artifacts::hives::amcache(&h, "fuzz");
+        let _ = crate::host::artifacts::hives::system(&h, "fuzz");
     }
 }
 
 fn seeds_binaries() -> Vec<Vec<u8>> {
-    let mut v = vec![crate::binfmt::tests::synthetic_pe()];
+    let mut v = vec![crate::files::binfmt::tests::synthetic_pe()];
     for p in ["/bin/ls", "/usr/bin/true", "/bin/sh"] {
         if let Ok(b) = std::fs::read(p) {
             v.push(b.into_iter().take(64 << 10).collect());
@@ -147,7 +147,7 @@ fn seeds_binaries() -> Vec<Vec<u8>> {
 }
 
 fn seeds_hive() -> Vec<Vec<u8>> {
-    use crate::artifacts::regf::tests::{wide, Builder};
+    use crate::host::artifacts::regf::tests::{wide, Builder};
     let mut b = Builder::new();
     let v1 = b.value("LowerCaseLongPath", 1, &wide("c:\\x.exe"));
     let v2 = b.value("Big", 3, &[9u8; 300]);
@@ -169,8 +169,8 @@ fn quick_binaries() {
 
 #[test]
 fn quick_artifacts() {
-    run("prefetch", &[crate::artifacts::prefetch::tests::sample()], small(), |d| {
-        let _ = crate::artifacts::prefetch::parse(d);
+    run("prefetch", &[crate::host::artifacts::prefetch::tests::sample()], small(), |d| {
+        let _ = crate::host::artifacts::prefetch::parse(d);
     });
     run("hive", &seeds_hive(), small(), hive);
 }
@@ -184,16 +184,16 @@ fn fuzz_binaries() {
 #[test]
 #[ignore]
 fn fuzz_prefetch_and_xpress() {
-    use crate::artifacts::xpress::tests::{encode, Op};
-    let raw = crate::artifacts::prefetch::tests::sample();
+    use crate::host::artifacts::xpress::tests::{encode, Op};
+    let raw = crate::host::artifacts::prefetch::tests::sample();
     let mut mam = b"MAM\x04".to_vec();
     mam.extend((raw.len() as u32).to_le_bytes());
     mam.extend(encode(&raw.iter().map(|b| Op::Lit(*b)).collect::<Vec<_>>()));
     run("prefetch", &[raw, mam.clone()], iterations(50_000), |d| {
-        let _ = crate::artifacts::prefetch::parse(d);
+        let _ = crate::host::artifacts::prefetch::parse(d);
     });
     run("xpress", &[mam[8..].to_vec()], iterations(50_000), |d| {
-        let _ = crate::artifacts::xpress::decompress(d, 65536);
+        let _ = crate::host::artifacts::xpress::decompress(d, 65536);
     });
 }
 
@@ -212,7 +212,7 @@ fn fuzz_shimcache_and_hive() {
     shim.extend((body.len() as u32).to_le_bytes());
     shim.extend(body);
     run("shimcache", &[shim], iterations(50_000), |d| {
-        let _ = crate::artifacts::shimcache::parse(d);
+        let _ = crate::host::artifacts::shimcache::parse(d);
     });
     run("hive", &seeds_hive(), iterations(20_000), hive);
 }
@@ -228,7 +228,7 @@ fn fuzz_evtx() {
     run("evtx", &[seed], iterations(5_000), |d| {
         if let Ok(mut p) = evtx::EvtxParser::from_buffer(d.to_vec()) {
             for rec in p.records_json_value().take(50).flatten() {
-                let _ = crate::artifacts::evtx::from_json(&rec.data, None, 0);
+                let _ = crate::host::artifacts::evtx::from_json(&rec.data, None, 0);
             }
         }
     });
@@ -238,25 +238,25 @@ fn fuzz_evtx() {
 #[ignore]
 fn fuzz_rule_and_text_parsers() {
     let yara = include_str!("../rules/yara/procwatch-builtin.yar").as_bytes().to_vec();
-    let rules = crate::yara::builtin();
+    let rules = crate::files::yara::builtin();
     run("yara", &[yara], iterations(20_000), |d| {
-        let (r, _) = crate::yara::parse(&String::from_utf8_lossy(d), "fuzz");
-        let _ = crate::yara::scan_bytes(&r, d, d.len() as u64);
-        let _ = crate::yara::scan_bytes(&rules, d, d.len() as u64);
+        let (r, _) = crate::files::yara::parse(&String::from_utf8_lossy(d), "fuzz");
+        let _ = crate::files::yara::scan_bytes(&r, d, d.len() as u64);
+        let _ = crate::files::yara::scan_bytes(&rules, d, d.len() as u64);
     });
     let sigma = include_str!("../rules/sigma/procwatch-builtin.yml").as_bytes().to_vec();
     run("sigma", &[sigma], iterations(10_000), |d| {
-        let _ = crate::sigma::parse(&String::from_utf8_lossy(d), "fuzz");
+        let _ = crate::detection::sigma::parse(&String::from_utf8_lossy(d), "fuzz");
     });
     let ioc = b"44d88612fea8a8f36de82e1278abb02f\n203.0.113.7\nhxxp://bad[.]example/x\n/tmp/.x\n\"Invoke\"\n".to_vec();
     run("ioc", &[ioc], iterations(20_000), |d| {
-        let _ = crate::ioc::parse(&String::from_utf8_lossy(d));
+        let _ = crate::detection::ioc::parse(&String::from_utf8_lossy(d));
     });
     let hist = b": 1700000000:0;curl x | sh\n#1700000000\nwhoami\n- cmd: ls\n  when: 1700000000\n".to_vec();
     run("history", &[hist], iterations(20_000), |d| {
-        let _ = crate::artifacts::parse_history(std::path::Path::new("/h/.zsh_history"), d, None);
-        let _ = crate::artifacts::parse_history(std::path::Path::new("/h/fish_history"), d, None);
-        let _ = crate::artifacts::base64_decode(&String::from_utf8_lossy(d));
-        let _ = crate::filter::Filter::parse(&String::from_utf8_lossy(d));
+        let _ = crate::host::artifacts::parse_history(std::path::Path::new("/h/.zsh_history"), d, None);
+        let _ = crate::host::artifacts::parse_history(std::path::Path::new("/h/fish_history"), d, None);
+        let _ = crate::host::artifacts::base64_decode(&String::from_utf8_lossy(d));
+        let _ = crate::common::filter::Filter::parse(&String::from_utf8_lossy(d));
     });
 }

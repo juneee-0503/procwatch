@@ -16,7 +16,7 @@ use super::spinner;
 use super::widgets::*;
 use super::widgets::truncate;
 use crate::app::{App, Group, PaneTab};
-use crate::inspect::SignatureStatus;
+use crate::process::inspect::SignatureStatus;
 use crate::network::ConnState;
 use crate::process::{ago, cpu_time, human_bytes, human_duration, human_rate, ProcessInfo};
 
@@ -200,8 +200,8 @@ fn overview(app: &App, info: &ProcessInfo, width: usize) -> Vec<Line<'static>> {
         ));
         for h in &a.hits {
             let sev = Style::new().fg(match h.severity {
-                crate::model::Severity::Critical | crate::model::Severity::High => BAD,
-                crate::model::Severity::Medium => WARN,
+                crate::common::model::Severity::Critical | crate::common::model::Severity::High => BAD,
+                crate::common::model::Severity::Medium => WARN,
                 _ => TEXT_DIM,
             });
             let mut v = vec![
@@ -604,7 +604,7 @@ fn relations(app: &App, info: &ProcessInfo, width: usize) -> Vec<Line<'static>> 
     let mine = app.connections.get(&info.pid).unwrap_or(&empty);
     let mut peers: Vec<(u32, String)> = Vec::new();
     for c in mine.iter().filter(|c| c.state == ConnState::Established) {
-        let (rip, _) = crate::filter::split_endpoint(&c.remote);
+        let (rip, _) = crate::common::filter::split_endpoint(&c.remote);
         if !(rip.starts_with("127.") || rip == "::1") {
             continue;
         }
@@ -615,7 +615,7 @@ fn relations(app: &App, info: &ProcessInfo, width: usize) -> Vec<Line<'static>> 
             for o in cs {
                 if o.local == c.remote && o.remote == c.local {
                     peers.push((*pid, format!("{} ⇄ {}", c.local, c.remote)));
-                } else if o.state == ConnState::Listen && crate::filter::split_endpoint(&o.local).1 == crate::filter::split_endpoint(&c.remote).1 {
+                } else if o.state == ConnState::Listen && crate::common::filter::split_endpoint(&o.local).1 == crate::common::filter::split_endpoint(&c.remote).1 {
                     peers.push((*pid, format!("connects to its server on {}", c.remote)));
                 }
             }

@@ -12,7 +12,7 @@ use ratatui::{
 use super::spinner;
 use super::widgets::*;
 use crate::app::{App, Mode};
-use crate::case::Check;
+use crate::forensics::case::Check;
 
 fn heading(t: &str) -> Span<'static> {
     Span::styled(t.to_string(), Style::new().add_modifier(Modifier::BOLD))
@@ -205,7 +205,7 @@ pub fn timeline(frame: &mut Frame, app: &mut App, area: Rect) {
         .map(|i| {
             let e = &app.ir.timeline[*i];
             let text = if e.source == "file" { truncate_left(&e.detail, detail_w) } else { e.detail.clone() };
-            let approx = if e.basis == crate::model::Basis::Observed { "~" } else { " " };
+            let approx = if e.basis == crate::common::model::Basis::Observed { "~" } else { " " };
             let mark = match (&e.tag, e.cluster) {
                 (Some(_), _) => Span::styled("★", Style::new().fg(WARN).add_modifier(Modifier::BOLD)),
                 (None, Some(c)) => Span::styled(format!("{c}"), Style::new().fg(BAD)),
@@ -227,7 +227,7 @@ pub fn timeline(frame: &mut Frame, app: &mut App, area: Rect) {
     // Selected event: id, time semantics, links, bookmark.
     let e = &app.ir.timeline[visible[app.ir.tl_selected]];
     let mut l1 = vec![
-        Span::styled(format!(" {} ", crate::model::short_id(e.id)), Style::new().fg(ACCENT)),
+        Span::styled(format!(" {} ", crate::common::model::short_id(e.id)), Style::new().fg(ACCENT)),
         muted(format!("{} time {}", e.basis.label(), e.time.to_rfc3339())),
     ];
     if let Some(o) = e.observed {
@@ -333,7 +333,7 @@ pub fn logs(frame: &mut Frame, app: &mut App, area: Rect) {
         m if m >= 60 => format!("last {} h", m / 60),
         m => format!("last {m} min"),
     };
-    let scope = if app.ir.log_scope == crate::logs::Scope::Important { "errors, warnings & security sources" } else { "all messages" };
+    let scope = if app.ir.log_scope == crate::host::logs::Scope::Important { "errors, warnings & security sources" } else { "all messages" };
     let status = match &app.ir.logs {
         Some(l) if l.pending => format!("   {} reading system log…", spinner(app)),
         Some(l) => format!("   read {} ago", age(l.fetched.elapsed().as_secs())),
@@ -434,8 +434,8 @@ pub fn case(frame: &mut Frame, app: &mut App, area: Rect) {
         {
             let chain = case.chain_status_cached();
             let reg = case.register();
-            let partial = reg.iter().filter(|r| r.status == crate::case::Status::Partial).count();
-            let failed = reg.iter().filter(|r| r.status == crate::case::Status::Failed).count();
+            let partial = reg.iter().filter(|r| r.status == crate::forensics::case::Status::Partial).count();
+            let failed = reg.iter().filter(|r| r.status == crate::forensics::case::Status::Failed).count();
             let chain_span = match &chain.broken {
                 Some((l, why)) => Span::styled(format!(" Custody chain BROKEN at line {l}: {why}"), Style::new().fg(BAD).add_modifier(Modifier::BOLD)),
                 None if chain.head.is_empty() => muted(" Custody chain: no chained records yet"),
@@ -706,7 +706,7 @@ pub fn file_report(frame: &mut Frame, app: &mut App, screen: Rect) {
         lines.push(Line::default());
         lines.push(Line::from(heading(&format!(" Entitlements ({})", r.entitlements.len()))));
         for e in &r.entitlements {
-            let style = if crate::fileinfo::risky_entitlement(e) { Style::new().fg(BAD) } else { Style::new() };
+            let style = if crate::files::info::risky_entitlement(e) { Style::new().fg(BAD) } else { Style::new() };
             lines.push(Line::from(vec![Span::raw("   "), Span::styled(e.clone(), style)]));
         }
     }

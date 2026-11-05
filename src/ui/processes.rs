@@ -15,7 +15,7 @@ use unicode_width::UnicodeWidthStr;
 use super::details;
 use super::widgets::*;
 use crate::app::{App, Group, Mode, PaneTab, Row, RowKey};
-use crate::columns::Col;
+use crate::app::columns::Col;
 use crate::process::{cpu_time, human_bytes, human_rate, ProcessInfo};
 
 /// Gutter at the left of every row: selection marker.

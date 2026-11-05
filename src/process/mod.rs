@@ -4,7 +4,15 @@
 //! fields it lacks.
 
 pub mod actions;
+pub mod deeptrace;
+#[cfg(windows)]
+pub mod handles;
+pub mod inspect;
+pub mod launch;
+pub mod memory;
 pub mod native;
+pub mod open_files;
+pub mod trace;
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -323,7 +331,7 @@ impl ProcessMonitor {
 
     /// Re-scan all processes and rebuild the parent/child tree.
     pub fn snapshot(&mut self) -> (ProcessTree, SystemStats) {
-        let mut lap = crate::perf::Lap::new();
+        let mut lap = crate::common::perf::Lap::new();
         self.sys.refresh_cpu_usage();
         self.sys.refresh_memory();
         lap.mark("sampler: cpu and memory");
