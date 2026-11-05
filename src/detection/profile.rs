@@ -90,7 +90,7 @@ fn add(map: &mut BTreeMap<String, u32>, k: &str) -> bool {
 
 impl Profiles {
     pub fn path() -> Option<PathBuf> {
-        crate::forensics::store::default_dir().and_then(|d| d.parent().map(|p| p.join("profiles.json")))
+        crate::common::paths::data_dir().and_then(|d| d.parent().map(|p| p.join("profiles.json")))
     }
 
     pub fn load() -> Profiles {

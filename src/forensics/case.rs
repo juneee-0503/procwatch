@@ -701,7 +701,7 @@ pub struct ReportExtras {
     pub network: Vec<(String, u32, String)>,
     pub alerts: Vec<String>,
     pub detections: Vec<DetectionRow>,
-    pub summaries: Vec<SummaryBlock>,
+    pub summaries: Vec<crate::detection::correlate::SummaryBlock>,
     /// (data source, status, detail)
     pub health: Vec<(String, String, String)>,
 }
@@ -717,18 +717,6 @@ pub struct DetectionRow {
     pub first_seen: String,
     pub last_seen: String,
     pub state: String,
-}
-
-/// A deterministic, template-based summary of one line of activity.
-/// Every observation names the event or evidence it rests on.
-#[derive(Default, Serialize, Clone)]
-pub struct SummaryBlock {
-    pub subject: String,
-    pub window: String,
-    pub observed: Vec<String>,
-    pub detections: Vec<String>,
-    pub evidence: Vec<String>,
-    pub assessment: String,
 }
 
 fn esc(s: &str) -> String {

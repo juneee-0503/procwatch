@@ -35,6 +35,19 @@ pub fn write_atomic(path: &std::path::Path, text: &str) -> std::io::Result<()> {
 }
 
 
+/// Where the event history lives; other data files sit beside it.
+pub fn data_dir() -> Option<PathBuf> {
+    if let Some(x) = std::env::var_os("XDG_DATA_HOME") {
+        return Some(PathBuf::from(x).join("procwatch").join("events"));
+    }
+    #[cfg(target_os = "macos")]
+    return std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support/procwatch/events"));
+    #[cfg(windows)]
+    return std::env::var_os("LOCALAPPDATA").map(|h| PathBuf::from(h).join("procwatch").join("events"));
+    #[cfg(not(any(target_os = "macos", windows)))]
+    return std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share/procwatch/events"));
+}
+
 /// Folders where legitimate auto-start programs rarely live.
 pub fn risky_location(path: &str) -> bool {
     let p = path.to_lowercase().replace('\\', "/");

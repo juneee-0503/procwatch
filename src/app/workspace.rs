@@ -530,7 +530,7 @@ impl App {
         }
         // Reads up to 32 MB of the file: in the background.
         if let Some(exe) = self.tree.get(key.pid).and_then(|n| n.info.exe_path.clone()) {
-            crate::engine::sampler::spawn_static_libs(self.tx.clone(), key, exe);
+            crate::engine::jobs::spawn_static_libs(self.tx.clone(), key, exe);
         }
         self.ir.ws = WorkspaceState { key: Some(key), tab: 0, cursor: 0, scroll: 0, dossier: Dossier::default(), static_libs: None };
         self.ir.ws.dossier = self.dossier(key);

@@ -137,15 +137,10 @@ impl WinRecord {
         self.data.get(k).map(String::as_str).unwrap_or("")
     }
 
-    /// The Sigma view of this record.
-    pub fn sigma_event(&self) -> crate::detection::sigma::Event {
-        crate::detection::sigma::map::windows_record(&self.channel, &self.provider, self.event_id, &self.data)
-    }
-
     /// A one-line summary for well-known, investigation-relevant events;
     /// everything else is still available to Sigma rules.
     pub fn artifact(&self, source: &str) -> Option<Artifact> {
-        let svc = crate::detection::sigma::map::service_of(&self.channel);
+        let svc = service_of(&self.channel);
         let (subject, detail) = match (svc.as_str(), self.event_id) {
             ("security", 4688) => (self.get("NewProcessName").to_string(), format!("process created by {} · {}", self.get("SubjectUserName"), self.get("CommandLine"))),
             ("security", 4624) => (format!("{}\\{}", self.get("TargetDomainName"), self.get("TargetUserName")), format!("logon type {} from {} {}", self.get("LogonType"), self.get("IpAddress"), self.get("WorkstationName"))),
@@ -172,6 +167,21 @@ impl WinRecord {
     }
 }
 
+/// Short name of an event log channel.
+pub fn service_of(channel: &str) -> String {
+    let c = channel.to_lowercase();
+    let known = [
+        ("microsoft-windows-sysmon", "sysmon"),
+        ("powershell", "powershell"),
+        ("windows defender", "windefend"),
+        ("taskscheduler", "taskscheduler"),
+        ("security", "security"),
+        ("system", "system"),
+        ("application", "application"),
+    ];
+    known.iter().find(|(k, _)| c.contains(k)).map(|(_, s)| s.to_string()).unwrap_or(c)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,7 +202,7 @@ mod tests {
         assert_eq!(r.time.timestamp(), 1_714_557_600);
         let a = r.artifact("Security.evtx").unwrap();
         assert!(a.detail.contains("cmd /c whoami"));
-        assert_eq!(r.sigma_event().category, "process_creation");
+        assert_eq!(crate::detection::sigma::map::record_event(&r).category, "process_creation");
 
         let q: Value = serde_json::from_str(
             r##"{"Event":{"System":{"EventID":{"#attributes":{"Qualifiers":16384},"#text":7045},"Channel":"System",

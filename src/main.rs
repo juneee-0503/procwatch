@@ -16,6 +16,8 @@ mod process;
 mod response;
 mod ui;
 #[cfg(test)]
+mod architecture;
+#[cfg(test)]
 mod fuzz;
 
 fn main() -> anyhow::Result<()> {

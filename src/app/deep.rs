@@ -131,7 +131,7 @@ impl Drop for Helper {
 impl App {
     fn deep_watcher(&mut self) -> Option<&Watcher> {
         if self.ir.deep.watcher.is_none() {
-            self.ir.deep.watcher = Watcher::start(crate::engine::sampler::deep_output(&self.tx));
+            self.ir.deep.watcher = Watcher::start(crate::engine::jobs::deep_output(&self.tx));
         }
         self.ir.deep.watcher.as_ref()
     }
@@ -356,7 +356,7 @@ impl App {
         due.sort_by_key(|(k, m, _)| (!*m, k.pid));
         for (k, modules, files) in due.into_iter().take(SNAPS_PER_TICK) {
             self.ir.deep.snaps.entry(k).or_default().pending = true;
-            sampler::spawn_deep_snap(self.tx.clone(), k.pid, k.start, modules, files);
+            crate::engine::jobs::spawn_deep_snap(self.tx.clone(), k.pid, k.start, modules, files);
         }
         // Mark instances that disappeared without an exit event (e.g. the
         // watcher was started after they were enrolled and missed it).

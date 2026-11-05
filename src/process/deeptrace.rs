@@ -89,7 +89,7 @@ impl Watcher {
             .spawn(move || {
                 let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| imp::run(rx, &out)));
                 if let Err(e) = r {
-                    out.errors.send(format!("deep trace stopped: {}", crate::engine::sampler::panic_text(&e)));
+                    out.errors.send(format!("deep trace stopped: {}", crate::common::panic_text(&e)));
                 }
             })
             .ok()?;

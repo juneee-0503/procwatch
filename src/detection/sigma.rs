@@ -684,18 +684,11 @@ pub mod map {
     }
 
     /// Sigma's `service` from a Windows channel / log source name.
-    pub fn service_of(channel: &str) -> String {
-        let c = channel.to_lowercase();
-        let known = [
-            ("microsoft-windows-sysmon", "sysmon"),
-            ("powershell", "powershell"),
-            ("windows defender", "windefend"),
-            ("taskscheduler", "taskscheduler"),
-            ("security", "security"),
-            ("system", "system"),
-            ("application", "application"),
-        ];
-        known.iter().find(|(k, _)| c.contains(k)).map(|(_, s)| s.to_string()).unwrap_or(c)
+    pub use crate::host::artifacts::evtx::service_of;
+
+    /// The Sigma view of a Windows event record.
+    pub fn record_event(r: &crate::host::artifacts::evtx::WinRecord) -> Event {
+        windows_record(&r.channel, &r.provider, r.event_id, &r.data)
     }
 
     /// A parsed Windows event record (from an EVTX file). Sysmon and the

@@ -17,7 +17,7 @@ use crate::app::config::Config;
 use crate::app::{self, App, Mode};
 use crate::common::WORKER_PANIC;
 use crate::engine::sampler::{self, SamplerCtl};
-use crate::forensics::{case, store};
+use crate::forensics::case;
 use crate::ui;
 
 fn restore_terminal() {
@@ -85,7 +85,7 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::Resu
     let replay: Option<Option<std::path::PathBuf>> = args
         .iter()
         .position(|a| a == "--replay")
-        .map(|i| args.get(i + 1).filter(|a| !a.starts_with("--")).map(std::path::PathBuf::from).or_else(store::default_dir));
+        .map(|i| args.get(i + 1).filter(|a| !a.starts_with("--")).map(std::path::PathBuf::from).or_else(crate::common::paths::data_dir));
     if replay.is_none() {
         sampler::spawn_sampler(tx.clone(), ctl.clone())?;
     }

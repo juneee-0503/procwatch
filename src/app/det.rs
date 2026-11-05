@@ -360,7 +360,7 @@ impl App {
         paths.dedup();
         self.ir.yara_pending = true;
         self.set_status(StatusLevel::Info, format!("Scanning {} executables with content rules…", paths.len()));
-        sampler::spawn_yara(self.tx.clone(), paths);
+        crate::engine::jobs::spawn_yara(self.tx.clone(), paths);
     }
 
     pub(super) fn record_yara(&mut self, results: Vec<(String, Vec<crate::files::yara::Match>)>) -> usize {

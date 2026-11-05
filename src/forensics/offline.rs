@@ -207,7 +207,7 @@ pub fn analyse(o: &Options) -> anyhow::Result<(Analysis, Case)> {
         }
     }
     for rec in &records {
-        let ev = rec.sigma_event();
+        let ev = crate::detection::sigma::map::record_event(rec);
         for r in crate::detection::sigma::evaluate(&sigma, &ev) {
             hits.push(sigma_hit(r, &ev, format!("{} {} on {}", rec.channel, rec.event_id, rec.computer), Some(rec.time.to_rfc3339())));
         }

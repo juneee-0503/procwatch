@@ -2,4 +2,6 @@
 //! through, background jobs, and what can currently be seen.
 
 pub mod health;
+pub mod jobs;
+pub mod messages;
 pub mod sampler;

@@ -198,8 +198,20 @@ pub fn cluster(events: &[Ev]) -> Vec<Cluster> {
     out
 }
 
+/// A deterministic, template-based summary of one line of activity.
+/// Every observation names the event or evidence it rests on.
+#[derive(Default, Serialize, Clone)]
+pub struct SummaryBlock {
+    pub subject: String,
+    pub window: String,
+    pub observed: Vec<String>,
+    pub detections: Vec<String>,
+    pub evidence: Vec<String>,
+    pub assessment: String,
+}
+
 /// Deterministic summary of a cluster: what happened, with event ids.
-pub fn summarize(c: &Cluster, events: &[Ev], evidence: &[(String, String)], bookmarks: &[(u64, String)]) -> crate::forensics::case::SummaryBlock {
+pub fn summarize(c: &Cluster, events: &[Ev], evidence: &[(String, String)], bookmarks: &[(u64, String)]) -> SummaryBlock {
     let mut observed = Vec::new();
     let mut dets = Vec::new();
     let mut seen = BTreeSet::new();
@@ -259,7 +271,7 @@ pub fn summarize(c: &Cluster, events: &[Ev], evidence: &[(String, String)], book
     if !tags.is_empty() {
         assessment += &format!(" Analyst bookmarks: {}.", tags.join(", "));
     }
-    crate::forensics::case::SummaryBlock {
+    SummaryBlock {
         subject: c.label(),
         window: format!("{} – {} ({})", c.start.format("%Y-%m-%d %H:%M:%S"), c.end.format("%H:%M:%S"), c.links.join(", ")),
         observed,

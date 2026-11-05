@@ -122,8 +122,8 @@ fn stop(w: &mut Workload) {
 }
 
 /// `msg: ` prefixes the timing names of whole messages.
-fn msg_name(m: &crate::engine::sampler::WorkerMsg) -> &'static str {
-    use crate::engine::sampler::WorkerMsg::*;
+fn msg_name(m: &crate::engine::messages::WorkerMsg) -> &'static str {
+    use crate::engine::messages::WorkerMsg::*;
     match m {
         Snapshot(_) => "msg: Snapshot",
         Gpu(_) => "msg: Gpu",
