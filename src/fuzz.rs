@@ -241,8 +241,8 @@ fn fuzz_rule_and_text_parsers() {
     let rules = crate::files::yara::builtin();
     run("yara", &[yara], iterations(20_000), |d| {
         let (r, _) = crate::files::yara::parse(&String::from_utf8_lossy(d), "fuzz");
-        let _ = crate::files::yara::scan_bytes(&r, d, d.len() as u64);
-        let _ = crate::files::yara::scan_bytes(&rules, d, d.len() as u64);
+        let _ = crate::files::yara::scan_bytes(&r, d);
+        let _ = crate::files::yara::scan_bytes(&rules, d);
     });
     let sigma = include_str!("../rules/sigma/procwatch-builtin.yml").as_bytes().to_vec();
     run("sigma", &[sigma], iterations(10_000), |d| {

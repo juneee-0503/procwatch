@@ -47,7 +47,7 @@ pub fn collect() -> (BTreeMap<String, Vec<Entry>>, Vec<Entry>) {
     for r in crate::detection::behave::load().0 {
         add(technique_from_tag(&r.technique).into_iter().collect(), Entry { engine: "sequence", rule: r.id, title: r.title });
     }
-    for r in crate::files::yara::load(None).0 {
+    for r in crate::files::yara::load(None).0.rules {
         let tags = r.tags.iter().chain(r.meta.iter().filter(|(k, _)| k == "technique" || k == "attack").map(|(_, v)| v));
         add(tags.filter_map(|t| technique_from_tag(t)).collect(), Entry { engine: "yara", rule: r.name.clone(), title: r.meta.iter().find(|(k, _)| k == "description").map(|(_, v)| v.clone()).unwrap_or(r.name) });
     }

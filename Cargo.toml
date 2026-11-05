@@ -28,6 +28,7 @@ notify = { version = "8.2.1", default-features = false, features = ["macos_fseve
 evtx = { version = "0.15.1", default-features = false }
 serde_yaml = "0.9"
 memchr = "2"
+yara-x = { version = "1.23.0", default-features = false, features = ["constant-folding", "exact-atoms", "fast-regexp", "console-module", "dotnet-module", "elf-module", "hash-module", "lnk-module", "macho-module", "math-module", "pe-module", "string-module", "time-module"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
