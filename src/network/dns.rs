@@ -71,7 +71,7 @@ impl Resolver {
 pub fn resolvers() -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     #[cfg(target_os = "macos")]
-    if let Ok(o) = run_command(std::process::Command::new("scutil").arg("--dns"), Duration::from_secs(5)) {
+    if let Ok(o) = run_command(crate::common::command::tool("scutil").arg("--dns"), Duration::from_secs(5)) {
         for l in String::from_utf8_lossy(&o.stdout).lines() {
             if let Some((_, v)) = l.split_once("nameserver[").and_then(|(_, r)| r.split_once(':')) {
                 out.push(v.trim().to_string());
@@ -84,7 +84,7 @@ pub fn resolvers() -> Vec<String> {
     }
     #[cfg(target_os = "windows")]
     if let Ok(o) = run_command(
-        std::process::Command::new("powershell").args([
+        crate::common::command::tool("powershell").args([
             "-NoProfile",
             "-Command",
             "Get-DnsClientServerAddress | Select-Object -ExpandProperty ServerAddresses",
@@ -105,7 +105,7 @@ pub fn client_cache() -> Result<Vec<(String, String)>, String> {
     #[cfg(target_os = "windows")]
     {
         let o = run_command(
-            std::process::Command::new("powershell").args([
+            crate::common::command::tool("powershell").args([
                 "-NoProfile",
                 "-Command",
                 "Get-DnsClientCache | ForEach-Object { \"$($_.Entry)`t$($_.Data)\" }",

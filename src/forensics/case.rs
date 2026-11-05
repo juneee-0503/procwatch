@@ -321,9 +321,23 @@ pub fn safe(s: &str) -> String {
 impl Case {
     /// Create a new case folder under `parent`.
     pub fn create(parent: &Path) -> anyhow::Result<Case> {
-        let id = format!("procwatch-case-{}", Local::now().format("%Y%m%d-%H%M%S"));
+        // Exclusive, and private: evidence can hold secrets from the system.
+        fs::create_dir_all(parent)?;
+        let stamp = Local::now().format("%Y%m%d-%H%M%S").to_string();
+        let mut id = format!("procwatch-case-{stamp}");
+        let mut n = 1;
+        loop {
+            match crate::common::paths::create_private_dir(&parent.join(&id)) {
+                Ok(()) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && n < 100 => {
+                    n += 1;
+                    id = format!("procwatch-case-{stamp}-{n}");
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
         let dir = parent.join(&id);
-        fs::create_dir_all(dir.join("evidence"))?;
+        fs::create_dir(dir.join("evidence"))?;
         let case = Case {
             id,
             examiner: examiner(),

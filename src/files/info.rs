@@ -253,9 +253,8 @@ fn entitlements(path: &str) -> Vec<String> {
     #[cfg(target_os = "macos")]
     {
         use crate::common::command::run_command;
-        use std::process::Command;
         use std::time::Duration;
-        let Ok(o) = run_command(Command::new("codesign").args(["-d", "--entitlements", "-", "--xml", path]), Duration::from_secs(10)) else {
+        let Ok(o) = run_command(crate::common::command::tool("codesign").args(["-d", "--entitlements", "-", "--xml", path]), Duration::from_secs(10)) else {
             return Vec::new();
         };
         let Ok(v) = plist::Value::from_reader_xml(&o.stdout[..]) else { return Vec::new() };
@@ -298,10 +297,9 @@ fn origin(path: &str) -> Vec<String> {
     #[cfg(target_os = "macos")]
     {
         use crate::common::command::run_command;
-        use std::process::Command;
         use std::time::Duration;
         let mut out = Vec::new();
-        if let Ok(o) = run_command(Command::new("xattr").args(["-p", "com.apple.quarantine", path]), Duration::from_secs(5)) {
+        if let Ok(o) = run_command(crate::common::command::tool("xattr").args(["-p", "com.apple.quarantine", path]), Duration::from_secs(5)) {
             let v = String::from_utf8_lossy(&o.stdout).trim().to_string();
             if o.status.success() && !v.is_empty() {
                 // flags;hex-time;agent;uuid
@@ -309,7 +307,7 @@ fn origin(path: &str) -> Vec<String> {
                 out.push(format!("quarantined download{}", if agent.is_empty() { String::new() } else { format!(" via {agent}") }));
             }
         }
-        if let Ok(o) = run_command(Command::new("mdls").args(["-raw", "-name", "kMDItemWhereFroms", path]), Duration::from_secs(5)) {
+        if let Ok(o) = run_command(crate::common::command::tool("mdls").args(["-raw", "-name", "kMDItemWhereFroms", path]), Duration::from_secs(5)) {
             let v = String::from_utf8_lossy(&o.stdout);
             out.extend(
                 v.lines()

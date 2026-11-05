@@ -90,12 +90,11 @@ fn module_anomalies(r: &mut Report, modules: &[String]) {
 mod imp {
     use super::*;
     use crate::common::command::run_command;
-    use std::process::Command;
     use std::time::Duration;
 
     pub fn layout(pid: u32) -> Report {
         let mut r = Report::default();
-        match run_command(Command::new("vmmap").args(["--summary", &pid.to_string()]), Duration::from_secs(30)) {
+        match run_command(crate::common::command::tool("vmmap").args(["--summary", &pid.to_string()]), Duration::from_secs(30)) {
             Ok(o) if o.status.success() => {
                 let text = String::from_utf8_lossy(&o.stdout);
                 let mut in_table = false;
@@ -141,7 +140,7 @@ mod imp {
             Err(e) => r.notes.push(format!("vmmap: {e}")),
         }
         // Full map for protections: count regions currently rwx.
-        if let Ok(o) = run_command(Command::new("vmmap").args(["-w", &pid.to_string()]), Duration::from_secs(30)) {
+        if let Ok(o) = run_command(crate::common::command::tool("vmmap").args(["-w", &pid.to_string()]), Duration::from_secs(30)) {
             if o.status.success() {
                 let n = String::from_utf8_lossy(&o.stdout).lines().filter(|l| l.contains(" rwx/")).count();
                 r.wx_regions = Some(n);
@@ -205,7 +204,6 @@ mod imp {
 mod imp {
     use super::*;
     use crate::common::command::run_command;
-    use std::process::Command;
     use std::time::Duration;
 
     pub fn layout(pid: u32) -> Report {
@@ -216,7 +214,7 @@ mod imp {
              'Private bytes|' + $p.PrivateMemorySize64; 'Virtual size|' + $p.VirtualMemorySize64; \
              'Paged pool|' + $p.PagedMemorySize64"
         );
-        match run_command(Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &script]), Duration::from_secs(15)) {
+        match run_command(crate::common::command::tool("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &script]), Duration::from_secs(15)) {
             Ok(o) => {
                 for l in String::from_utf8_lossy(&o.stdout).lines() {
                     if let Some((k, v)) = l.split_once('|') {

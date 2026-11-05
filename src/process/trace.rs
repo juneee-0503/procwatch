@@ -416,7 +416,7 @@ impl Trace {
             // socket table, and pipes/devices are mostly noise.
             let now: HashSet<String> = list
                 .into_iter()
-                .filter(|f| matches!(f.kind.as_str(), "REG" | "DIR") && !f.name.is_empty() && f.fd != "txt")
+                .filter(|f| matches!(f.kind.as_str(), "REG" | "DIR" | "File") && !f.name.is_empty() && f.fd != "txt")
                 .map(|f| f.name)
                 .collect();
             let name = self.name(pid);
@@ -561,8 +561,8 @@ impl Trace {
     pub fn export(&self) -> anyhow::Result<String> {
         let safe: String = self.root_name.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
         let base = format!("procwatch-trace-{safe}-{}", self.started_at.format("%Y%m%d-%H%M%S"));
-        std::fs::write(format!("{base}.md"), self.to_markdown())?;
-        std::fs::write(format!("{base}.json"), self.to_json())?;
+        crate::common::paths::write_new(std::path::Path::new(&format!("{base}.md")), &self.to_markdown())?;
+        crate::common::paths::write_new(std::path::Path::new(&format!("{base}.json")), &self.to_json())?;
         Ok(base)
     }
 }

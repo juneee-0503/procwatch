@@ -94,7 +94,7 @@ fn workload(minutes: u64) -> Option<Workload> {
     {
         // ping -n 2 waits about a second, so this lasts the whole run.
         let loops = minutes * 60 + 30;
-        let child = std::process::Command::new("cmd")
+        let child = crate::common::command::tool("cmd")
             .args(["/C", &format!("for /L %i in (1,1,{loops}) do @(ver >NUL & ping -n 2 127.0.0.1 >NUL)")])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())

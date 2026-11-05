@@ -338,12 +338,12 @@ pub fn run(o: Options) -> i32 {
     let prov = Provenance::derived("procwatch --offline: host rules, Sigma and IOC matching over collected evidence").problems(a.gaps.clone());
     let saved = case.add_text_with(&name, &json, prov).map(|(p, i)| format!("{} ({})", case.rel(&p), i.id));
     if o.json {
-        println!("{json}");
+        crate::safe_println!("{json}");
     } else {
         print_text(&a);
         match &saved {
-            Ok(p) => println!("\nSaved to the case as {p}."),
-            Err(e) => println!("\nCouldn't save into the case: {e}"),
+            Ok(p) => crate::safe_println!("\nSaved to the case as {p}."),
+            Err(e) => crate::safe_println!("\nCouldn't save into the case: {e}"),
         }
     }
     let notable = a.hits.iter().any(|h| h.severity >= Severity::Medium) || !a.ioc_hits.is_empty();
@@ -351,7 +351,7 @@ pub fn run(o: Options) -> i32 {
 }
 
 fn print_text(a: &Analysis) {
-    println!("Offline analysis of {} ({})", a.case, a.analysed_at);
+    crate::safe_println!("Offline analysis of {} ({})", a.case, a.analysed_at);
     println!(
         "  {} processes, {} connections, {} event records, {} artifacts · {} Sigma rules{}",
         a.processes,
@@ -361,17 +361,17 @@ fn print_text(a: &Analysis) {
         a.sigma_rules,
         if a.sigma_rejected.is_empty() { String::new() } else { format!(" ({} rejected)", a.sigma_rejected.len()) }
     );
-    println!("\nInputs:");
+    crate::safe_println!("\nInputs:");
     for i in &a.inputs {
-        println!("  {i}");
+        crate::safe_println!("  {i}");
     }
     if !a.gaps.is_empty() {
-        println!("\nGaps (data that was missing or partial — absence of a hit is not proof):");
+        crate::safe_println!("\nGaps (data that was missing or partial — absence of a hit is not proof):");
         for g in &a.gaps {
-            println!("  ! {g}");
+            crate::safe_println!("  ! {g}");
         }
     }
-    println!("\nDetections ({}):", a.hits.len());
+    crate::safe_println!("\nDetections ({}):", a.hits.len());
     for h in a.hits.iter().take(200) {
         println!(
             "  {:<8} {:<6} {:<14} {} — {}{}\n           {}",
@@ -385,9 +385,9 @@ fn print_text(a: &Analysis) {
         );
     }
     if !a.ioc_hits.is_empty() {
-        println!("\nIndicator matches ({}):", a.ioc_hits.len());
+        crate::safe_println!("\nIndicator matches ({}):", a.ioc_hits.len());
         for h in &a.ioc_hits {
-            println!("  {:<7} {:<40} {:<12} {} {}", h.kind.label(), h.ioc, h.source, h.name, h.detail);
+            crate::safe_println!("  {:<7} {:<40} {:<12} {} {}", h.kind.label(), h.ioc, h.source, h.name, h.detail);
         }
     }
 }

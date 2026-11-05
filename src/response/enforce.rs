@@ -21,11 +21,12 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Sender;
 use std::sync::Arc;
 
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
+
+use crate::common::emit::Emit;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -197,6 +198,20 @@ impl Policy {
     }
 
     pub fn load(path: &Path) -> Result<Policy, String> {
+        let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        // Whoever can edit the policy decides what root blocks and ends.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            if meta.permissions().mode() & 0o022 != 0 {
+                return Err(format!("{}: other users can change this file; run chmod go-w on it", path.display()));
+            }
+            let me = unsafe { libc::geteuid() };
+            if meta.uid() != me && meta.uid() != 0 {
+                return Err(format!("{}: owned by someone else", path.display()));
+            }
+        }
+        let _ = meta;
         Policy::parse(&std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?)
     }
 
@@ -270,7 +285,7 @@ impl Drop for Running {
     }
 }
 
-pub fn start(policy: Policy, out: Sender<Decision>) -> Result<Running, String> {
+pub fn start(policy: Policy, out: Emit<Decision>) -> Result<Running, String> {
     let stop = Arc::new(AtomicBool::new(false));
     let policy = Arc::new(policy);
     #[cfg(target_os = "linux")]
@@ -305,7 +320,7 @@ fn own_line() -> std::collections::HashSet<u32> {
     set
 }
 
-fn spawn_killer(policy: Arc<Policy>, out: Sender<Decision>, stop: Arc<AtomicBool>) -> Result<(), String> {
+fn spawn_killer(policy: Arc<Policy>, out: Emit<Decision>, stop: Arc<AtomicBool>) -> Result<(), String> {
     use crate::process::actions::{apply_checked, Action as Do, Sig};
     std::thread::Builder::new()
         .name("enforce-start".into())
@@ -332,7 +347,7 @@ fn spawn_killer(policy: Arc<Policy>, out: Sender<Decision>, stop: Arc<AtomicBool
                         if policy.mode == Mode::Enforce {
                             let _ = apply_checked(i.pid, i.start_time_secs, Do::Signal(Sig::Kill));
                         }
-                        let _ = out.send(d);
+                        out.send(d);
                     }
                 }
                 seen.retain(|k| live.contains(k));
@@ -378,7 +393,7 @@ mod linux {
         unsafe { libc::write(group, &r as *const _ as *const libc::c_void, std::mem::size_of::<Response>()) };
     }
 
-    pub fn start(policy: Arc<Policy>, out: Sender<Decision>, stop: Arc<AtomicBool>) -> Result<(), String> {
+    pub fn start(policy: Arc<Policy>, out: Emit<Decision>, stop: Arc<AtomicBool>) -> Result<(), String> {
         if unsafe { libc::geteuid() } != 0 {
             return Err("blocking needs root".into());
         }
@@ -453,7 +468,7 @@ mod linux {
                             let hit = policy.decide(on, &path, comm).or_else(|| if on == On::Exec { policy.decide(On::Open, &path, comm) } else { None });
                             if let Some(r) = hit {
                                 allow = policy.mode == Mode::Audit;
-                                let _ = out.send(decision(r, policy.mode, on, m.pid as u32, comm, &path));
+                                out.send(decision(r, policy.mode, on, m.pid as u32, comm, &path));
                             }
                         }
                         answer(group, m.fd, allow);
@@ -491,7 +506,7 @@ mod wfp {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    pub fn start(policy: &Policy, out: &Sender<Decision>) -> Result<Option<Filters>, String> {
+    pub fn start(policy: &Policy, out: &Emit<Decision>) -> Result<Option<Filters>, String> {
         let rules: Vec<&Rule> = policy.rules.iter().filter(|r| r.on == On::Connect).collect();
         if rules.is_empty() {
             return Ok(None);
@@ -499,7 +514,7 @@ mod wfp {
         if policy.mode == Mode::Audit {
             for r in &rules {
                 for p in &r.path {
-                    let _ = out.send(decision(r, policy.mode, On::Connect, 0, "", p));
+                    out.send(decision(r, policy.mode, On::Connect, 0, "", p));
                 }
             }
             return Ok(None);
@@ -546,13 +561,15 @@ mod wfp {
                     let mut raw = app as *mut c_void;
                     FwpmFreeMemory0(&mut raw);
                     result?;
-                    let _ = out.send(decision(r, policy.mode, On::Connect, 0, "", path));
+                    out.send(decision(r, policy.mode, On::Connect, 0, "", path));
                 }
             }
             Ok(Some(filters))
         }
     }
 }
+
+const MAX_QUEUED_DECISIONS: usize = 10_000;
 
 /// `--enforce-check`: show what a policy would do.
 pub fn check(path: &Path) -> i32 {
@@ -583,7 +600,7 @@ pub fn run(path: &Path, output: Option<&Path>, minutes: Option<u64>) -> i32 {
     };
     let mut sink: Box<dyn Write> = match output {
         None => Box::new(std::io::stdout()),
-        Some(p) => match std::fs::OpenOptions::new().create(true).append(true).open(p) {
+        Some(p) => match crate::common::paths::private_file().create(true).append(true).open(p) {
             Ok(f) => Box::new(f),
             Err(e) => {
                 eprintln!("{}: {e}", p.display());
@@ -596,8 +613,18 @@ pub fn run(path: &Path, output: Option<&Path>, minutes: Option<u64>) -> i32 {
     for l in policy.plan() {
         eprintln!("  {l}");
     }
-    let (tx, rx) = std::sync::mpsc::channel();
-    let running = match start(policy, tx) {
+    // Bounded: a stalled reader of the log must not grow memory, and the
+    // thread answering the kernel must never wait for it.
+    let (tx, rx) = std::sync::mpsc::sync_channel(MAX_QUEUED_DECISIONS);
+    let lost = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counter = lost.clone();
+    let out = Emit::new(move |d| {
+        if tx.try_send(d).is_err() {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+        true
+    });
+    let running = match start(policy, out) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("enforce: {e}");
@@ -614,6 +641,10 @@ pub fn run(path: &Path, output: Option<&Path>, minutes: Option<u64>) -> i32 {
         }
     }
     drop(running);
+    let n = lost.load(Ordering::Relaxed);
+    if n > 0 {
+        eprintln!("enforce: {n} decisions were enforced but not logged: the output couldn't keep up");
+    }
     eprintln!("enforce: ended; nothing remains in force");
     0
 }
@@ -678,6 +709,20 @@ mod tests {
         assert_eq!(exec.is_ok(), cfg!(target_os = "linux"), "{exec:?}");
         let net = Policy::parse(&rule("connect", "block", "'C:\\Tools\\x.exe'"));
         assert_eq!(net.is_ok(), cfg!(windows), "{net:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_policy_others_can_edit_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = crate::common::paths::private_temp_dir("policy-test").unwrap();
+        let p = d.join("p.yml");
+        std::fs::write(&p, rule("start", "kill", "'/opt/bad/*'")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(Policy::load(&p).unwrap_err().contains("other users can change"));
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(Policy::load(&p).is_ok());
+        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]

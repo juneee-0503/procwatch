@@ -1,8 +1,5 @@
 //! Who has what open, across all processes: `lsof` on macOS, `/proc` on
 //! Linux, the handle table on Windows.
-
-#[cfg(target_os = "macos")]
-use std::process::Command;
 use std::time::Duration;
 
 /// One process holding a matching file.
@@ -41,7 +38,7 @@ mod imp {
     pub fn scan() -> anyhow::Result<Vec<Hit>> {
         // One lsof for the whole system: p = pid, c = command, f = fd,
         // t = type, n = name. Only processes we may inspect are listed.
-        let out = run_command(Command::new("lsof").args(["-n", "-P", "-F", "pcftn"]), Duration::from_secs(60))?;
+        let out = run_command(crate::common::command::tool("lsof").args(["-n", "-P", "-F", "pcftn"]), Duration::from_secs(60))?;
         let text = String::from_utf8_lossy(&out.stdout);
         let (mut pid, mut command) = (0u32, String::new());
         let mut hits: Vec<Hit> = Vec::new();

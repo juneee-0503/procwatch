@@ -150,6 +150,9 @@ pub fn modules(pid: u32) -> Result<Vec<String>, String> {
 /// Thorough signature check for a single file the user is analysing:
 /// on macOS this also validates every resource of an app bundle.
 pub fn file_signature_thorough(path: &str) -> (SignatureStatus, Vec<(String, String)>) {
+    if !std::path::Path::new(path).is_absolute() {
+        return relative_path();
+    }
     if std::fs::File::open(path).is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied) {
         return file_signature(path);
     }
@@ -165,7 +168,16 @@ pub fn file_signature_thorough(path: &str) -> (SignatureStatus, Vec<(String, Str
 
 /// Signature status and signer details of any file on disk (fast check,
 /// used for background scanning).
+/// Paths reach here from autostart entries and the like, and one starting
+/// with `-` would be read as an option by the signature tools.
+fn relative_path() -> (SignatureStatus, Vec<(String, String)>) {
+    (SignatureStatus::Unknown, vec![("Note".into(), "not an absolute path; signature not checked".into())])
+}
+
 pub fn file_signature(path: &str) -> (SignatureStatus, Vec<(String, String)>) {
+    if !std::path::Path::new(path).is_absolute() {
+        return relative_path();
+    }
     if std::fs::File::open(path).is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied) {
         return (SignatureStatus::Unknown, vec![("Note".into(), "file is not readable by this user".into())]);
     }

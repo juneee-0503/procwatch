@@ -7,7 +7,6 @@
 
 use super::{DeepInfo, OpenFile, SignatureStatus};
 use crate::common::command::run_command;
-use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
@@ -63,7 +62,7 @@ pub fn inspect(pid: u32, exe_path: Option<&str>, modules: bool) -> DeepInfo {
 pub fn loaded_dylibs(pid: u32) -> anyhow::Result<Vec<String>> {
     // `vmmap` lists an app's live memory mappings; filter to dylibs.
     // Requires the process to be owned by the current user, or `sudo`.
-    let output = run_command(Command::new("vmmap").args(["-w", &pid.to_string()]), TIMEOUT)?;
+    let output = run_command(crate::common::command::tool("vmmap").args(["-w", &pid.to_string()]), TIMEOUT)?;
     if !output.status.success() {
         anyhow::bail!("insufficient privileges for pid {pid}");
     }
@@ -85,7 +84,7 @@ pub fn open_files(pid: u32) -> anyhow::Result<Vec<OpenFile>> {
     // its type letter (f = fd, t = type, n = name). -n/-P skip DNS and
     // port-name lookups, which otherwise take seconds.
     let output = run_command(
-        Command::new("lsof").args(["-n", "-P", "-F", "ftn", "-p", &pid.to_string()]),
+        crate::common::command::tool("lsof").args(["-n", "-P", "-F", "ftn", "-p", &pid.to_string()]),
         TIMEOUT,
     )?;
     let text = String::from_utf8_lossy(&output.stdout);
@@ -160,7 +159,7 @@ fn check_validity(path: &str, resources: bool) -> Result<(), i32> {
 
 /// `thorough` also validates bundle resources (slow on big apps).
 pub fn signature_status_with(path: &str, thorough: bool) -> anyhow::Result<(SignatureStatus, Vec<(String, String)>)> {
-    let output = run_command(Command::new("codesign").args(["-dvvv", path]), TIMEOUT)?;
+    let output = run_command(crate::common::command::tool("codesign").args(["-dvvv", path]), TIMEOUT)?;
     let stderr = String::from_utf8_lossy(&output.stderr);
     if stderr.contains("not signed") {
         return Ok((SignatureStatus::Unsigned, Vec::new()));
@@ -211,7 +210,7 @@ pub fn signature_status_with(path: &str, thorough: bool) -> anyhow::Result<(Sign
 
 fn process_owner(pid: u32) -> anyhow::Result<String> {
     let output = run_command(
-        Command::new("ps").args(["-o", "user=", "-p", &pid.to_string()]),
+        crate::common::command::tool("ps").args(["-o", "user=", "-p", &pid.to_string()]),
         TIMEOUT,
     )?;
     if !output.status.success() {
@@ -225,7 +224,7 @@ pub fn call_stacks(pid: u32) -> Result<Vec<String>, String> {
     // temp path we delete, rather than leaving files in /tmp.
     let tmp = std::env::temp_dir().join(format!("procwatch-sample-{pid}-{}.txt", std::process::id()));
     let out = run_command(
-        Command::new("sample").args([&pid.to_string(), "1", "-mayDie", "-file"]).arg(&tmp),
+        crate::common::command::tool("sample").args([&pid.to_string(), "1", "-mayDie", "-file"]).arg(&tmp),
         Duration::from_secs(20),
     );
     // With -file the report goes to the file rather than stdout.

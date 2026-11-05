@@ -18,6 +18,45 @@ pub fn run_command(cmd: &mut Command, timeout: Duration) -> anyhow::Result<Outpu
     run_command_capped(cmd, timeout, MAX_OUTPUT)
 }
 
+/// A system tool, from where the system keeps it.
+///
+/// procwatch usually runs with more rights than whoever controls `PATH`, so
+/// looking a tool up by name would run a planted program with those rights.
+/// Only a tool that isn't in a system location falls back to `PATH`, which
+/// on Unix covers package-manager installs such as `lsof`.
+pub fn tool(name: &str) -> Command {
+    Command::new(resolve(name))
+}
+
+#[cfg(unix)]
+fn resolve(name: &str) -> std::path::PathBuf {
+    ["/usr/bin", "/bin", "/usr/sbin", "/sbin"].iter().map(|d| std::path::Path::new(d).join(name)).find(|p| p.is_file()).unwrap_or_else(|| name.into())
+}
+
+#[cfg(windows)]
+fn resolve(name: &str) -> std::path::PathBuf {
+    use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
+    // Asked of the OS: an environment variable could point anywhere.
+    let mut buf = [0u16; 260];
+    let n = unsafe { GetSystemDirectoryW(buf.as_mut_ptr(), buf.len() as u32) } as usize;
+    if n == 0 || n >= buf.len() {
+        return name.into();
+    }
+    let system = std::path::PathBuf::from(String::from_utf16_lossy(&buf[..n]));
+    let file = format!("{name}.exe");
+    let candidates = [
+        system.join(&file),
+        system.join("WindowsPowerShell").join("v1.0").join(&file),
+        system.parent().map(|w| w.join(&file)).unwrap_or_else(|| file.clone().into()),
+    ];
+    candidates.into_iter().find(|p| p.is_file()).unwrap_or_else(|| name.into())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn resolve(name: &str) -> std::path::PathBuf {
+    name.into()
+}
+
 /// Output kept from one tool; more means something is wrong with it.
 const MAX_OUTPUT: usize = 256 << 20;
 /// How long pipes may stay open after the tool itself has exited.
@@ -113,6 +152,16 @@ pub fn run_command_capped(cmd: &mut Command, timeout: Duration, max_bytes: usize
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn system_tools_ignore_path() {
+        // A planted `sh` first on PATH must not win.
+        #[cfg(unix)]
+        assert!(std::path::Path::new(super::tool("sh").get_program()).is_absolute());
+        #[cfg(windows)]
+        assert!(std::path::Path::new(super::tool("cmd").get_program()).is_absolute());
+        assert_eq!(super::tool("no-such-tool-here").get_program(), "no-such-tool-here");
+    }
+
     #[test]
     fn powershell_quoting_covers_every_quote_character() {
         assert_eq!(super::ps_quote("C:\\a b\\x.exe"), "C:\\a b\\x.exe");

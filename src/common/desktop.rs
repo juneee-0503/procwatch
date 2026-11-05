@@ -63,11 +63,11 @@ pub fn notify(title: &str, body: &str) {
     {
         let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
         let script = format!("display notification \"{}\" with title \"{}\"", esc(body), esc(title));
-        let _ = Command::new("osascript").args(["-e", &script]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+        let _ = crate::common::command::tool("osascript").args(["-e", &script]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        let _ = Command::new("notify-send").args([title, body]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+        let _ = crate::common::command::tool("notify-send").args([title, body]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
     }
     #[cfg(windows)]
     {
@@ -79,20 +79,20 @@ pub fn notify(title: &str, body: &str) {
 pub fn reveal(path: &str) -> anyhow::Result<()> {
     #[cfg(target_os = "macos")]
     let mut cmd = {
-        let mut c = Command::new("open");
+        let mut c = crate::common::command::tool("open");
         c.args(["-R", path]);
         c
     };
     #[cfg(target_os = "windows")]
     let mut cmd = {
-        let mut c = Command::new("explorer");
+        let mut c = crate::common::command::tool("explorer");
         c.arg(format!("/select,{path}"));
         c
     };
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let mut cmd = {
         let dir = std::path::Path::new(path).parent().map(|p| p.display().to_string()).unwrap_or_else(|| "/".into());
-        let mut c = Command::new("xdg-open");
+        let mut c = crate::common::command::tool("xdg-open");
         c.arg(dir);
         c
     };

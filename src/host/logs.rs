@@ -1,6 +1,7 @@
 //! System event logs: macOS unified log, systemd journal, Windows event
 //! log. Read-only queries over a recent time window.
 
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use std::time::Duration;
 
@@ -145,7 +146,7 @@ mod imp {
 
     pub fn fetch(minutes: u32, scope: Scope) -> Result<Vec<Entry>, String> {
         let since = format!("-{minutes}min");
-        let mut cmd = Command::new("journalctl");
+        let mut cmd = crate::common::command::tool("journalctl");
         cmd.args(["--since", &since, "-o", "json", "--no-pager", "-n", &MAX.to_string()]);
         if scope == Scope::Important {
             cmd.args(["-p", "warning"]);
@@ -217,7 +218,7 @@ foreach ($log in $logs) {{
   }}
 }}"#
         );
-        let out = run_command(Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &script]), Duration::from_secs(90))
+        let out = run_command(crate::common::command::tool("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &script]), Duration::from_secs(90))
             .map_err(|e| e.to_string())?;
         let mut v = Vec::new();
         let mut problems = Vec::new();

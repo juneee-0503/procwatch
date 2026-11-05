@@ -412,7 +412,7 @@ impl App {
         if self.ir.timeline_dirty {
             self.rebuild_timeline();
         }
-        let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
+        let q = |s: &str| crate::common::text::csv_field(s);
         let mut out = String::from("message,datetime,timestamp_desc,timestamp,source,kind,pid,process\n");
         let rows = self.visible_timeline();
         for i in &rows {
@@ -433,7 +433,7 @@ impl App {
         let name = format!("procwatch-timeline-{}.csv", Local::now().format("%Y%m%d-%H%M%S"));
         let result = match self.ir.case.as_ref() {
             Some(c) => c.add_text(&name, &out).map(|p| p.display().to_string()),
-            None => std::fs::write(&name, &out).map(|_| name.clone()).map_err(anyhow::Error::from),
+            None => crate::common::paths::write_new(std::path::Path::new(&name), &out).map(|_| name.clone()).map_err(anyhow::Error::from),
         };
         match result {
             Ok(p) => self.set_status(StatusLevel::Success, format!("Exported {} events to {p}", rows.len())),

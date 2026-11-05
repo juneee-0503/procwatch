@@ -23,11 +23,7 @@ fn open(out: Option<&Path>) -> std::io::Result<Box<dyn Write>> {
     Ok(match out {
         None => Box::new(std::io::stdout()),
         Some(p) => {
-            let mut o = std::fs::OpenOptions::new();
-            o.create(true).append(true);
-            #[cfg(unix)]
-            std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
-            Box::new(o.open(p)?)
+            Box::new(crate::common::paths::private_file().create(true).append(true).open(p)?)
         }
     })
 }

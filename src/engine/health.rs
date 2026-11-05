@@ -115,7 +115,7 @@ fn journal() -> (Status, &'static str) {
     static START: Once = Once::new();
     START.call_once(|| {
         std::thread::spawn(|| {
-            let r = crate::common::command::run_command(std::process::Command::new("journalctl").args(["-n", "1", "-q"]), std::time::Duration::from_secs(10));
+            let r = crate::common::command::run_command(crate::common::command::tool("journalctl").args(["-n", "1", "-q"]), std::time::Duration::from_secs(10));
             let _ = RESULT.set(match r {
                 Ok(o) if o.status.success() => (Status::Available, "readable"),
                 Ok(_) => (Status::Partial, "only your own entries (add to the systemd-journal group or run as root)"),

@@ -178,7 +178,6 @@ fn send(pid: u32, sig: Sig) -> Result<()> {
 #[cfg(windows)]
 fn send(pid: u32, sig: Sig) -> Result<()> {
     use crate::common::command::run_command;
-    use std::process::Command;
     use std::time::Duration;
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
@@ -191,7 +190,7 @@ fn send(pid: u32, sig: Sig) -> Result<()> {
         Sig::Term => {
             // Without /F taskkill posts WM_CLOSE, like Task Manager's
             // "End task": the app may save state or ask the user.
-            let out = run_command(Command::new("taskkill").args(["/PID", &pid.to_string()]), Duration::from_secs(10))?;
+            let out = run_command(crate::common::command::tool("taskkill").args(["/PID", &pid.to_string()]), Duration::from_secs(10))?;
             if !out.status.success() {
                 let msg = first_line(&out.stderr);
                 return Err(anyhow!(if msg.is_empty() { format!("taskkill exited with {}", out.status) } else { msg }));
@@ -226,7 +225,7 @@ if ($rc -ne 0) {{ [Console]::Error.WriteLine("NTSTATUS 0x{{0:X8}}" -f $rc); exit
 "#
             );
             let out = run_command(
-                Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &script]),
+                crate::common::command::tool("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &script]),
                 Duration::from_secs(15),
             )?;
             if !out.status.success() {

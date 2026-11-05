@@ -57,9 +57,9 @@ pub fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("-h" | "--help") => {
-            println!("{USAGE}");
+            crate::safe_println!("{USAGE}");
             if let Some(p) = common::paths::config_path() {
-                println!("\nSettings file: {}", p.display());
+                crate::safe_println!("\nSettings file: {}", p.display());
             }
             return Ok(());
         }
@@ -70,7 +70,7 @@ pub fn main() -> anyhow::Result<()> {
             };
             let base = headless_capture();
             if target == "-" {
-                println!("{}", serde_json::to_string_pretty(&base)?);
+                crate::safe_println!("{}", serde_json::to_string_pretty(&base)?);
             } else {
                 base.save(std::path::Path::new(target))?;
                 eprintln!("Saved {} programs and {} listening ports to {target}", base.programs.len(), base.listeners.len());
@@ -91,9 +91,9 @@ pub fn main() -> anyhow::Result<()> {
             };
             let changes = base.diff(&headless_capture());
             if args.iter().any(|a| a == "--json") {
-                println!("{}", serde_json::to_string_pretty(&changes)?);
+                crate::safe_println!("{}", serde_json::to_string_pretty(&changes)?);
             } else {
-                print!("{}", baseline::render_text(&base, &changes));
+                print!("{}", crate::common::text::printable(&baseline::render_text(&base, &changes)));
             }
             std::process::exit(if changes.is_empty() { 0 } else { 1 });
         }
@@ -172,17 +172,17 @@ pub fn main() -> anyhow::Result<()> {
         Some("--check-rules") => {
             let dir = args.get(1).map(std::path::PathBuf::from).or_else(sigma::default_dir);
             let builtin = sigma::builtin();
-            println!("{} built-in rules", builtin.len());
+            crate::safe_println!("{} built-in rules", builtin.len());
             match dir.filter(|d| d.exists()) {
                 Some(d) => {
                     let (rules, errors) = sigma::load_dir(&d);
-                    println!("{}: {} usable rules, {} rejected", d.display(), rules.len(), errors.len());
+                    crate::safe_println!("{}: {} usable rules, {} rejected", d.display(), rules.len(), errors.len());
                     for e in &errors {
-                        println!("  ✗ {e}");
+                        crate::safe_println!("  ✗ {e}");
                     }
                     std::process::exit(i32::from(!errors.is_empty()));
                 }
-                None => println!("no rule folder (create {} or pass one)", sigma::default_dir().map(|d| d.display().to_string()).unwrap_or_default()),
+                None => crate::safe_println!("no rule folder (create {} or pass one)", sigma::default_dir().map(|d| d.display().to_string()).unwrap_or_default()),
             }
             return Ok(());
         }
@@ -275,13 +275,13 @@ fn headless_sweep(file: &str, json: bool) -> i32 {
     }
     let hits = ioc::sweep(&iocs, &obs);
     if json {
-        println!("{}", serde_json::to_string_pretty(&hits).unwrap_or_default());
+        crate::safe_println!("{}", serde_json::to_string_pretty(&hits).unwrap_or_default());
     } else if hits.is_empty() {
-        println!("No matches for {} indicators across {} observations.", iocs.len(), obs.len());
+        crate::safe_println!("No matches for {} indicators across {} observations.", iocs.len(), obs.len());
     } else {
         for h in &hits {
             let pid = h.pid.map(|p| format!(" pid {p}")).unwrap_or_default();
-            println!("MATCH {:<7} {:<40} {:<12} {}{pid}  {}", h.kind.label(), h.ioc, h.source, h.name, h.detail);
+            crate::safe_println!("MATCH {:<7} {:<40} {:<12} {}{pid}  {}", h.kind.label(), h.ioc, h.source, h.name, h.detail);
         }
     }
     if hits.is_empty() { 0 } else { 1 }
@@ -329,13 +329,13 @@ fn headless_scan(paths: &[&String], yara_dir: Option<&str>, json: bool) -> i32 {
     let mut results: Vec<serde_json::Value> = hits.into_iter().map(|(p, m)| serde_json::json!({"path": p, "matches": m})).collect();
     results.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
     if json {
-        println!("{}", serde_json::to_string_pretty(&results).unwrap_or_default());
+        crate::safe_println!("{}", serde_json::to_string_pretty(&results).unwrap_or_default());
     } else {
-        println!("{} files scanned with {} rules, {} matched", scanned, rules.len(), results.len());
+        crate::safe_println!("{} files scanned with {} rules, {} matched", scanned, rules.len(), results.len());
         for r in &results {
-            println!("{}", r["path"].as_str().unwrap_or(""));
+            crate::safe_println!("{}", r["path"].as_str().unwrap_or(""));
             for m in r["matches"].as_array().into_iter().flatten() {
-                println!("  {}  {}", m["rule"].as_str().unwrap_or(""), m["description"].as_str().unwrap_or(""));
+                crate::safe_println!("  {}  {}", m["rule"].as_str().unwrap_or(""), m["description"].as_str().unwrap_or(""));
             }
         }
     }

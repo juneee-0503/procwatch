@@ -170,7 +170,7 @@ fn capture_windows(r: &mut Report) {
     };
     r.deep_trace_method = w.method().into();
     let script = "ping -n 2 127.0.0.1 >NUL & cmd /c exit & cmd /c exit & cmd /c exit & cmd /c exit & ping -n 3 127.0.0.1 >NUL & ping -n 3 127.0.0.1 >NUL";
-    let mut parent = match std::process::Command::new("cmd").args(["/C", script]).stdout(std::process::Stdio::null()).spawn() {
+    let mut parent = match crate::common::command::tool("cmd").args(["/C", script]).stdout(std::process::Stdio::null()).spawn() {
         Ok(p) => p,
         Err(e) => {
             r.notes.push(format!("couldn't start the test workload: {e}"));
@@ -219,7 +219,7 @@ fn capture_windows(r: &mut Report) {
 #[cfg(windows)]
 fn pid_reuse_windows(r: &mut Report) {
     use crate::process::actions::{apply_checked, process_exists, Action, Outcome, Sig};
-    let Ok(mut child) = std::process::Command::new("ping").args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn() else { return };
+    let Ok(mut child) = crate::common::command::tool("ping").args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn() else { return };
     let pid = child.id();
     std::thread::sleep(Duration::from_millis(300));
     let Some(start) = crate::process::native::start_time(pid) else {
@@ -236,10 +236,7 @@ fn pid_reuse_windows(r: &mut Report) {
 }
 
 fn file_latency(r: &mut Report) {
-    let dir = std::env::temp_dir().join(format!("procwatch-selftest-{}", std::process::id()));
-    if std::fs::create_dir_all(&dir).is_err() {
-        return;
-    }
+    let Ok(dir) = crate::common::paths::private_temp_dir("selftest") else { return };
     let (tx, rx) = Emit::channel();
     let (_w, errors) = crate::files::watch::start(&[dir.display().to_string()], tx);
     if !errors.is_empty() {
@@ -272,10 +269,10 @@ fn activity_workload(dir: &std::path::Path) {
         .status();
     #[cfg(windows)]
     {
-        let _ = std::process::Command::new("cmd").args(["/C", "echo x> a.txt & type a.txt > NUL & ren a.txt b.txt & del b.txt"]).current_dir(dir).status();
+        let _ = crate::common::command::tool("cmd").args(["/C", "echo x> a.txt & type a.txt > NUL & ren a.txt b.txt & del b.txt"]).current_dir(dir).status();
         let key = r"HKCU\Software\procwatch-selftest";
-        let _ = std::process::Command::new("reg").args(["add", key, "/v", "probe", "/d", "1", "/f"]).stdout(std::process::Stdio::null()).status();
-        let _ = std::process::Command::new("reg").args(["delete", key, "/f"]).stdout(std::process::Stdio::null()).status();
+        let _ = crate::common::command::tool("reg").args(["add", key, "/v", "probe", "/d", "1", "/f"]).stdout(std::process::Stdio::null()).status();
+        let _ = crate::common::command::tool("reg").args(["delete", key, "/f"]).stdout(std::process::Stdio::null()).status();
     }
 }
 
@@ -325,9 +322,10 @@ fn traffic_download_probe(r: &mut Report) {
     let (tx, rx) = Emit::channel();
     let Ok(t) = crate::network::traffic::start(tx) else { return };
     std::thread::sleep(Duration::from_millis(500));
-    let dest = std::env::temp_dir().join(format!("procwatch-selftest-download-{}", std::process::id()));
+    let Ok(folder) = crate::common::paths::private_temp_dir("download") else { return };
+    let dest = folder.join("file");
     // The pause keeps the socket around for counters that end with it.
-    let spawned = std::process::Command::new("curl").args(["-s", "-L", "--max-time", "30", "-o"]).arg(&dest).arg(&url).spawn();
+    let spawned = crate::common::command::tool("curl").args(["-s", "-L", "--max-time", "30", "-o"]).arg(&dest).arg(&url).spawn();
     let Ok(mut child) = spawned else { return };
     let pid = child.id();
     let mut seen = (0, 0);
@@ -341,7 +339,7 @@ fn traffic_download_probe(r: &mut Report) {
     }
     let _ = child.wait();
     let size = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
-    let _ = std::fs::remove_file(&dest);
+    let _ = std::fs::remove_dir_all(&folder);
     r.activity.push(format!("traffic via {} on a real download: file {size} bytes, counted {} in, {} out", t.method, seen.0, seen.1));
 }
 
@@ -421,7 +419,7 @@ fn enforce_kill_probe(r: &mut Report) {
             return;
         }
     };
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = Emit::channel();
     match enforce::start(policy, tx) {
         Err(e) => r.activity.push(format!("enforce kill: not available ({e})")),
         Ok(run) => {
@@ -462,7 +460,7 @@ fn enforce_block_probe(r: &mut Report) {
     }
     let run_one = |mode: &str| -> Result<(bool, bool, usize), String> {
         let text = format!("mode: {mode}\nrules:\n  - {{ id: t, on: exec, action: block, path: ['{}'] }}\n", blocked.display());
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = Emit::channel();
         let run = enforce::start(Policy::parse(&text)?, tx)?;
         std::thread::sleep(Duration::from_millis(300));
         let ran = |p: &std::path::Path| std::process::Command::new(p).status().is_ok_and(|s| s.success());
@@ -498,7 +496,7 @@ fn enforce_block_probe(r: &mut Report) {
     };
     let before = connected(&listener);
     let text = format!("mode: enforce\nrules:\n  - {{ id: t, on: connect, action: block, path: ['{curl}'] }}\n");
-    let (tx, _rx) = std::sync::mpsc::channel();
+    let (tx, _rx) = Emit::channel();
     let policy = match Policy::parse(&text) {
         Ok(p) => p,
         Err(e) => {
@@ -520,7 +518,8 @@ fn enforce_block_probe(r: &mut Report) {
 
 #[cfg(windows)]
 fn handle_probe(r: &mut Report) {
-    let path = std::env::temp_dir().join(format!("procwatch-handle-probe-{}", std::process::id()));
+    let Ok(folder) = crate::common::paths::private_temp_dir("handles") else { return };
+    let path = folder.join("probe");
     let Ok(_held) = std::fs::File::create(&path) else { return };
     let me = std::process::id();
     let t = Instant::now();
@@ -531,7 +530,7 @@ fn handle_probe(r: &mut Report) {
         Ok(items) => r.activity.push(format!("handles: {} named in this process in {} ms; held test file found: {}", items.len(), took.as_millis(), items.iter().any(|i| i.name.contains(&name)))),
         Err(e) => r.activity.push(format!("handles: {e}")),
     }
-    let mut child = match std::process::Command::new("ping").args(["-n", "6", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn() {
+    let mut child = match crate::common::command::tool("ping").args(["-n", "6", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn() {
         Ok(c) => c,
         Err(_) => return,
     };
@@ -551,7 +550,7 @@ fn handle_probe(r: &mut Report) {
         Err(e) => r.activity.push(format!("open files system-wide: {e}")),
     }
     drop(_held);
-    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir_all(&folder);
 }
 
 fn own_cost(r: &mut Report) {

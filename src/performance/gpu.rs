@@ -41,7 +41,6 @@ pub fn system_gpu_usage() -> GpuSnapshot {
 mod windows_impl {
     use super::GpuSnapshot;
     use crate::common::command::run_command;
-    use std::process::Command;
     use std::time::Duration;
 
     pub fn sample() -> GpuSnapshot {
@@ -58,7 +57,7 @@ try {
 }
 "#;
         let output = run_command(
-            Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", script]),
+            crate::common::command::tool("powershell").args(["-NoProfile", "-NonInteractive", "-Command", script]),
             Duration::from_secs(10),
         );
 

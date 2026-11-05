@@ -9,7 +9,7 @@
 //! (Windows). Kept to `MAX_BYTES` and `MAX_DAYS`, oldest files first. Turn
 //! off with `history = off` in the settings file.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
@@ -71,7 +71,7 @@ pub struct Writer {
 impl Writer {
     pub fn open(dir: PathBuf) -> Writer {
         let mut w = Writer { dir, day: String::new(), out: None, written: 0, error: None, day_bytes: 0, pruned_at: 0 };
-        if let Err(e) = fs::create_dir_all(&w.dir) {
+        if let Err(e) = crate::common::paths::ensure_private_dir(&w.dir) {
             w.error = Some(format!("{}: {e}", w.dir.display()));
         }
         w.prune();
@@ -89,7 +89,7 @@ impl Writer {
                 let _ = o.flush();
             }
             let path = self.dir.join(format!("events-{day}.jsonl"));
-            match OpenOptions::new().create(true).append(true).open(&path) {
+            match crate::common::paths::private_file().create(true).append(true).open(&path) {
                 Ok(f) => {
                     let rotated = !self.day.is_empty();
                     self.day_bytes = f.metadata().map(|m| m.len()).unwrap_or(0);

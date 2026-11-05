@@ -10,7 +10,6 @@
 
 use super::{DeepInfo, SignatureStatus};
 use crate::common::command::run_command;
-use std::process::Command;
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(15);
@@ -74,7 +73,7 @@ Get-CimInstance Win32_Service -Filter "ProcessId={pid}" -ErrorAction SilentlyCon
     );
 
     let output = run_command(
-        Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &script]),
+        crate::common::command::tool("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &script]),
         TIMEOUT,
     );
     let text = match output {
@@ -216,7 +215,7 @@ if ($s.SignerCertificate) {{
 }}"#,
         crate::common::command::ps_quote(path)
     );
-    let out = run_command(Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &script]), TIMEOUT)?;
+    let out = run_command(crate::common::command::tool("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &script]), TIMEOUT)?;
     let text = String::from_utf8_lossy(&out.stdout);
     let mut status = SignatureStatus::Unknown;
     let mut details = Vec::new();

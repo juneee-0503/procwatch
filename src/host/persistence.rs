@@ -363,7 +363,6 @@ fn sudoers(items: &mut Vec<Item>, notes: &mut Vec<String>) {
 mod imp {
     use super::*;
     use crate::common::command::run_command;
-    use std::process::Command;
 
     fn launchd(items: &mut Vec<Item>, dir: &Path, category: &str, scope: &str) {
         let Ok(entries) = std::fs::read_dir(dir) else { return };
@@ -419,7 +418,7 @@ mod imp {
             notes.push("Login items (System Settings › General) are listed when procwatch runs with sudo.".into());
             return;
         }
-        let Ok(o) = run_command(Command::new("sfltool").arg("dumpbtm"), Duration::from_secs(20)) else {
+        let Ok(o) = run_command(crate::common::command::tool("sfltool").arg("dumpbtm"), Duration::from_secs(20)) else {
             notes.push("login items: sfltool unavailable".into());
             return;
         };
@@ -475,7 +474,7 @@ mod imp {
         launchd(&mut items, &h.join("Library/LaunchAgents"), "Launch agent", "user");
         notes.push("Apple's own launch items in /System are protected by SIP and not listed.".into());
 
-        if let Ok(o) = run_command(Command::new("crontab").arg("-l"), Duration::from_secs(5)) {
+        if let Ok(o) = run_command(crate::common::command::tool("crontab").arg("-l"), Duration::from_secs(5)) {
             cron_lines(&mut items, &String::from_utf8_lossy(&o.stdout), "crontab (current user)", "user", false);
         }
         if let Ok(t) = std::fs::read_to_string("/etc/crontab") {
@@ -483,7 +482,7 @@ mod imp {
         }
 
         // Third-party kernel extensions.
-        match run_command(Command::new("kmutil").args(["showloaded", "--list-only"]), Duration::from_secs(20)) {
+        match run_command(crate::common::command::tool("kmutil").args(["showloaded", "--list-only"]), Duration::from_secs(20)) {
             Ok(o) => {
                 for line in String::from_utf8_lossy(&o.stdout).lines() {
                     let Some(open) = line.find(" (") else { continue };
@@ -500,7 +499,7 @@ mod imp {
             Err(e) => notes.push(format!("kernel extensions: {e}")),
         }
         // System extensions (network filters, endpoint security, drivers).
-        if let Ok(o) = run_command(Command::new("systemextensionsctl").arg("list"), Duration::from_secs(10)) {
+        if let Ok(o) = run_command(crate::common::command::tool("systemextensionsctl").arg("list"), Duration::from_secs(10)) {
             for line in String::from_utf8_lossy(&o.stdout).lines() {
                 let cols: Vec<&str> = line.split('\t').map(str::trim).filter(|c| !c.is_empty()).collect();
                 // enabled  active  teamID  bundleID (version)  name  [state]
@@ -608,7 +607,7 @@ mod imp {
                 }
             }
         }
-        if let Ok(o) = crate::common::command::run_command(std::process::Command::new("crontab").arg("-l"), Duration::from_secs(5)) {
+        if let Ok(o) = crate::common::command::run_command(crate::common::command::tool("crontab").arg("-l"), Duration::from_secs(5)) {
             cron_lines(&mut items, &String::from_utf8_lossy(&o.stdout), "crontab (current user)", "user", false);
         }
         for (dir, scope) in [(h.join(".config/autostart"), "user"), (PathBuf::from("/etc/xdg/autostart"), "system")] {
@@ -709,7 +708,6 @@ mod imp {
 mod imp {
     use super::*;
     use crate::common::command::run_command;
-    use std::process::Command;
 
     const SCRIPT: &str = r#"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -768,7 +766,7 @@ Emit 'HostsFile' 'hosts' "$env:SystemRoot\System32\drivers\etc\hosts" 'hosts' 's
 "#;
 
     pub fn collect(notes: &mut Vec<String>) -> Vec<Item> {
-        let out = match run_command(Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT]), Duration::from_secs(60)) {
+        let out = match run_command(crate::common::command::tool("powershell").args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT]), Duration::from_secs(60)) {
             Ok(o) => o,
             Err(e) => {
                 notes.push(format!("powershell: {e}"));

@@ -395,12 +395,11 @@ pub fn collect_dir(dir: &Path) -> Scan {
 mod windows {
     use super::*;
     use crate::common::command::run_command_capped;
-    use std::process::Command;
     use std::time::Duration;
 
     fn ps(script: &str) -> Result<String, String> {
         let out = run_command_capped(
-            Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", script]),
+            crate::common::command::tool("powershell").args(["-NoProfile", "-NonInteractive", "-Command", script]),
             Duration::from_secs(60),
             64 << 20,
         )

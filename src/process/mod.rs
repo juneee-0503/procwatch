@@ -637,7 +637,7 @@ pub mod tests {
         #[cfg(unix)]
         let spawned = std::process::Command::new("/bin/sleep").arg("20").spawn();
         #[cfg(windows)]
-        let spawned = std::process::Command::new("ping").args(["-n", "20", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn();
+        let spawned = crate::common::command::tool("ping").args(["-n", "20", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn();
         let mut child = spawned.unwrap();
         let pid = child.id();
         // A sample can land before it has exec'd, which is why details are

@@ -1,5 +1,6 @@
 //! Snapshot export of the current process list to CSV.
 
+use crate::common::text::csv_field;
 use std::fs;
 use std::path::PathBuf;
 
@@ -7,14 +8,6 @@ use chrono::Local;
 
 use crate::app::{App, RowKey};
 use crate::process::ProcessInfo;
-
-fn csv_field(s: &str) -> String {
-    if s.contains([',', '"', '\n', '\r']) {
-        format!("\"{}\"", s.replace('"', "\"\""))
-    } else {
-        s.to_string()
-    }
-}
 
 fn opt<T: ToString>(v: Option<T>) -> String {
     v.map(|v| v.to_string()).unwrap_or_default()
@@ -70,7 +63,7 @@ pub fn export_csv(app: &App) -> anyhow::Result<(PathBuf, usize)> {
             n += 1;
         }
     }
-    fs::write(&path, out)?;
+    crate::common::paths::write_new(&path, &out)?;
     Ok((fs::canonicalize(&path).unwrap_or(path), n))
 }
 
