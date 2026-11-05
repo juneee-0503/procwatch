@@ -22,6 +22,8 @@ impl App {
                 self.add_alerts(vec![crate::detection::rules::Alert { at: Local::now(), rule: a.rule, pid: 0, name: "system".into(), message }]);
             }
             WorkerMsg::MetricAlert(a) => self.set_status(StatusLevel::Info, format!("Cleared: {}", a.rule)),
+            WorkerMsg::Threat(t) => self.on_threat(*t),
+            WorkerMsg::Incident(i) => self.on_incident(*i),
             WorkerMsg::Inspected { pid, start_time, info } => {
                 self.deep_pending.remove(&pid);
                 let mut info = *info;

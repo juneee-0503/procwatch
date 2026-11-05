@@ -2,7 +2,48 @@
 
 use super::*;
 
+/// Findings kept for the Defense page.
+const MAX_THREATS: usize = 5000;
+const MAX_INCIDENTS: usize = 200;
+
 impl App {
+    pub(crate) fn on_threat(&mut self, t: crate::defense::Threat) {
+        use crate::common::model::Severity;
+        if t.severity >= Severity::High {
+            let alert = crate::detection::rules::Alert { at: t.time, rule: t.rule.to_string(), pid: t.pid.unwrap_or(0), name: t.source.map_or_else(|| "this host".to_string(), |s| s.to_string()), message: t.title.clone() };
+            self.add_alerts(vec![alert]);
+        }
+        self.ir.threats.push_back(t);
+        self.ir.threat_seq += 1;
+        if self.ir.threats.len() > MAX_THREATS {
+            self.ir.threats.pop_front();
+        }
+        self.ir.timeline_dirty = true;
+    }
+
+    pub(crate) fn on_incident(&mut self, i: crate::defense::chain::Incident) {
+        self.ir.incidents.retain(|x| x.id != i.id);
+        self.ir.incidents.insert(0, i);
+        self.ir.incidents.truncate(MAX_INCIDENTS);
+    }
+
+    /// Threats matching the filter, newest first, as indexes.
+    pub fn visible_threats(&self) -> Vec<usize> {
+        let q = self.query.to_lowercase();
+        self.ir
+            .threats
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, t)| q.is_empty() || t.title.to_lowercase().contains(&q) || t.rule.contains(&q) || t.stage.label() == q || t.severity.label() == q || t.source.is_some_and(|s| s.to_string().contains(&q)))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    pub fn selected_threat(&self) -> Option<&crate::defense::Threat> {
+        self.visible_threats().get(self.ir.th_selected).and_then(|i| self.ir.threats.get(*i))
+    }
+
     /// Stacks from captured events, where the system can't sample them:
     /// what this process was doing when it last touched a file or a key.
     pub fn captured_stacks(&self, pid: u32) -> Option<Vec<String>> {

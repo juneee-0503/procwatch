@@ -42,6 +42,7 @@ pub struct Report {
     /// What each capture source saw of a known workload.
     pub activity: Vec<String>,
     pub packets: Vec<String>,
+    pub defense: Vec<String>,
     pub boot_log: Vec<String>,
     pub notes: Vec<String>,
 }
@@ -624,6 +625,47 @@ fn packet_probe(r: &mut Report) {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Real attacks' mechanics against this machine, harmlessly: a shell driven
+/// by a socket, and a scan of closed ports.
+#[cfg(target_os = "linux")]
+fn defense_probe(r: &mut Report) {
+    use crate::defense::config::Thresholds;
+    use crate::defense::host::Host;
+    use crate::defense::sniff::{Detector, Sniffer};
+    use std::os::fd::OwnedFd;
+    use std::process::{Command, Stdio};
+    let Ok(listener) = std::net::TcpListener::bind("127.0.0.1:0") else { return };
+    let Ok(addr) = listener.local_addr() else { return };
+    let (Ok(client), Ok((_peer, _))) = (std::net::TcpStream::connect(addr), listener.accept()) else { return };
+    let shell = Command::new("/bin/sh").args(["-c", "read x; sleep 4"]).stdin(Stdio::from(OwnedFd::from(client))).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+    if let Ok(mut c) = shell {
+        std::thread::sleep(Duration::from_millis(300));
+        let mut host = Host::new(std::path::Path::new("/"), None, true);
+        let found = host.check(chrono::Local::now()).iter().any(|t| t.rule == "reverse-shell" && t.pid == Some(c.id()));
+        r.defense.push(format!("shell driven by a socket found: {}", if found { "yes" } else { "NO" }));
+        let _ = c.kill();
+        let _ = c.wait();
+        drop(_peer);
+    }
+    match Sniffer::start() {
+        Err(e) => r.defense.push(format!("SYN capture: not available ({e})")),
+        Ok(s) => {
+            std::thread::sleep(Duration::from_millis(200));
+            for port in 1..=20u16 {
+                let _ = std::net::TcpStream::connect_timeout(&std::net::SocketAddr::from(([127, 0, 0, 1], 50_000 + port)), Duration::from_millis(50));
+            }
+            std::thread::sleep(Duration::from_millis(500));
+            let mut d = Detector::new(Thresholds::default(), true);
+            let now = chrono::Local::now();
+            let seen: Vec<_> = s.rx.try_iter().collect();
+            let scan = seen.iter().filter_map(|(ip, port)| d.feed(*ip, *port, now)).any(|t| t.rule == "port-scan");
+            r.defense.push(format!("scan of 20 closed ports: {} SYNs seen, reported as a scan: {}", seen.len(), if scan { "yes" } else { "NO" }));
+        }
+    }
+    let hidden = Host::new(std::path::Path::new("/"), None, true).hidden_processes(chrono::Local::now(), 65_536);
+    r.defense.push(format!("hidden process search: {} found (0 expected on a clean system)", hidden.len()));
+}
+
 /// Writes the same kind of log a boot session does, without restarting.
 #[cfg(windows)]
 fn boot_log_probe(r: &mut Report) {
@@ -691,6 +733,8 @@ pub fn run(json: bool) -> i32 {
     #[cfg(windows)]
     handle_probe(&mut r);
     packet_probe(&mut r);
+    #[cfg(target_os = "linux")]
+    defense_probe(&mut r);
     #[cfg(windows)]
     boot_log_probe(&mut r);
     own_cost(&mut r);
@@ -714,6 +758,8 @@ pub fn run(json: bool) -> i32 {
         println!("  target left running:            {}", yn(r.pid_reuse_target_survived));
         println!("  correct (pid, start) acted on:  {}", yn(r.checked_action_worked));
         println!("\nFile change notification latency: {}", r.file_event_latency_ms.map(|m| format!("{m} ms")).unwrap_or_else(|| "no event within 5 s".into()));
+        println!("\nAttack detection on this kernel:");
+        r.defense.iter().for_each(|l| println!("  {l}"));
         println!("\nPacket capture:");
         r.packets.iter().for_each(|l| println!("  {l}"));
         println!("\nBoot logging (configuration and log reading; not a real restart):");

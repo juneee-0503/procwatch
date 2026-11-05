@@ -65,6 +65,11 @@ Usage:
   procwatch --boot-log enable|disable|status|read [FILE] [--json]
                                     Windows: record file, registry and process activity from early
                                     boot, and read it back; needs administrator
+  procwatch --defense-check [FILE]  check defense.yml and show what is watched
+  procwatch --alarm-test            send a test alarm to every configured destination
+  procwatch --unban-all             lift every address the agent banned
+  procwatch --history [METRIC] [--hours N] [--json]
+                                    metrics kept on disk; no metric lists what is recorded
   procwatch --modules [--json]      list modules and what each supports on this system
   procwatch --module-enable NAME    run a module from the next start
   procwatch --module-disable NAME   leave a module out from the next start
@@ -248,6 +253,27 @@ pub fn main() -> anyhow::Result<()> {
             let file = args.get(2).filter(|a| !a.starts_with("--")).map(std::path::Path::new);
             std::process::exit(crate::activity::boot::run(action, file, args.iter().any(|a| a == "--json")));
         }
+        Some("--defense-check") => std::process::exit(defense_check(args.get(1).map(std::path::Path::new))),
+        Some("--alarm-test") => std::process::exit(alarm_test()),
+        Some("--unban-all") => match crate::defense::ban::clear() {
+            Ok(()) => {
+                println!("No addresses are banned.");
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("procwatch: {e}");
+                std::process::exit(2);
+            }
+        },
+        Some("--history") => {
+            let metric = args.get(1).filter(|a| !a.starts_with("--")).map(String::as_str);
+            let hours = args.iter().position(|a| a == "--hours").and_then(|i| args.get(i + 1)).map_or(Ok(24), |h| h.parse::<u64>());
+            let Ok(hours) = hours else {
+                eprintln!("--hours needs a number\n\n{USAGE}");
+                std::process::exit(2);
+            };
+            std::process::exit(crate::performance::history::run(metric, hours, args.iter().any(|a| a == "--json")));
+        }
         Some("--modules") => std::process::exit(modules::list(args.iter().any(|a| a == "--json"))),
         Some(flag @ ("--module-enable" | "--module-disable")) => {
             let Some(name) = args.get(1) else {
@@ -306,6 +332,66 @@ pub fn main() -> anyhow::Result<()> {
 
 /// `--sweep`: match indicators against processes (with executable
 /// hashes), connections and persistence entries without the UI.
+fn defense_config(file: Option<&std::path::Path>) -> Result<crate::defense::config::DefenseConfig, String> {
+    use crate::defense::config::DefenseConfig;
+    match file {
+        Some(p) => DefenseConfig::load_from(p),
+        None => DefenseConfig::load(),
+    }
+}
+
+fn defense_check(file: Option<&std::path::Path>) -> i32 {
+    match defense_config(file) {
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+        Ok(c) => {
+            println!("authentication logs: {}", if c.auth_logs.is_empty() { "usual places, or the journal".to_string() } else { format!("{:?}", c.auth_logs) });
+            println!("web logs: {}", if c.web_logs.is_empty() { "usual nginx and Apache places".to_string() } else { format!("{:?}", c.web_logs) });
+            println!("never reported: {:?}", c.allow);
+            println!("repeats quiet for {} s", c.quiet_seconds);
+            println!("metrics endpoint: {}", if c.exporter.listen.is_empty() { "off" } else { &c.exporter.listen });
+            if c.alarms.is_empty() {
+                println!("alarms: none, findings stay on this machine");
+            }
+            for a in &c.alarms {
+                println!("alarm: {}", a.describe());
+            }
+            0
+        }
+    }
+}
+
+fn alarm_test() -> i32 {
+    use crate::common::model::Severity;
+    use crate::defense::alarm::{send, Notice};
+    let config = match defense_config(None) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    if config.alarms.is_empty() {
+        eprintln!("no alarm destinations in defense.yml");
+        return 1;
+    }
+    let host = sysinfo::System::host_name().unwrap_or_default();
+    let notice = Notice { severity: Severity::Critical, rule: "alarm-test".into(), title: "Test alarm from procwatch: nothing is wrong".into(), source: None, detail: String::new(), host };
+    let mut failed = 0;
+    for d in &config.alarms {
+        match send(d, &notice) {
+            Ok(()) => println!("{}: sent", d.describe()),
+            Err(e) => {
+                failed += 1;
+                println!("{}: FAILED: {e}", d.describe());
+            }
+        }
+    }
+    i32::from(failed > 0)
+}
+
 fn headless_sweep(file: &str, json: bool) -> i32 {
     let text = match std::fs::read_to_string(file) {
         Ok(t) => t,

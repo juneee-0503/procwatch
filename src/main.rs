@@ -5,6 +5,7 @@ mod activity;
 mod app;
 mod cli;
 mod common;
+mod defense;
 mod detection;
 mod engine;
 mod files;

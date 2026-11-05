@@ -138,6 +138,8 @@ fn msg_name(m: &crate::engine::messages::WorkerMsg) -> &'static str {
         Deep(_) => "msg: Deep",
         Dns { .. } => "msg: Dns",
         Metrics(_) => "msg: Metrics",
+        Threat(_) => "msg: Threat",
+        Incident(_) => "msg: Incident",
         WatchStatus(_) => "msg: WatchStatus",
         TrafficState(_) => "msg: TrafficState",
         CaptureState(_) => "msg: CaptureState",

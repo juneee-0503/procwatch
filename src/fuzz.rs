@@ -112,6 +112,13 @@ fn walk(k: crate::host::artifacts::regf::Key, depth: usize, budget: &mut usize) 
 }
 
 pub(crate) fn binaries(data: &[u8]) {
+    let _ = crate::defense::sniff::parse_syn(data);
+    let text = String::from_utf8_lossy(data);
+    let _ = crate::defense::netattack::parse_tcp(&text);
+    for line in text.lines() {
+        let _ = crate::defense::auth::parse(line);
+        let _ = crate::defense::web::parse(line);
+    }
     let _ = crate::files::binfmt::pe_exports(data);
     let mut at = 0;
     while let Some((.., next)) = crate::network::pcap::bpf_record(data, at) {

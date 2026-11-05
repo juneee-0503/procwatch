@@ -73,10 +73,11 @@ pub enum Tab {
     Alerts,
     Case,
     Activity,
+    Defense,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 11] = [
+    pub const ALL: [Tab; 12] = [
         Tab::Processes,
         Tab::Performance,
         Tab::Network,
@@ -88,6 +89,7 @@ impl Tab {
         Tab::Alerts,
         Tab::Case,
         Tab::Activity,
+        Tab::Defense,
     ];
     pub fn title(self) -> &'static str {
         match self {
@@ -102,6 +104,7 @@ impl Tab {
             Tab::Alerts => "Detect",
             Tab::Case => "Case",
             Tab::Activity => "Activity",
+            Tab::Defense => "Defense",
         }
     }
 
@@ -119,6 +122,7 @@ impl Tab {
             Tab::Alerts => "Detect",
             Tab::Case => "Case",
             Tab::Activity => "Act",
+            Tab::Defense => "Def",
         }
     }
 
@@ -127,6 +131,7 @@ impl Tab {
         match Self::ALL.iter().position(|t| *t == self).unwrap_or(0) {
             9 => '0',
             10 => '`',
+            11 => '~',
             i => char::from(b'1' + i as u8),
         }
     }
@@ -383,6 +388,8 @@ pub enum Mode {
     ActivitySummary,
     /// One captured operation in full, with its call stack.
     ActivityDetail,
+    /// One finding, and the attack it belongs to.
+    ThreatDetail,
     /// Modules: what runs, what each supports here, turning them on and off.
     Modules { cursor: usize },
     /// Command palette (`:` or ctrl+k).
@@ -1156,7 +1163,7 @@ mod tests {
     fn every_page_and_overlay_draws_at_any_terminal_size() {
         use ratatui::{backend::TestBackend, Terminal};
         let mut a = app();
-        let modes = [Mode::Normal, Mode::Help, Mode::Graph, Mode::Clusters, Mode::Health, Mode::StateAt, Mode::Sweep, Mode::ActivitySummary, Mode::ActivityDetail, Mode::Modules { cursor: 0 }, Mode::FileReport, Mode::Workspace, Mode::Palette { input: "x".into(), cursor: 0 }];
+        let modes = [Mode::Normal, Mode::Help, Mode::Graph, Mode::Clusters, Mode::Health, Mode::StateAt, Mode::Sweep, Mode::ActivitySummary, Mode::ActivityDetail, Mode::ThreatDetail, Mode::Modules { cursor: 0 }, Mode::FileReport, Mode::Workspace, Mode::Palette { input: "x".into(), cursor: 0 }];
         for (w, h) in [(1, 1), (2, 2), (5, 3), (10, 4), (20, 5), (33, 9), (40, 10), (80, 24), (200, 60)] {
             let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
             for tab in Tab::ALL {

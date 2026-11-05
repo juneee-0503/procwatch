@@ -312,6 +312,113 @@ pub fn activity(frame: &mut Frame, app: &mut App, area: Rect) {
     app.hit.list_rows = draw_table(frame, table, &specs, rows, &mut scroll, Some(app.ir.ac_selected - app.ir.ac_offset));
 }
 
+fn severity_style(s: crate::common::model::Severity) -> Style {
+    use crate::common::model::Severity::{Critical, High, Medium};
+    match s {
+        Critical | High => Style::new().fg(BAD),
+        Medium => Style::new().fg(WARN),
+        _ => Style::new().fg(MUTED),
+    }
+}
+
+/// Attacks in progress and every finding behind them.
+pub fn defense(frame: &mut Frame, app: &mut App, area: Rect) {
+    let total = app.visible_threats().len();
+    let extra = vec![muted(format!("   {} attacks", app.ir.incidents.len()))];
+    frame.render_widget(Paragraph::new(search_bar(app, "findings", total, extra)), Rect { height: 1, ..area });
+    app.hit.search = Rect { height: 1, width: area.width / 3, ..area };
+    let shown = app.ir.incidents.len().min(4) as u16;
+    let lines: Vec<Line> = app
+        .ir
+        .incidents
+        .iter()
+        .take(4)
+        .map(|i| Line::from(vec![Span::styled(format!(" {:<9}", i.severity.label()), severity_style(i.severity)), Span::raw(i.summary())]))
+        .collect();
+    let head = Rect { y: area.y + 1, height: shown.min(area.height.saturating_sub(1)), ..area };
+    frame.render_widget(Paragraph::new(lines), head);
+    let table = Rect { y: head.bottom() + 1, height: area.height.saturating_sub(shown + 2), ..area };
+    if total == 0 {
+        let note = if cfg!(target_os = "linux") { " No findings. Reading logs and packets needs root." } else { " No findings. Most sources here are Linux only: see docs/defense.md." };
+        frame.render_widget(Paragraph::new(muted(note)), table);
+        return;
+    }
+    let specs = [
+        ColSpec::new("Time", 12, false),
+        ColSpec::new("Severity", 9, false),
+        ColSpec::new("Stage", 12, false),
+        ColSpec::new("Source", 20, false),
+        ColSpec::new("Finding", 0, false),
+    ];
+    let height = table.height.saturating_sub(1) as usize;
+    app.ir.th_selected = app.ir.th_selected.min(total - 1);
+    app.ir.th_offset = scroll_window(app.ir.th_offset, app.ir.th_selected, height, total);
+    let rows = app
+        .visible_threats()
+        .iter()
+        .skip(app.ir.th_offset)
+        .take(height)
+        .filter_map(|i| app.ir.threats.get(*i))
+        .map(|t| {
+            vec![
+                vec![muted(t.time.format("%H:%M:%S").to_string())],
+                vec![Span::styled(t.severity.label(), severity_style(t.severity))],
+                vec![muted(t.stage.label())],
+                vec![Span::raw(t.source.map_or_else(String::new, |s| s.to_string()))],
+                vec![Span::raw(t.title.clone())],
+            ]
+        })
+        .collect();
+    let mut scroll = 0;
+    app.hit.list_rows = draw_table(frame, table, &specs, rows, &mut scroll, Some(app.ir.th_selected - app.ir.th_offset));
+}
+
+/// One finding, and the attack it's part of.
+pub fn threat_detail(frame: &mut Frame, app: &mut App, screen: Rect) {
+    let rect = centered(screen, screen.width.saturating_sub(6), screen.height.saturating_sub(4));
+    frame.render_widget(Clear, rect);
+    let block = Block::bordered().title(Span::styled(" Finding ", Style::new().fg(ACCENT)));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let Some(t) = app.selected_threat() else { return };
+    let row = |k: &str, v: String| Line::from(vec![muted(format!(" {k:<10}")), Span::raw(v)]);
+    let mut lines = vec![
+        row("Time", t.time.format("%Y-%m-%d %H:%M:%S").to_string()),
+        row("Finding", t.title.clone()),
+        row("Rule", t.rule.to_string()),
+        row("Severity", t.severity.label().to_string()),
+        row("Stage", t.stage.label().to_string()),
+    ];
+    if let Some(s) = t.source {
+        lines.push(row("Source", s.to_string()));
+    }
+    if let Some(u) = &t.user {
+        lines.push(row("User", u.clone()));
+    }
+    if let Some(p) = t.pid {
+        lines.push(row("Process", p.to_string()));
+    }
+    if !t.evidence.is_empty() {
+        lines.push(row("Evidence", t.evidence.clone()));
+    }
+    let incident = app.ir.incidents.iter().find(|i| i.steps.iter().any(|s| s.time == t.time && s.rule == t.rule));
+    if let Some(i) = incident {
+        lines.push(Line::from(""));
+        lines.push(Line::from(heading(&format!(" {}", i.summary()))));
+        for s in &i.steps {
+            lines.push(Line::from(muted(format!(" {} {:<12} {}", s.time.format("%H:%M:%S"), s.stage.label(), s.title))));
+        }
+        if i.more > 0 {
+            lines.push(Line::from(muted(format!(" … and {} more", i.more))));
+        }
+        if i.joined_by_time {
+            lines.push(Line::from(muted(" Findings with no source joined this attack by timing alone: check them.")));
+        }
+    }
+    let scroll = app.perf_scroll.min(lines.len().saturating_sub(1)) as u16;
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)).wrap(ratatui::widgets::Wrap { trim: false }), inner);
+}
+
 /// One operation in full, with its call stack.
 pub fn activity_detail(frame: &mut Frame, app: &mut App, screen: Rect) {
     let rect = centered(screen, screen.width.saturating_sub(6), screen.height.saturating_sub(4));

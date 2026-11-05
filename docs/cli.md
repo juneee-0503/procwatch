@@ -114,3 +114,14 @@ Linux 和 macOS 写 pcap,Windows 用内置的 pktmon 写 pcapng,并且不支持 
 | 命令 | 说明 |
 |---|---|
 | `--capture-check [FILE]` | 检查 `capture.yml` 是否有效 |
+
+## 服务器防御
+
+| 命令 | 说明 |
+|---|---|
+| `--defense-check [FILE]` | 检查 `defense.yml`,显示监视什么、报警发到哪里 |
+| `--alarm-test` | 向每个目的地发送测试报警 |
+| `--unban-all` | 解除代理封禁的所有地址 |
+| `--history [METRIC] [--hours N] [--json]` | 查看保存的指标,不给指标名时列出全部 |
+
+详见[服务器防御](defense.md)。

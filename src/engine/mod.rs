@@ -16,6 +16,8 @@ use crate::host::logs::module::LogsModule;
 use crate::kernel::supervisor::Registry;
 use crate::kernel::{Bus, Kernel, KernelConfig};
 use crate::network::module::NetworkModule;
+use crate::performance::exporter::ExporterModule;
+use crate::performance::history::{self, HistoryModule};
 use crate::performance::module::{GpuModule, PerformanceModule};
 use crate::process::module::ProcessModule;
 use crate::process::trace_module::TraceModule;
@@ -30,6 +32,16 @@ pub fn registry(ctl: Arc<SamplerCtl>, watch: Vec<String>) -> Registry {
     r.add("performance", "scheduling, memory, disks, sensors, services", || Box::new(PerformanceModule::new()));
     r.add("gpu", "system GPU load", || Box::<GpuModule>::default());
     r.add("files", "file changes in watched folders", move || Box::new(FilesModule::new(watch.clone())));
+    match crate::defense::config::DefenseConfig::load() {
+        Ok(c) => {
+            let (alarms, exporter, watch) = (c.alarms.clone(), c.exporter.clone(), c);
+            r.add("defense", "attacks on this machine: logins, web, floods, compromise", move || Box::new(crate::defense::module::DefenseModule::new(watch.clone())));
+            r.add("alarm", "delivers alarms to configured destinations", move || Box::new(crate::defense::alarm::AlarmModule::new(alarms.clone())));
+            r.add("exporter", "Prometheus metrics endpoint", move || Box::new(ExporterModule::new(exporter.listen.clone(), exporter.token.clone())));
+        }
+        Err(e) => r.add("defense", "attacks on this machine: logins, web, floods, compromise", move || Box::new(crate::defense::module::DefenseModule::unusable(e.clone()))),
+    }
+    r.add("history", "keeps a month of metrics on disk", || Box::new(HistoryModule::new(history::default_dir())));
     r.add("logs", "system logs, read on request", || Box::new(LogsModule));
     r.add("trace", "event-driven process lifecycle tracing", || Box::<TraceModule>::default());
     r.add("activity", "file, registry and network operations by process", || Box::<ActivityModule>::default());

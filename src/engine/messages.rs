@@ -25,6 +25,10 @@ pub enum WorkerMsg {
     TrafficState(Result<&'static str, String>),
     /// The capture method while running; why it couldn't start otherwise.
     CaptureState(crate::activity::module::State),
+    /// A sign of attack on this machine.
+    Threat(Box<crate::defense::Threat>),
+    /// An attack that moved to a new stage.
+    Incident(Box<crate::defense::chain::Incident>),
     /// A metric alert rule fired or cleared.
     MetricAlert(crate::kernel::alerts::Alert),
     /// Scheduling, paging, disks, network errors, sensors.

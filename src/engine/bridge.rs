@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use super::messages::{Snapshot, WorkerMsg};
 use crate::activity::{self, Activity};
+use crate::defense::module as defense;
 use crate::files::module as files;
 use crate::files::watch::FsEvent;
 use crate::host::logs::{self, Entry};
@@ -49,6 +50,9 @@ pub fn subscribe(bus: &Bus) -> Receiver<Event> {
             a::STATE,
             ALERTS,
             MODULE_STATE,
+            defense::THREATS,
+            defense::INCIDENTS,
+            crate::defense::alarm::PROBLEM,
         ],
         16_384,
     )
@@ -93,6 +97,9 @@ fn convert(e: &Event) -> Option<WorkerMsg> {
         a::BATCH => WorkerMsg::Activity(e.get::<Vec<Activity>>()?.clone()),
         a::STATE => WorkerMsg::CaptureState(e.get::<a::State>()?.clone()),
         ALERTS => WorkerMsg::MetricAlert(e.get::<Alert>()?.clone()),
+        defense::THREATS => WorkerMsg::Threat(Box::new(e.get::<crate::defense::Threat>()?.clone())),
+        defense::INCIDENTS => WorkerMsg::Incident(Box::new(e.get::<crate::defense::chain::Incident>()?.clone())),
+        crate::defense::alarm::PROBLEM => WorkerMsg::Error(e.get::<String>()?.clone()),
         MODULE_STATE => {
             let s = e.get::<ModuleStatus>()?;
             match s.state {

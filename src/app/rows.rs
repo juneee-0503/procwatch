@@ -271,6 +271,7 @@ impl App {
             }
             Tab::Persistence => self.ir.persist_selected = step(self.ir.persist_selected, self.visible_persistence().len()),
             Tab::Activity => self.ir.ac_selected = step(self.ir.ac_selected, self.visible_activity().len()),
+            Tab::Defense => self.ir.th_selected = step(self.ir.th_selected, self.visible_threats().len()),
             Tab::Timeline => self.ir.tl_selected = step(self.ir.tl_selected, self.visible_timeline().len()),
             Tab::Logs if self.ir.artifacts_view => self.ir.art_selected = step(self.ir.art_selected, self.visible_artifacts().len()),
             Tab::Logs => self.ir.log_selected = step(self.ir.log_selected, self.visible_logs().len()),

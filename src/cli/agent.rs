@@ -14,7 +14,9 @@ use crate::app::App;
 use crate::common::emit::Emit;
 use crate::common::pacing::{self as sampler, SamplerCtl};
 use crate::process::actions::{apply_checked, Action, Outcome, Sig};
-use crate::response::agent::{verify, AgentPolicy, ChainLog, Cooldowns, Step};
+use crate::defense::ban;
+use crate::defense::config::DefenseConfig;
+use crate::response::agent::{verify, AgentPolicy, ChainLog, Cooldowns, Playbook, Step};
 use crate::response::enforce::{self, Mode, Policy};
 use crate::response::tamper::{self, Watched};
 
@@ -62,6 +64,55 @@ fn outcome_text(o: &Outcome) -> String {
         Outcome::AlreadyExited => "already exited".into(),
         Outcome::PidReused { .. } => "skipped: the pid now belongs to another process".into(),
         Outcome::Failed(e) => format!("failed: {e}"),
+    }
+}
+
+/// Carries out one playbook against one finding.
+struct Responder<'a> {
+    policy: &'a AgentPolicy,
+    spared: &'a HashSet<u32>,
+    allow: &'a [crate::defense::filter::Cidr],
+    bans: Vec<Instant>,
+    banned: bool,
+}
+
+impl Responder<'_> {
+    fn ban(&mut self, book: &Playbook, ip: Option<std::net::IpAddr>) -> String {
+        let Some(ip) = ip else { return "skipped: this finding has no source address".into() };
+        let (sessions, gateway) = ban::guarded();
+        if let Some(why) = ban::refused(ip, self.allow, &sessions, gateway) {
+            return format!("refused: {why}");
+        }
+        if self.policy.mode == Mode::Audit {
+            return format!("would ban {ip}");
+        }
+        self.bans.retain(|t| t.elapsed() < Duration::from_secs(3600));
+        if self.bans.len() >= ban::MAX_PER_HOUR {
+            return "refused: too many bans this hour; the source may be forged".into();
+        }
+        match ban::ban(ip, book.ban_seconds) {
+            Ok(()) => {
+                self.bans.push(Instant::now());
+                self.banned = true;
+                format!("banned {ip} for {} s", book.ban_seconds)
+            }
+            Err(e) => format!("failed: {e}"),
+        }
+    }
+
+    fn process(&self, step: Step, pid: Option<u32>, app: &App) -> String {
+        let Some(pid) = pid else { return "skipped: this finding has no process".into() };
+        let Some((start, exe)) = app.tree.get(pid).map(|n| (n.info.start_time_secs, n.info.exe_path.clone().unwrap_or_default())) else {
+            return "skipped: the process has gone".into();
+        };
+        if self.spared.contains(&pid) || enforce::is_essential(&exe) {
+            return "refused: the system or procwatch needs this process".into();
+        }
+        let signal = if step == Step::Kill { Sig::Kill } else { Sig::Stop };
+        match self.policy.mode {
+            Mode::Audit => format!("would {step:?}").to_lowercase(),
+            Mode::Enforce => outcome_text(&apply_checked(pid, start, Action::Signal(signal))),
+        }
     }
 }
 
@@ -160,6 +211,10 @@ pub fn worker(policy_path: &Path, log: Option<&Path>, minutes: Option<u64>) -> i
         }
     }
     let spared: HashSet<u32> = enforce::own_line();
+    let allow = DefenseConfig::load().and_then(|c| c.allowed()).unwrap_or_default();
+    let mut responder = Responder { policy: &policy, spared: &spared, allow: &allow, bans: Vec::new(), banned: false };
+    let mut threats_seen = app.ir.threat_seq;
+    let mut incident_stages: HashMap<u64, usize> = HashMap::new();
     let mut cooldowns = Cooldowns::default();
     let mut logged: HashMap<(String, u32), Instant> = HashMap::new();
     let end = minutes.map(|m| Instant::now() + Duration::from_secs(m.saturating_mul(60)));
@@ -197,6 +252,32 @@ pub fn worker(policy_path: &Path, log: Option<&Path>, minutes: Option<u64>) -> i
         if !lines.is_empty() {
             record(&mut chain, json!({ "kind": "activity", "events": lines }));
         }
+        for i in &app.ir.incidents {
+            if incident_stages.insert(i.id, i.stages.len()) != Some(i.stages.len()) {
+                record(&mut chain, json!({ "kind": "incident", "incident": i }));
+            }
+        }
+        let fresh = (app.ir.threat_seq - threats_seen).min(app.ir.threats.len() as u64) as usize;
+        threats_seen = app.ir.threat_seq;
+        let threats: Vec<_> = app.ir.threats.iter().rev().take(fresh).rev().cloned().collect();
+        for t in threats {
+            record(&mut chain, json!({ "kind": "threat", "threat": t }));
+            let books: Vec<_> = policy.matching(t.rule, &t.title, t.severity).cloned().collect();
+            for book in books {
+                for step in &book.steps {
+                    let result = match step {
+                        Step::Collect => {
+                            let facts = t.pid.map(|p| process_facts(&app, p));
+                            record(&mut chain, json!({ "kind": "collected", "playbook": book.id, "rule": t.rule, "process": facts, "source": t.source }));
+                            continue;
+                        }
+                        Step::Ban => responder.ban(&book, t.source),
+                        step => responder.process(*step, t.pid, &app),
+                    };
+                    record(&mut chain, json!({ "kind": "response", "playbook": book.id, "rule": t.rule, "step": step, "source": t.source, "pid": t.pid, "result": result }));
+                }
+            }
+        }
         let hits: Vec<_> = app.ir.det.store.items.iter().filter(|d| d.suppressed.is_none() && d.active).map(|d| (d.rule_id.clone(), d.rule_name.clone(), d.severity, d.pid, d.subject_label.clone())).collect();
         let now = Instant::now();
         for (rule, name, severity, pid, subject) in hits {
@@ -205,24 +286,20 @@ pub fn worker(policy_path: &Path, log: Option<&Path>, minutes: Option<u64>) -> i
                 record(&mut chain, json!({ "kind": "detection", "rule": rule, "name": name, "severity": severity.label(), "pid": pid, "subject": subject }));
             }
             let Some(pid) = pid else { continue };
-            let Some((start, exe)) = app.tree.get(pid).map(|n| (n.info.start_time_secs, n.info.exe_path.clone().unwrap_or_default())) else { continue };
+            let Some(start) = app.tree.get(pid).map(|n| n.info.start_time_secs) else { continue };
             let books: Vec<_> = policy.matching(&rule, &name, severity).cloned().collect();
             for book in books {
                 if !cooldowns.ready(&book, pid, start, now) {
                     continue;
                 }
-                let refused = (spared.contains(&pid) || enforce::is_essential(&exe)).then_some("the system or procwatch needs this process");
                 for step in &book.steps {
-                    let result = match (step, policy.mode, refused) {
-                        (Step::Collect, _, _) => {
+                    let result = match step {
+                        Step::Collect => {
                             record(&mut chain, json!({ "kind": "collected", "playbook": book.id, "rule": rule, "process": process_facts(&app, pid) }));
                             continue;
                         }
-                        (_, _, Some(why)) => format!("refused: {why}"),
-                        (Step::Suspend, Mode::Audit, _) => "would suspend".to_string(),
-                        (Step::Kill, Mode::Audit, _) => "would kill".to_string(),
-                        (Step::Suspend, Mode::Enforce, _) => outcome_text(&apply_checked(pid, start, Action::Signal(Sig::Stop))),
-                        (Step::Kill, Mode::Enforce, _) => outcome_text(&apply_checked(pid, start, Action::Signal(Sig::Kill))),
+                        Step::Ban => "skipped: this finding has no source address".to_string(),
+                        step => responder.process(*step, Some(pid), &app),
                     };
                     record(&mut chain, json!({ "kind": "response", "playbook": book.id, "rule": rule, "step": step, "pid": pid, "exe": exe, "result": result }));
                 }
@@ -230,6 +307,11 @@ pub fn worker(policy_path: &Path, log: Option<&Path>, minutes: Option<u64>) -> i
         }
     }
     drop(blocking);
+    if responder.banned {
+        if let Err(e) = ban::clear() {
+            eprintln!("agent: {e}: lift bans with procwatch --unban-all");
+        }
+    }
     record(&mut chain, json!({ "kind": "agent stopped", "reason": "time limit" }));
     0
 }

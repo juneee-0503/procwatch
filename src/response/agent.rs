@@ -24,6 +24,8 @@ pub enum Step {
     Collect,
     Suspend,
     Kill,
+    /// Refuse traffic from the attacker's address for a while.
+    Ban,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -45,6 +47,12 @@ pub struct Playbook {
     pub steps: Vec<Step>,
     #[serde(default = "default_cooldown")]
     pub cooldown_seconds: u64,
+    #[serde(default = "default_ban")]
+    pub ban_seconds: u64,
+}
+
+fn default_ban() -> u64 {
+    3600
 }
 
 fn default_cooldown() -> u64 {
@@ -102,7 +110,10 @@ impl AgentPolicy {
             // something a rule says is bad, not at whatever scores low.
             let acts = p.steps.iter().any(|s| *s != Step::Collect);
             if acts && p.when.rule.is_empty() && severity.is_none_or(|s| s < Severity::High) {
-                problems.push(format!("{}: suspend and kill need a named rule or min_severity of high or above", p.id));
+                problems.push(format!("{}: suspend, kill and ban need a named rule or min_severity of high or above", p.id));
+            }
+            if p.ban_seconds == 0 || p.ban_seconds > 7 * 86_400 {
+                problems.push(format!("{}: ban_seconds must be between 1 and a week", p.id));
             }
             if acts && p.when.rule.iter().any(|r| r.trim_matches('*').is_empty()) {
                 problems.push(format!("{}: a rule pattern of only wildcards would act on everything", p.id));

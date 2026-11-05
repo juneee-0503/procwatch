@@ -47,10 +47,11 @@ sudo procwatch --agent agent.yml --output /var/log/procwatch/agent.jsonl
 | 字段 | 默认 | 含义 |
 |---|---|---|
 | `id` | 必填 | 唯一名称 |
-| `when.rule` | 任意 | 规则 ID 或名称,支持 `*` 和 `?` |
+| `when.rule` | 任意 | 检测或[防御发现](defense.md)的规则 ID 或名称,支持 `*` 和 `?` |
 | `when.min_severity` | 无 | `info`、`low`、`medium`、`high`、`critical` |
 | `do` | 必填 | 步骤,按顺序执行 |
 | `cooldown_seconds` | 300 | 同一进程在这段时间内只处置一次 |
+| `ban_seconds` | 3600 | `ban` 的时长,最长一周 |
 
 步骤:
 
@@ -59,6 +60,7 @@ sudo procwatch --agent agent.yml --output /var/log/procwatch/agent.jsonl
 | `collect` | 把进程名、路径、SHA-256、父进程、命令行写入日志。审计模式也会执行 |
 | `suspend` | 挂起进程 |
 | `kill` | 强制结束进程 |
+| `ban` | 用 nftables 封禁来源地址,见[服务器防御](defense.md#自动封禁) |
 
 未知字段和未知步骤都会让策略被拒绝。
 
@@ -67,8 +69,8 @@ sudo procwatch --agent agent.yml --output /var/log/procwatch/agent.jsonl
 以下限制没有覆盖开关:
 
 - `when` 不能为空。
-- `suspend` 和 `kill` 必须指定规则,或者 `min_severity` 至少为 `high`。
-- `suspend` 和 `kill` 的规则模式不能只有通配符。
+- `suspend`、`kill` 和 `ban` 必须指定规则,或者 `min_severity` 至少为 `high`。
+- 这些步骤的规则模式不能只有通配符。
 - 代理不处置自身、自己的父进程链、init、Windows 内核进程,以及[拦截策略](enforcement.md)列出的系统必需文件。遇到时日志写 `refused`。
 - 处置前用 PID 和启动时间核对进程。PID 已被复用时跳过,日志写明原因。
 - 已被抑制的检测不触发剧本。
@@ -90,6 +92,8 @@ procwatch --agent-verify /var/log/procwatch/agent.jsonl
 | `agent started` | 启动,含模式、策略和实际生效的加固措施 |
 | `agent stopped` | 停止及原因 |
 | `detection` | 检测,同一规则和进程一小时记一次 |
+| `threat` | 防御模块的发现 |
+| `incident` | 攻击链进入新阶段 |
 | `collected` | `collect` 步骤的结果 |
 | `response` | `suspend`、`kill` 的结果,或 `would …`、`refused` |
 | `blocking` | 拦截策略的决策 |

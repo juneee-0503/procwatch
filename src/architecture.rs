@@ -8,6 +8,7 @@ const LAYERS: &[(&str, &[&str])] = &[
     ("common", &["kernel"]),
     ("network", &["common", "kernel"]),
     ("performance", &["common", "kernel"]),
+    ("defense", &["common", "kernel"]),
     ("process", &["common", "kernel", "network"]),
     ("files", &["common", "kernel", "process"]),
     ("host", &["common", "files", "kernel", "process"]),
@@ -15,10 +16,10 @@ const LAYERS: &[(&str, &[&str])] = &[
     ("detection", &["common", "files", "host", "network", "process"]),
     ("forensics", &["common", "detection", "files", "host", "network", "process"]),
     ("response", &["activity", "common", "files", "process"]),
-    ("engine", &["activity", "common", "files", "host", "kernel", "network", "performance", "process"]),
-    ("app", &["activity", "common", "detection", "engine", "files", "forensics", "host", "kernel", "network", "performance", "process"]),
-    ("ui", &["activity", "app", "common", "detection", "engine", "files", "forensics", "host", "kernel", "network", "performance", "process"]),
-    ("cli", &["activity", "app", "common", "detection", "engine", "files", "forensics", "host", "kernel", "network", "performance", "process", "response", "ui"]),
+    ("engine", &["activity", "common", "defense", "files", "host", "kernel", "network", "performance", "process"]),
+    ("app", &["activity", "common", "defense", "detection", "engine", "files", "forensics", "host", "kernel", "network", "performance", "process"]),
+    ("ui", &["activity", "app", "common", "defense", "detection", "engine", "files", "forensics", "host", "kernel", "network", "performance", "process"]),
+    ("cli", &["activity", "app", "common", "defense", "detection", "engine", "files", "forensics", "host", "kernel", "network", "performance", "process", "response", "ui"]),
 ];
 
 /// The part of a source file that isn't test code.

@@ -155,6 +155,14 @@ impl App {
             }
             v.push(item);
         }
+        for t in &self.ir.threats {
+            let item = TimelineItem::new(t.time, Basis::Observed, "defense", t.rule.to_string(), t.pid, t.source.map_or_else(String::new, |s| s.to_string()), t.title.clone());
+            v.push(match (t.pid, t.source) {
+                (Some(p), _) => item.about(Entity::Process(live_key(p))),
+                (None, Some(ip)) => item.about(Entity::Endpoint(ip.to_string())),
+                _ => item,
+            });
+        }
         for a in &self.alerts {
             v.push(TimelineItem::new(a.at, Basis::Observed, "alert", a.rule.clone(), Some(a.pid), a.name.clone(), a.message.clone()).about(Entity::Process(live_key(a.pid))));
         }

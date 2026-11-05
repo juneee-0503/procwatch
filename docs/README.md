@@ -15,6 +15,7 @@ procwatch 是一个终端里的进程分析与调查工具,支持 macOS、Linux 
 | 采集文件、注册表、网络操作,看每进程流量 | [活动采集](activity-capture.md) |
 | 阻止程序运行或联网 | [拦截与策略](enforcement.md) |
 | 长期运行,自动处置,防篡改日志 | [EDR 代理](edr.md) |
+| 发现服务器受攻击并报警 | [服务器防御](defense.md) |
 | 了解检测规则,编写自己的规则 | [检测](detection.md) |
 | 取证、证据链、离线分析 | [调查与证据](investigation.md) |
 | 判断它能否替代某个专业工具 | [与专业工具对比](comparison.md) |

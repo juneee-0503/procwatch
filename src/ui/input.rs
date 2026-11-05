@@ -101,7 +101,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             }
         }
         Mode::Health | Mode::ActivitySummary => app.mode = Mode::Normal,
-        Mode::ActivityDetail => match key.code {
+        Mode::ActivityDetail | Mode::ThreatDetail => match key.code {
             KeyCode::Down | KeyCode::Char('j') => app.perf_scroll += 1,
             KeyCode::Up | KeyCode::Char('k') => app.perf_scroll = app.perf_scroll.saturating_sub(1),
             KeyCode::PageDown => app.perf_scroll += 15,
@@ -219,7 +219,7 @@ fn normal_key(app: &mut App, key: KeyEvent) {
             app.mode = Mode::Modules { cursor: 0 };
             return;
         }
-        KeyCode::Char(c @ ('0'..='9' | '`')) if !app.detail_full => {
+        KeyCode::Char(c @ ('0'..='9' | '`' | '~')) if !app.detail_full => {
             if let Some(t) = Tab::ALL.iter().find(|t| t.key() == c) {
                 app.switch_tab(*t);
             }
@@ -375,6 +375,26 @@ fn normal_key(app: &mut App, key: KeyEvent) {
             }
             KeyCode::Esc => app.query.clear(),
             KeyCode::Char('e') => app.save_activity(),
+            _ => {}
+        },
+        Tab::Defense => match key.code {
+            KeyCode::Enter => {
+                if app.selected_threat().is_some() {
+                    app.perf_scroll = 0;
+                    app.mode = Mode::ThreatDetail;
+                }
+            }
+            KeyCode::Char('x') => {
+                app.ir.threats.clear();
+                app.ir.incidents.clear();
+                app.ir.th_selected = 0;
+            }
+            KeyCode::Char('P') => {
+                if let Some(pid) = app.selected_threat().and_then(|t| t.pid) {
+                    app.focus_pid(pid);
+                }
+            }
+            KeyCode::Esc => app.query.clear(),
             _ => {}
         },
         Tab::Timeline => match key.code {
@@ -996,6 +1016,15 @@ pub fn handle_mouse(app: &mut App, m: MouseEvent) {
                     if let Some(pid) = app.selected_file_pid() {
                         app.focus_pid(pid);
                     }
+                }
+            }
+        }
+        Tab::Defense => {
+            let idx = app.ir.th_offset + row;
+            if idx < app.visible_threats().len() {
+                app.ir.th_selected = idx;
+                if button == MouseButton::Left && app.register_click(m.row) {
+                    normal_key(app, KeyEvent::from(KeyCode::Enter));
                 }
             }
         }

@@ -276,6 +276,12 @@ pub struct Ir {
     /// Why the capture couldn't start.
     pub capture_error: Option<String>,
     pub capture_filter: crate::activity::filter::CaptureConfig,
+    pub threats: VecDeque<crate::defense::Threat>,
+    /// Threats ever received, so readers can tell what is new.
+    pub threat_seq: u64,
+    pub incidents: Vec<crate::defense::chain::Incident>,
+    pub th_selected: usize,
+    pub th_offset: usize,
     pub ac_selected: usize,
     pub ac_offset: usize,
     /// Sequence number of the oldest kept operation.
@@ -422,6 +428,11 @@ impl Ir {
             capture_method: None,
             capture_error: None,
             capture_filter: Default::default(),
+            threats: VecDeque::new(),
+            threat_seq: 0,
+            incidents: Vec::new(),
+            th_selected: 0,
+            th_offset: 0,
             ac_selected: 0,
             ac_offset: 0,
             ac_base: 0,
