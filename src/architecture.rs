@@ -16,8 +16,8 @@ const LAYERS: &[(&str, &[&str])] = &[
     ("response", &["activity", "common", "process"]),
     ("engine", &["activity", "common", "files", "host", "network", "performance", "process"]),
     ("app", &["activity", "common", "detection", "engine", "files", "forensics", "host", "network", "performance", "process"]),
-    ("ui", &["activity", "app", "common", "detection", "engine", "files", "forensics", "host", "network", "process"]),
-    ("cli", &["activity", "app", "common", "detection", "engine", "files", "forensics", "host", "network", "process", "response", "ui"]),
+    ("ui", &["activity", "app", "common", "detection", "engine", "files", "forensics", "host", "network", "performance", "process"]),
+    ("cli", &["activity", "app", "common", "detection", "engine", "files", "forensics", "host", "network", "performance", "process", "response", "ui"]),
 ];
 
 /// The part of a source file that isn't test code.

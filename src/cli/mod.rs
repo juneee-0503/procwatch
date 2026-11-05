@@ -2,6 +2,7 @@
 //! below; the interactive one lives in `ui::terminal`.
 
 pub mod coverage;
+pub mod metrics;
 pub mod monitor;
 pub mod selftest;
 pub mod soak;
@@ -50,6 +51,7 @@ Usage:
   procwatch --enforce POLICY [--output FILE] [--minutes N]
                                     apply a policy (audit mode only logs); needs root/administrator.
                                     Everything ends when procwatch exits. See docs/enforcement.md
+  procwatch --metrics [--json]      one reading of scheduling, memory, disks, network, sensors, services
   procwatch --coverage [--json]     list the MITRE ATT&CK techniques the rules look for
   procwatch --help";
 
@@ -156,6 +158,7 @@ pub fn main() -> anyhow::Result<()> {
             }
             std::process::exit(enforce::run(std::path::Path::new(file), value("--output").map(std::path::Path::new), minutes.and_then(Result::ok)));
         }
+        Some("--metrics") => std::process::exit(metrics::run(args.iter().any(|a| a == "--json"))),
         Some("--coverage") => std::process::exit(coverage::run(args.iter().any(|a| a == "--json"))),
         Some("--monitor") => {
             let value = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1));

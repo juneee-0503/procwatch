@@ -4,6 +4,8 @@ use std::collections::HashMap;
 
 use crate::network::Connection;
 use crate::performance::gpu::GpuSnapshot;
+use crate::performance::metrics::Metrics;
+use crate::performance::services::Service;
 use crate::process::actions::Action;
 use crate::process::inspect::DeepInfo;
 use crate::process::{ProcessTree, SystemStats};
@@ -17,6 +19,10 @@ pub struct Snapshot {
 pub enum WorkerMsg {
     Snapshot(Box<Snapshot>),
     Gpu(GpuSnapshot),
+    /// Scheduling, paging, disks, network errors, sensors.
+    Metrics(Box<Metrics>),
+    /// System services, or why they couldn't be listed.
+    Services(Result<Vec<Service>, String>),
     Inspected { pid: u32, start_time: u64, info: Box<DeepInfo> },
     /// A file change in a watched folder.
     Fs(crate::files::watch::FsEvent),

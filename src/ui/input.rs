@@ -413,7 +413,18 @@ fn normal_key(app: &mut App, key: KeyEvent) {
                 _ => {}
             }
         }
-        Tab::Performance => {}
+        Tab::Performance => match key.code {
+            KeyCode::Char('m') | KeyCode::Tab => {
+                app.perf_view = (app.perf_view + 1) % 3;
+                app.perf_scroll = 0;
+            }
+            KeyCode::Down => app.perf_scroll += 1,
+            KeyCode::Up => app.perf_scroll = app.perf_scroll.saturating_sub(1),
+            KeyCode::PageDown => app.perf_scroll += 20,
+            KeyCode::PageUp => app.perf_scroll = app.perf_scroll.saturating_sub(20),
+            KeyCode::Home => app.perf_scroll = 0,
+            _ => {}
+        },
     }
 }
 

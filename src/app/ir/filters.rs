@@ -113,6 +113,20 @@ impl Filterable for crate::activity::Activity {
     }
 }
 
+impl Filterable for crate::performance::services::Service {
+    fn field(&self, name: &str) -> Option<Vec<String>> {
+        match name {
+            "name" => Some(vec![self.name.clone()]),
+            "state" => Some(vec![self.state.label().to_string()]),
+            "pid" => self.pid.map(|p| vec![p.to_string()]),
+            _ => None,
+        }
+    }
+    fn text(&self) -> String {
+        format!("{} {} {}", self.name, self.state.label(), self.detail)
+    }
+}
+
 impl Filterable for FsEvent {
     fn field(&self, name: &str) -> Option<Vec<String>> {
         match name {

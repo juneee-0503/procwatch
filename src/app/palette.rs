@@ -26,6 +26,7 @@ pub static ENTRIES: &[Entry] = &[
     e("Go to Trace", None, '8', "8"),
     e("Go to Detect (detections, alerts, rules)", None, '9', "9"),
     e("Go to Case", None, '0', "0"),
+    e("System metrics and services (cycle views)", Some(Tab::Performance), 'm', "Perf m"),
     e("Go to Activity (file, registry and network operations)", None, '`', "`"),
     e("Start or stop activity capture", Some(Tab::Activity), 'c', "Act c"),
     e("Clear captured activity", Some(Tab::Activity), 'x', "Act x"),

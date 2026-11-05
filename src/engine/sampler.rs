@@ -11,6 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::messages::{Snapshot, WorkerMsg};
+use crate::common::emit::Emit;
 use crate::common::panic_text;
 use crate::network::{self, Connection};
 use crate::performance::gpu;
@@ -74,6 +75,7 @@ pub fn drain_for<T>(rx: &mpsc::Receiver<T>, budget: Duration, mut handle: impl F
 }
 
 pub fn spawn_sampler(tx: Sender<WorkerMsg>, ctl: Arc<SamplerCtl>) -> std::io::Result<()> {
+    crate::performance::metrics::start(Emit::to(tx.clone(), WorkerMsg::Metrics), Emit::to(tx.clone(), WorkerMsg::Services));
     let gpu_tx = tx.clone();
     thread::Builder::new()
         .name("sampler".into())

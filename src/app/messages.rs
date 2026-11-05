@@ -12,6 +12,11 @@ impl App {
                 self.on_snapshot(*snap);
             }
             WorkerMsg::Gpu(g) => self.gpu = Some(g),
+            WorkerMsg::Metrics(m) => {
+                self.metrics = Some(m);
+                self.metrics_at = Some(Instant::now());
+            }
+            WorkerMsg::Services(s) => self.services = Some(s),
             WorkerMsg::Inspected { pid, start_time, info } => {
                 self.deep_pending.remove(&pid);
                 let mut info = *info;

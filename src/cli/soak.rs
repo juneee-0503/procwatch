@@ -137,6 +137,8 @@ fn msg_name(m: &crate::engine::messages::WorkerMsg) -> &'static str {
         Memory { .. } => "msg: Memory",
         Deep(_) => "msg: Deep",
         Dns { .. } => "msg: Dns",
+        Metrics(_) => "msg: Metrics",
+        Services(_) => "msg: Services",
         Activity(_) => "msg: Activity",
         Traffic(_) => "msg: Traffic",
         StaticLibs { .. } => "msg: StaticLibs",
@@ -234,6 +236,7 @@ pub fn run(minutes: u64) -> i32 {
         // Render a different page each second, like a user clicking around.
         if last_draw.elapsed() >= Duration::from_secs(1) {
             app.tab = tabs[(frames as usize) % tabs.len()];
+            app.perf_view = (frames % 3) as u8;
             if frames % 7 == 3 {
                 if let Some(c) = child_pid {
                     phase("opening the workspace");

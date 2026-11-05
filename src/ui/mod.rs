@@ -262,7 +262,7 @@ fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
             Tab::Logs => vec![h("x", "artifacts"),h("↑↓", "select"), h("enter", "process"), h("w", "time window"), h("a", "important/all"), h("r", "reload"), h("m", "finding"), h("/", "filter")],
             Tab::Case if app.ir.case.is_none() => vec![h("n", "new case"), h("?", "help")],
             Tab::Case => vec![h("I", "IOC sweep"), h("Y", "content scan"), h("X", "STIX/MISP/ECS"), h("c", "collect"), h("s", "seal"), h("v", "verify"), h("a", "note"), h("C", "conclusion"), h("i", "isolation plan"), h("e", "export report"), h("tab", "findings/quarantine")],
-            Tab::Performance => vec![h("1-9 0", "pages"), h("p", "pause"), h("?", "help"), h("q", "quit")],
+            Tab::Performance => vec![h("m", "charts / metrics / services"), h("↑↓", "scroll"), h("p", "pause"), h("?", "help"), h("q", "quit")],
             Tab::Trace if app.trace.is_none() => vec![h("1", "processes"), h("?", "help"), h("q", "quit")],
             Tab::Trace => {
                 let running = app.trace.as_ref().is_some_and(|t| t.is_running());
