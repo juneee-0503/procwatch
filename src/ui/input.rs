@@ -181,6 +181,19 @@ fn normal_key(app: &mut App, key: KeyEvent) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
+    // The Performance page scrolls instead of selecting.
+    if app.tab == Tab::Performance && matches!(key.code, KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End | KeyCode::Char('j' | 'k' | 'g' | 'G')) {
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => app.perf_scroll += 1,
+            KeyCode::Up | KeyCode::Char('k') => app.perf_scroll = app.perf_scroll.saturating_sub(1),
+            KeyCode::PageDown => app.perf_scroll += 20,
+            KeyCode::PageUp => app.perf_scroll = app.perf_scroll.saturating_sub(20),
+            KeyCode::Home | KeyCode::Char('g') => app.perf_scroll = 0,
+            _ => app.perf_scroll = usize::MAX / 2,
+        }
+        return;
+    }
+
     // Keys that work on every page.
     match key.code {
         KeyCode::Char('q') => {
@@ -435,11 +448,6 @@ fn normal_key(app: &mut App, key: KeyEvent) {
                 app.perf_view = (app.perf_view + 1) % 3;
                 app.perf_scroll = 0;
             }
-            KeyCode::Down => app.perf_scroll += 1,
-            KeyCode::Up => app.perf_scroll = app.perf_scroll.saturating_sub(1),
-            KeyCode::PageDown => app.perf_scroll += 20,
-            KeyCode::PageUp => app.perf_scroll = app.perf_scroll.saturating_sub(20),
-            KeyCode::Home => app.perf_scroll = 0,
             _ => {}
         },
     }
@@ -1013,6 +1021,22 @@ pub fn handle_mouse(app: &mut App, m: MouseEvent) {
 #[cfg(test)]
 mod key_tests {
     use super::*;
+
+    #[test]
+    fn the_performance_page_scrolls_with_the_arrow_keys() {
+        let mut app = app::tests_support::app();
+        app.tab = Tab::Performance;
+        let press = |app: &mut App, k| handle_key(app, KeyEvent::new(k, KeyModifiers::NONE));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.perf_scroll, 2);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.perf_scroll, 1);
+        press(&mut app, KeyCode::Home);
+        assert_eq!(app.perf_scroll, 0);
+        press(&mut app, KeyCode::Char('m'));
+        assert_eq!((app.perf_view, app.perf_scroll), (1, 0));
+    }
 
     /// Navigation only: no key here reaches an action, export or confirm.
     #[test]

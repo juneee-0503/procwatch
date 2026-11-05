@@ -23,7 +23,9 @@ const LAYERS: &[(&str, &[&str])] = &[
 
 /// The part of a source file that isn't test code.
 fn production(source: &str) -> &str {
-    source.split("#[cfg(test)]\nmod ").next().unwrap_or(source)
+    // Checkouts on Windows may have CRLF line endings.
+    let end = ["#[cfg(test)]\nmod ", "#[cfg(test)]\r\nmod "].iter().filter_map(|m| source.find(m)).min();
+    &source[..end.unwrap_or(source.len())]
 }
 
 fn violations() -> Vec<String> {
