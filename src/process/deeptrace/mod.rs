@@ -302,11 +302,15 @@ mod tests {
     fn sees_short_lived_children() {
         let (events, rx) = Emit::channel();
         let w = Watcher::start(Output { events, errors: Emit::new(|_| true) }).expect("watcher");
-        let mut sh = std::process::Command::new("/bin/sh")
-            .args(["-c", if cfg!(target_os = "macos") { "sleep 0.3; for i in 1 2 3 4 5; do /usr/bin/true; done; sleep 0.3" } else { "sleep 0.3; for i in 1 2 3 4 5; do sleep 0.1; done; sleep 0.3" }])
-            .spawn()
-            .unwrap();
-        w.watch(sh.id());
+        // It waits for a line, so the watch is certainly in place before the
+        // first child: a busy machine can otherwise delay it past them.
+        let script = if cfg!(target_os = "macos") { "read go; for i in 1 2 3 4 5; do /usr/bin/true; done; sleep 0.3" } else { "read go; for i in 1 2 3 4 5; do sleep 0.1; done; sleep 0.3" };
+        let mut sh = std::process::Command::new("/bin/sh").args(["-c", script]).stdin(std::process::Stdio::piped()).spawn().unwrap();
+        assert!(w.watch_sync(sh.id()), "watcher attached");
+        {
+            use std::io::Write;
+            sh.stdin.take().unwrap().write_all(b"go\n").unwrap();
+        }
         let _ = sh.wait();
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         let mut spawns = 0;

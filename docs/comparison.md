@@ -10,6 +10,7 @@
 | 网络连接 | TCPView | 有 | 无抓包 |
 | 每进程流量 | Nethogs、资源监视器 | 有 | Linux 仅 TCP,Windows 回环未计入 |
 | 自启动项 | Autoruns | 有,三平台 | Autoruns 覆盖的类别更多 |
+| 系统指标 | iostat、vmstat、PerfMon | 调度、磁盘队列、丢包、温度、服务 | macOS 无切换和队列深度;无长期历史 |
 | 进程事件日志 | Sysmon | `--monitor` | 无配置化过滤,无驱动级可靠性 |
 | 拦截 | EDR | Linux 文件、Windows 网络 | 无 Windows 文件和注册表拦截,无防篡改 |
 | 内容规则 | YARA | 子集 | 无模块、无完整语法 |

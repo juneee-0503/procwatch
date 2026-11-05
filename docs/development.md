@@ -44,6 +44,10 @@ PW_FUZZ_ITERATIONS=3000 cargo test --release --locked fuzz_ -- --ignored
 - 新增后台来源必须考虑:数据量上限、丢失如何显示、线程崩溃如何处理、特权不足时说什么。
 - 主线程不做阻塞工作。
 
+## 新增模块
+
+见[模块与微内核](modules.md)。
+
 ## 新增检测规则
 
 - 主机规则:加到 `triage.rs` 的 `RULES`,并同步 [检测文档](detection.md)。

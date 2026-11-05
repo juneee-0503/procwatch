@@ -6,7 +6,7 @@ Process Explorer 的精简终端版。附带一个 Linux 后端作为"自检用�
 
 ## 文档
 
-完整文档在 [docs/](docs/README.md):[快速开始](docs/getting-started.md)、[用户指南](docs/user-guide.md)、[命令行参考](docs/cli.md)、[活动采集](docs/activity-capture.md)、[拦截与策略](docs/enforcement.md)、[检测](docs/detection.md)、[调查与证据](docs/investigation.md)、[与专业工具对比](docs/comparison.md)、[故障排查](docs/troubleshooting.md)、[架构](docs/architecture.md)、[开发](docs/development.md)。
+完整文档在 [docs/](docs/README.md):[快速开始](docs/getting-started.md)、[用户指南](docs/user-guide.md)、[命令行参考](docs/cli.md)、[系统指标](docs/metrics.md)、[模块与微内核](docs/modules.md)、[活动采集](docs/activity-capture.md)、[拦截与策略](docs/enforcement.md)、[检测](docs/detection.md)、[调查与证据](docs/investigation.md)、[与专业工具对比](docs/comparison.md)、[故障排查](docs/troubleshooting.md)、[架构](docs/architecture.md)、[开发](docs/development.md)。
 
 ## 构建状态
 
@@ -126,46 +126,23 @@ API**:
 
 ## 项目结构
 
+微内核加插件模块。结构、依赖规则和新增模块的方法见 [docs/architecture.md](docs/architecture.md) 和 [docs/modules.md](docs/modules.md)。
+
 ```
 src/
-├── main.rs              入口、事件循环、按键/鼠标处理、终端恢复
-├── app.rs               应用状态:页面、视图、行/分组、菜单与确认、详情、活动日志、查找
-├── columns.rs           进程表列定义
-├── config.rs            设置文件(key = value,原子写入)
-├── export.rs            CSV 导出
-├── filter.rs          统一过滤语法(字段、排除、端口简写)
-├── intel.rs           可执行文件签名/哈希缓存(4 个后台线程)
-├── triage.rs          风险评分与理由
-├── ioc.rs             IOC 指标解析与扫描
-├── binfmt.rs          可执行文件头解析、熵值、字符串指标
-├── persistence.rs     自启动项枚举与可疑标记(三平台)
-├── fileinfo.rs        文件哈希、类型、元数据、签名、下载来源
-├── fswatch.rs         文件变更监控
-├── dns.rs             反向解析、DNS 服务器、DNS 缓存
-├── logs.rs            系统事件日志
-├── memory.rs          内存布局与异常模块(不读取内存内容)
-├── case.rs            案件、取证链、证据清单与校验、报告导出
-├── contain.rs         文件隔离/恢复、网络隔离脚本生成
-├── app_ir.rs          调查状态:时间线、证据、发现、隔离
-├── baseline.rs        基线快照、对比、命令行文本输出
-├── trace.rs           行为追踪:时间线、汇总、Markdown/JSON 报告
-├── rules.rs           告警规则解析与求值、内存增长斜率
-├── os.rs                剪贴板、在文件管理器中显示、查找打开某文件的进程
-├── sampler.rs           后台线程:采样 / GPU / 深度检查 / 批量操作 / 查找
-├── network.rs           每进程网络连接
-├── gpu.rs               GPU 占用(macOS 如实标注不可用)
-├── process/
-│   ├── mod.rs           进程快照、系统统计、进程树展开
-│   ├── native.rs        原生调用:线程、nice、CPU 时间、内存 footprint、线程列表、改优先级
-│   └── actions.rs       信号 / 挂起恢复 / 优先级
-├── inspect/             深度检查(线程、打开文件、环境变量、模块、签名),模块列表按需读取
-└── ui/
-    ├── mod.rs           标题栏、提示栏
-    ├── processes.rs     工具栏、进程表(响应式列)
-    ├── details.rs       详情面板 / 全屏详情
-    ├── pages.rs         Performance / Network / Activity 页
-    ├── overlays.rs      操作菜单、确认框、选项、帮助、查找
-    └── widgets.rs       主题、表格、曲线、文本工具
+├── kernel/        微内核:总线、生命周期、看门狗、数据模型、配置、告警
+├── common/        路径、命令运行器、文本、节奏控制
+├── process/       进程、检查、深度追踪、句柄
+├── network/       连接、DNS、流量
+├── files/         文件监视、分析、内容规则
+├── host/          自启动项、日志、工件
+├── performance/   系统指标、服务、GPU
+├── activity/      操作级采集
+├── detection/     检测引擎
+├── forensics/     案件、证据、历史、导出
+├── response/      拦截
+├── engine/        模块注册、到界面的桥接
+├── app/  ui/  cli/
 ```
 
 ## 构建
@@ -385,7 +362,7 @@ cargo build --release
 与专业工具相比仍然没有的:Windows 文件和注册表拦截、调用栈、完整的 YARA 语法。内存取证和在线信誉查询是有意不做的。
 
 ### 仍未完成 / 未验证
-- Windows 上 sysinfo 的进程列表刷新平均约 1.2 秒、最长 5.3 秒,所以采样实际只有约每 2 秒一次。它在后台线程,不影响界面。原因未定位;曾怀疑是重试读取受保护进程,但数据否定了这个判断。界面卡顿已解决:单次快照最长从 3186 ms 降到约 100 ms。
+- Windows 上 sysinfo 的进程列表刷新不稳定:同样的代码在不同 CI 运行里平均 70 ms 到 1.2 秒,最长约 5 秒,原因未定位。它在模块线程里,不影响界面。
 - Windows 上 soak 早先多次跑不到终点。为消息循环加上时间预算、优化 `cluster` 后跑通,但两项改动是一起上线的,没有单独验证究竟是哪一项解决了问题。
 - Linux 的精确进程事件(netlink)需要 root 或 CAP_NET_ADMIN。CI 以 root 实测 0 ms 档为 4/4,普通用户回退轮询时为 0–1/4。
 - Windows 上自测输出没有标明实际用的是 ETW 还是 ToolHelp;~30 ms 进程 4/4 被抓到说明很可能是 ETW,但这是推断。

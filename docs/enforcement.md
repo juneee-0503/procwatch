@@ -64,7 +64,7 @@ sudo procwatch --enforce policy.yml --output decisions.jsonl
 | `process` | 否 | 只对这些进程名生效 |
 | `note` | 否 | 说明 |
 
-未知字段会导致策略被拒绝,防止拼写错误让规则悄悄失效。Windows 上路径不区分大小写。Windows 的 `connect` 规则必须是一个具体的可执行文件路径,不能用通配符,因为 WFP 按文件标识匹配。
+策略文件不能被其他用户写入,否则启动时拒绝。未知字段会导致策略被拒绝,防止拼写错误让规则悄悄失效。Windows 上路径不区分大小写。Windows 的 `connect` 规则必须是一个具体的可执行文件路径,不能用通配符,因为 WFP 按文件标识匹配。
 
 路径是解析后的真实路径。macOS 上 `/tmp` 的真实路径是 `/private/tmp`。
 
@@ -109,9 +109,9 @@ sudo procwatch --enforce policy.yml --output decisions.jsonl
 | 能力 | 状态 |
 |---|---|
 | 规则校验、模式匹配 | 单元测试 |
-| 事后终止 | macOS 真机(274 ms 内结束);Linux、Windows 待 CI |
-| Linux 执行拦截 | 待 CI:`--selftest` 以 root 测试匹配程序被拒、其他程序照常运行、结束后恢复 |
-| Windows 网络拦截 | 待 CI:`--selftest` 测试 curl 连接在过滤器前后的变化 |
+| 事后终止 | macOS 真机、Linux CI 实测(50 ms);Windows 的测试修复后待 CI |
+| Linux 执行拦截 | CI 实测通过:审计模式放行并记录;强制模式匹配程序被拒、其他程序照常运行;结束后恢复 |
+| Windows 网络拦截 | CI 实测通过:curl 连接在过滤器生效期间失败,结束后恢复 |
 
 ## Windows 文件、注册表和进程的事前拦截
 

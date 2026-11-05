@@ -42,6 +42,7 @@ procwatch --monitor [--output FILE] [--minutes N] [--activity]
 - 进程事件带 `process.hash.sha256`。哈希在后台计算,一个可执行文件的头几条事件可能还没有。
 - `--activity` 增加文件、注册表和网络操作,需要特权。无法启动时退出码 2,不会静默降级。
 - 读取端关闭(如 `| head`)时正常退出,退出码 0。
+- 每 30 秒写入一条 `procwatch.metrics` 数据集的系统指标。
 
 示例:
 
@@ -49,6 +50,15 @@ procwatch --monitor [--output FILE] [--minutes N] [--activity]
 sudo procwatch --monitor --activity --output /var/log/procwatch.jsonl
 procwatch --monitor | jq 'select(.event.category[0]=="network")'
 ```
+
+## 系统与模块
+
+| 命令 | 说明 |
+|---|---|
+| `--metrics [--json]` | 取一次系统指标和服务状态,见[系统指标](metrics.md) |
+| `--modules [--json]` | 列出模块和它们在本系统上的能力,不启动采集 |
+| `--module-enable NAME` | 下次启动时运行该模块 |
+| `--module-disable NAME` | 下次启动时不运行该模块 |
 
 ## 拦截
 
