@@ -41,6 +41,8 @@ pub struct Report {
     pub own_memory_mb: Option<f64>,
     /// What each capture source saw of a known workload.
     pub activity: Vec<String>,
+    pub packets: Vec<String>,
+    pub boot_log: Vec<String>,
     pub notes: Vec<String>,
 }
 
@@ -269,9 +271,10 @@ fn activity_workload(dir: &std::path::Path) {
         .status();
     #[cfg(windows)]
     {
-        let _ = crate::common::command::tool("cmd").args(["/C", "echo x> a.txt & type a.txt > NUL & ren a.txt b.txt & del b.txt"]).current_dir(dir).status();
+        let _ = crate::common::command::tool("cmd").args(["/C", "echo x> a.txt & type a.txt > NUL & ren a.txt b.txt & del b.txt & type a.txt 2> NUL"]).current_dir(dir).status();
         let key = r"HKCU\Software\procwatch-selftest";
         let _ = crate::common::command::tool("reg").args(["add", key, "/v", "probe", "/d", "1", "/f"]).stdout(std::process::Stdio::null()).status();
+        let _ = crate::common::command::tool("reg").args(["query", key]).stdout(std::process::Stdio::null()).status();
         let _ = crate::common::command::tool("reg").args(["delete", key, "/f"]).stdout(std::process::Stdio::null()).status();
     }
 }
@@ -283,7 +286,8 @@ fn activity_probe(r: &mut Report) {
         return;
     }
     let (tx, rx) = Emit::channel();
-    match crate::activity::start(tx) {
+    let config = crate::activity::filter::CaptureConfig { registry_reads: true, stacks: true, ..Default::default() };
+    match crate::activity::start(tx, config) {
         Err(e) => r.activity.push(format!("capture: not available ({e})")),
         Ok(c) => {
             std::thread::sleep(Duration::from_millis(700));
@@ -292,11 +296,18 @@ fn activity_probe(r: &mut Report) {
             let needle = dir.display().to_string().to_lowercase();
             let until = Instant::now() + Duration::from_secs(3);
             let mut unnamed: Vec<String> = Vec::new();
+            let (mut stack, mut statuses): (Option<Vec<String>>, std::collections::BTreeSet<String>) = (None, Default::default());
             while Instant::now() < until {
                 if let Ok(batch) = rx.recv_timeout(Duration::from_millis(100)) {
                     for a in batch {
                         let path = a.path.to_lowercase();
                         let ours = path.contains(&needle) || path.contains("procwatch-selftest") || path.ends_with("a.txt") || path.ends_with("b.txt");
+                        if ours {
+                            statuses.extend(a.status.clone());
+                            if stack.is_none() {
+                                stack = a.stack.as_ref().map(|s| s.iter().take(6).cloned().collect());
+                            }
+                        }
                         if ours && matches!(a.class, Class::File | Class::Registry) {
                             *ops.entry(format!("{} {}", a.class.label(), a.op)).or_default() += a.count;
                         }
@@ -306,6 +317,15 @@ fn activity_probe(r: &mut Report) {
                         }
                     }
                 }
+            }
+            r.activity.push(format!("results seen: {}", if statuses.is_empty() { "none".to_string() } else { statuses.into_iter().collect::<Vec<_>>().join(", ") }));
+            r.activity.push(match stack {
+                Some(s) => format!("call stack sample: {}", s.join(" < ")),
+                None => "call stack sample: none".to_string(),
+            });
+            #[cfg(windows)]
+            if let Some(s) = crate::common::etw::session_stats("procwatch-activity") {
+                r.activity.push(format!("ETW session lost {} events, {} buffers", s.events_lost, s.buffers_lost));
             }
             if !unnamed.is_empty() {
                 r.activity.push(format!("operations without a full path: {}", unnamed.join(", ")));
@@ -571,6 +591,76 @@ fn own_cost(r: &mut Report) {
     }
 }
 
+/// Capture loopback traffic with a known payload and find it in the file.
+fn packet_probe(r: &mut Report) {
+    use crate::network::pcap;
+    use std::io::{Read, Write};
+    let Ok(dir) = crate::common::paths::private_temp_dir("selftest-pcap") else { return };
+    let path = dir.join("capture.pcap");
+    let o = pcap::Options {
+        seconds: 3,
+        interface: if cfg!(target_os = "macos") { Some("lo0".into()) } else if cfg!(target_os = "linux") { Some("lo".into()) } else { None },
+        ..Default::default()
+    };
+    const MARK: &[u8] = b"procwatch-packet-selftest-marker";
+    let worker = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(800));
+        let Ok(l) = std::net::TcpListener::bind("127.0.0.1:0") else { return };
+        let Ok(a) = l.local_addr() else { return };
+        if let (Ok(mut c), Ok((mut s, _))) = (std::net::TcpStream::connect(a), l.accept()) {
+            let _ = c.write_all(MARK);
+            let _ = s.read(&mut [0; 64]);
+        }
+    });
+    let result = pcap::run_capture(&path, &o);
+    let _ = worker.join();
+    match result {
+        Err(e) => r.packets.push(format!("not available ({e})")),
+        Ok(s) => {
+            let found = std::fs::read(&path).is_ok_and(|b| memchr::memmem::find(&b, MARK).is_some());
+            r.packets.push(format!("{} packets, {} bytes, dropped {:?}, test payload found in the file: {}", s.packets, s.bytes, s.dropped, if found { "yes" } else { "NO" }));
+        }
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Writes the same kind of log a boot session does, without restarting.
+#[cfg(windows)]
+fn boot_log_probe(r: &mut Report) {
+    use crate::activity::boot;
+    use crate::activity::probes::windows::{read_etl, KERNEL_FILE, KERNEL_PROCESS, KERNEL_REGISTRY};
+    use crate::common::command::tool;
+    let enabled = boot::run("enable", None, false) == 0;
+    let status = crate::common::command::tool("reg").args(["query", "HKLM\\SYSTEM\\CurrentControlSet\\Control\\WMI\\Autologger\\procwatch-boot"]).output().is_ok_and(|o| o.status.success());
+    let disabled = boot::run("disable", None, false) == 0;
+    r.boot_log.push(format!("configure: {enabled}, present: {status}, removed: {disabled}"));
+    let Ok(dir) = crate::common::paths::private_temp_dir("selftest-boot") else { return };
+    let etl = dir.join("t.etl");
+    let name = "procwatch-selftest-boot";
+    let etl_text = etl.to_string_lossy().into_owned();
+    let providers = format!("{{{KERNEL_FILE}}}");
+    let started = tool("logman").args(["start", name, "-o", &etl_text, "-p", &providers, &format!("{:#x}", boot::BOOT_FILE_KEYWORDS), "0x4", "-ets"]).output();
+    if !started.is_ok_and(|o| o.status.success()) {
+        r.boot_log.push("log reading: logman couldn't start a session".into());
+        let _ = (KERNEL_PROCESS, KERNEL_REGISTRY);
+        return;
+    }
+    let marker = dir.join("boot-marker.txt");
+    let _ = std::fs::write(&marker, "x");
+    std::thread::sleep(Duration::from_millis(1500));
+    let _ = tool("logman").args(["stop", name, "-ets"]).output();
+    let (tx, rx) = Emit::channel();
+    match read_etl(&etl, tx) {
+        Err(e) => r.boot_log.push(format!("log reading: {e}")),
+        Ok(_) => {
+            let events: Vec<_> = rx.try_iter().flatten().collect();
+            let hit = events.iter().any(|a| a.path.contains("boot-marker"));
+            r.boot_log.push(format!("log reading: {} operations, test file found: {}", events.len(), if hit { "yes" } else { "NO" }));
+        }
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 pub fn run(json: bool) -> i32 {
     let (platform, verification) = crate::engine::health::platform_status();
     let mut r = Report {
@@ -600,6 +690,9 @@ pub fn run(json: bool) -> i32 {
     enforce_block_probe(&mut r);
     #[cfg(windows)]
     handle_probe(&mut r);
+    packet_probe(&mut r);
+    #[cfg(windows)]
+    boot_log_probe(&mut r);
     own_cost(&mut r);
     if json {
         println!("{}", serde_json::to_string_pretty(&r).unwrap_or_default());
@@ -621,6 +714,10 @@ pub fn run(json: bool) -> i32 {
         println!("  target left running:            {}", yn(r.pid_reuse_target_survived));
         println!("  correct (pid, start) acted on:  {}", yn(r.checked_action_worked));
         println!("\nFile change notification latency: {}", r.file_event_latency_ms.map(|m| format!("{m} ms")).unwrap_or_else(|| "no event within 5 s".into()));
+        println!("\nPacket capture:");
+        r.packets.iter().for_each(|l| println!("  {l}"));
+        println!("\nBoot logging (configuration and log reading; not a real restart):");
+        r.boot_log.iter().for_each(|l| println!("  {l}"));
         println!("\nActivity sources:");
         for l in &r.activity {
             println!("  {l}");

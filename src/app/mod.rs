@@ -381,6 +381,8 @@ pub enum Mode {
     LaunchConfirm(Vec<String>),
     /// Most active processes, targets and operations in the capture.
     ActivitySummary,
+    /// One captured operation in full, with its call stack.
+    ActivityDetail,
     /// Modules: what runs, what each supports here, turning them on and off.
     Modules { cursor: usize },
     /// Command palette (`:` or ctrl+k).
@@ -1154,7 +1156,7 @@ mod tests {
     fn every_page_and_overlay_draws_at_any_terminal_size() {
         use ratatui::{backend::TestBackend, Terminal};
         let mut a = app();
-        let modes = [Mode::Normal, Mode::Help, Mode::Graph, Mode::Clusters, Mode::Health, Mode::StateAt, Mode::Sweep, Mode::ActivitySummary, Mode::Modules { cursor: 0 }, Mode::FileReport, Mode::Workspace, Mode::Palette { input: "x".into(), cursor: 0 }];
+        let modes = [Mode::Normal, Mode::Help, Mode::Graph, Mode::Clusters, Mode::Health, Mode::StateAt, Mode::Sweep, Mode::ActivitySummary, Mode::ActivityDetail, Mode::Modules { cursor: 0 }, Mode::FileReport, Mode::Workspace, Mode::Palette { input: "x".into(), cursor: 0 }];
         for (w, h) in [(1, 1), (2, 2), (5, 3), (10, 4), (20, 5), (33, 9), (40, 10), (80, 24), (200, 60)] {
             let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
             for tab in Tab::ALL {

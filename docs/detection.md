@@ -67,7 +67,13 @@ steps:
 
 内置 6 条 YARA 风格规则,位于 `rules/yara/procwatch-builtin.yar`,只匹配磁盘上的文件,从不读取进程内存。
 
-这是 YARA 的子集,不是完整实现。条件 4096 词以内,嵌套 64 层以内,十六进制模式的回溯有步数上限,单个文件最多扫描前 64 MB。
+规则引擎是 [YARA-X](https://virustotal.github.io/yara-x/),支持完整的 YARA 语法:正则表达式、十六进制通配和跳转、`for` 循环、`of` 表达式、外部变量、`private` 和 `global` 规则,以及导入模块。
+
+可用模块:`console`、`dotnet`、`elf`、`hash`、`lnk`、`macho`、`math`、`pe`、`string`、`time`。不含 `cuckoo` 和 `magic`,它们需要沙箱报告或 libmagic。
+
+YARA-X 与传统 YARA 有少量不兼容,比如要求正则里的特殊字符正确转义。规则无法编译时,`--scan` 和案件页会报告具体位置。
+
+单个文件上限 64 MB,每个文件超时 30 秒。只匹配磁盘上的文件,不扫描进程内存。
 
 ## 误报抑制
 

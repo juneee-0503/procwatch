@@ -101,6 +101,13 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             }
         }
         Mode::Health | Mode::ActivitySummary => app.mode = Mode::Normal,
+        Mode::ActivityDetail => match key.code {
+            KeyCode::Down | KeyCode::Char('j') => app.perf_scroll += 1,
+            KeyCode::Up | KeyCode::Char('k') => app.perf_scroll = app.perf_scroll.saturating_sub(1),
+            KeyCode::PageDown => app.perf_scroll += 15,
+            KeyCode::PageUp => app.perf_scroll = app.perf_scroll.saturating_sub(15),
+            _ => app.mode = Mode::Normal,
+        },
         Mode::Modules { cursor } => {
             let names: Vec<&'static str> = app.kernel.as_ref().map(|k| k.status().iter().map(|s| s.name).collect()).unwrap_or_default();
             match key.code {
@@ -362,6 +369,11 @@ fn normal_key(app: &mut App, key: KeyEvent) {
             KeyCode::Char('c') => app.toggle_capture(),
             KeyCode::Char('x') => app.clear_activity(),
             KeyCode::Char('s') => app.mode = Mode::ActivitySummary,
+            KeyCode::Enter => {
+                app.perf_scroll = 0;
+                app.mode = Mode::ActivityDetail;
+            }
+            KeyCode::Esc => app.query.clear(),
             KeyCode::Char('e') => app.save_activity(),
             _ => {}
         },
@@ -991,6 +1003,9 @@ pub fn handle_mouse(app: &mut App, m: MouseEvent) {
             let idx = app.ir.ac_offset + row;
             if idx < app.visible_activity().len() {
                 app.ir.ac_selected = idx;
+                if button == MouseButton::Left && app.register_click(m.row) {
+                    normal_key(app, KeyEvent::from(KeyCode::Enter));
+                }
             }
         }
         Tab::Persistence | Tab::Timeline | Tab::Logs => {
@@ -1021,6 +1036,24 @@ pub fn handle_mouse(app: &mut App, m: MouseEvent) {
 #[cfg(test)]
 mod key_tests {
     use super::*;
+
+    /// docs/keys.md lists every key: one added here must be added there.
+    #[test]
+    fn every_key_is_documented() {
+        let doc = include_str!("../../docs/keys.md");
+        let code = include_str!("input.rs");
+        let code = &code[..code.find("mod key_tests").unwrap()];
+        let mut missing = Vec::new();
+        for part in code.split("KeyCode::Char('").skip(1) {
+            let mut chars = part.chars();
+            let (Some(c), Some('\'')) = (chars.next(), chars.next()) else { continue };
+            let shown = if c == ' ' { "`Space`".to_string() } else { format!("`{c}`") };
+            if !doc.contains(&shown) && !doc.contains(&format!("`ctrl+{c}`")) {
+                missing.push(c);
+            }
+        }
+        assert!(missing.is_empty(), "keys missing from docs/keys.md: {missing:?}");
+    }
 
     #[test]
     fn the_performance_page_scrolls_with_the_arrow_keys() {

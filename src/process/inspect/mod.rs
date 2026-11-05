@@ -204,7 +204,7 @@ pub fn call_stacks(pid: u32) -> Result<Vec<String>, String> {
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = pid;
-        Err("call stack sampling is not available on this platform (use a debugger such as WinDbg)".into())
+        Err("Windows can only show stacks captured with events: start Activity capture with `stacks: true` in capture.yml, then reopen this tab".into())
     }
 }
 

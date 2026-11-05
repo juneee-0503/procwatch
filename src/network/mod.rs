@@ -3,6 +3,7 @@
 
 pub mod dns;
 pub mod module;
+pub mod pcap;
 pub mod traffic;
 
 use netstat2::{

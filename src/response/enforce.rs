@@ -27,6 +27,7 @@ use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 
 use crate::common::emit::Emit;
+use crate::common::text::glob;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -42,6 +43,8 @@ pub enum On {
     Open,
     Connect,
     Start,
+    /// Changing a registry key or value: Windows, with the driver.
+    Registry,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,32 +135,9 @@ const ESSENTIAL: &[&str] = &[
     "C:\\Windows\\explorer.exe",
 ];
 
-/// `*` is any run of characters, `?` one character. Case-insensitive on
-/// Windows, where paths are.
-pub fn glob(pattern: &str, text: &str) -> bool {
-    let fold = |s: &str| -> Vec<char> {
-        if cfg!(windows) { s.to_lowercase().chars().collect() } else { s.chars().collect() }
-    };
-    let (p, t) = (fold(pattern), fold(text));
-    let (mut i, mut j) = (0, 0);
-    let mut back: Option<(usize, usize)> = None;
-    while j < t.len() {
-        if i < p.len() && p[i] == '*' {
-            back = Some((i, j));
-            i += 1;
-        } else if i < p.len() && (p[i] == '?' || p[i] == t[j]) {
-            i += 1;
-            j += 1;
-        } else if let Some((bi, bj)) = back {
-            // Let the last star take one more character.
-            back = Some((bi, bj + 1));
-            i = bi + 1;
-            j = bj + 1;
-        } else {
-            return false;
-        }
-    }
-    p[i..].iter().all(|c| *c == '*')
+/// A file the operating system can't run without.
+pub fn is_essential(path: &str) -> bool {
+    ESSENTIAL.iter().any(|e| e.eq_ignore_ascii_case(path))
 }
 
 fn any(patterns: &[String], text: &str) -> bool {
@@ -170,6 +150,22 @@ impl Rule {
     }
 }
 
+/// Whether the driver can carry out a rule. It has no exceptions or process
+/// names, so a rule using them must not load as something broader.
+#[cfg(windows)]
+fn windows_driver(r: &Rule) -> Result<(), String> {
+    if !r.process.is_empty() || !r.except.is_empty() {
+        return Err("the Windows driver can't apply `process` or `except`".into());
+    }
+    super::driver::nt_patterns(r.on == On::Registry, &r.path)?;
+    super::driver::Client::connect().map(|_| ())
+}
+
+#[cfg(not(windows))]
+fn windows_driver(_: &Rule) -> Result<(), String> {
+    Ok(())
+}
+
 /// What this platform can do with a rule, or why it can't.
 fn support(r: &Rule) -> Result<(), String> {
     match (r.on, r.action) {
@@ -177,7 +173,9 @@ fn support(r: &Rule) -> Result<(), String> {
         (On::Start, Action::Block) => Err("`start` happens too late to block: use action: kill, or on: exec on Linux".into()),
         (_, Action::Kill) => Err("`kill` only goes with on: start".into()),
         (On::Exec | On::Open, Action::Block) if cfg!(target_os = "linux") => Ok(()),
-        (On::Exec | On::Open, Action::Block) if cfg!(windows) => Err("blocking files on Windows needs a kernel driver: see docs/enforcement.md".into()),
+        (On::Open | On::Registry, Action::Block) if cfg!(windows) => windows_driver(r),
+        (On::Exec, Action::Block) if cfg!(windows) => Err("blocking programs on Windows isn't done by the driver: use on: start with action: kill".into()),
+        (On::Registry, Action::Block) => Err("`registry` is Windows only".into()),
         (On::Exec | On::Open, Action::Block) => Err("blocking files on macOS needs Endpoint Security, which Apple must entitle: see docs/enforcement.md".into()),
         (On::Connect, Action::Block) if cfg!(windows) => {
             if r.path.iter().any(|p| p.contains(['*', '?'])) {
@@ -277,12 +275,37 @@ pub struct Running {
     stop: Arc<AtomicBool>,
     #[cfg(windows)]
     _filters: Option<wfp::Filters>,
+    #[cfg(windows)]
+    _driver: Option<super::driver::Client>,
 }
 
 impl Drop for Running {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
     }
+}
+
+/// Hands file and registry rules to the driver. Its decisions stay in the
+/// kernel debug log: they aren't reported back as `Decision`s.
+#[cfg(windows)]
+fn start_driver(policy: &Policy) -> Result<Option<super::driver::Client>, String> {
+    use super::driver::{encode, nt_patterns, Client, ON_FILE, ON_REGISTRY};
+    let mut rules = Vec::new();
+    for r in &policy.rules {
+        let (on, registry) = match r.on {
+            On::Open => (ON_FILE, false),
+            On::Registry => (ON_REGISTRY, true),
+            _ => continue,
+        };
+        rules.extend(nt_patterns(registry, &r.path)?.into_iter().map(|p| (on, p)));
+    }
+    if rules.is_empty() {
+        return Ok(None);
+    }
+    let client = Client::connect()?;
+    let borrowed: Vec<(u32, &str)> = rules.iter().map(|(o, p)| (*o, p.as_str())).collect();
+    client.send(&encode(policy.mode == Mode::Enforce, std::process::id(), &borrowed)?)?;
+    Ok(Some(client))
 }
 
 pub fn start(policy: Policy, out: Emit<Decision>) -> Result<Running, String> {
@@ -294,6 +317,8 @@ pub fn start(policy: Policy, out: Emit<Decision>) -> Result<Running, String> {
     }
     #[cfg(windows)]
     let filters = wfp::start(&policy, &out)?;
+    #[cfg(windows)]
+    let driver = start_driver(&policy)?;
     if policy.rules.iter().any(|r| r.on == On::Start) {
         spawn_killer(policy.clone(), out, stop.clone())?;
     }
@@ -301,11 +326,13 @@ pub fn start(policy: Policy, out: Emit<Decision>) -> Result<Running, String> {
         stop,
         #[cfg(windows)]
         _filters: filters,
+        #[cfg(windows)]
+        _driver: driver,
     })
 }
 
 /// Pids this process mustn't touch: itself and whoever started it.
-fn own_line() -> std::collections::HashSet<u32> {
+pub fn own_line() -> std::collections::HashSet<u32> {
     let me = std::process::id();
     let mut set = std::collections::HashSet::from([me, 0, 1, 4]);
     let m = crate::process::ProcessMonitor::new();

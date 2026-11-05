@@ -3,6 +3,18 @@
 use super::*;
 
 impl App {
+    /// Stacks from captured events, where the system can't sample them:
+    /// what this process was doing when it last touched a file or a key.
+    pub fn captured_stacks(&self, pid: u32) -> Option<Vec<String>> {
+        let mut lines = Vec::new();
+        for a in self.ir.activity.iter().rev().filter(|a| a.pid == pid).filter(|a| a.stack.is_some()).take(20) {
+            lines.push(format!("{} {} {} {}", a.time.format("%H:%M:%S%.3f"), a.class.label(), a.op, a.path));
+            lines.extend(a.stack.iter().flat_map(|s| s.iter()).map(|f| format!("    {f}")));
+            lines.push(String::new());
+        }
+        (!lines.is_empty()).then_some(lines)
+    }
+
     /// Ask the activity module to start or stop capturing.
     pub fn toggle_capture(&mut self) {
         use crate::activity::module::{Command, COMMAND};
@@ -24,6 +36,7 @@ impl App {
             Ok(Some(m)) => {
                 self.ir.capture_method = Some(m);
                 self.ir.capture_error = None;
+                self.ir.capture_filter = crate::activity::filter::CaptureConfig::load().unwrap_or_default();
                 self.set_status(StatusLevel::Success, format!("Capturing activity: {m}"));
             }
             Ok(None) => {
@@ -87,6 +100,10 @@ impl App {
                 }
             };
             a.name = name;
+            // Rules about processes wait until the name is known.
+            if self.ir.capture_filter.verdict(a.class, a.op, &a.path, Some(&a.name)) == crate::activity::filter::Verdict::Drop {
+                continue;
+            }
             // A write to an autostart key, with the process that did it.
             if a.class == Class::Registry && a.op != "delete key" && crate::activity::is_autostart_key(&a.path) {
                 if let Some(def) = crate::detection::triage::rule("PW-022") {

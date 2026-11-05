@@ -7,12 +7,14 @@ procwatch 是一个终端里的进程分析与调查工具,支持 macOS、Linux 
 | 想做什么 | 看这里 |
 |---|---|
 | 构建、运行、第一次调查 | [快速开始](getting-started.md) |
-| 了解每个页面和按键 | [用户指南](user-guide.md) |
+| 了解每个页面 | [用户指南](user-guide.md) |
+| 查每一个按键的功能 | [按键参考](keys.md) |
 | 脚本或流水线中使用 | [命令行参考](cli.md) |
 | 看 CPU 调度、磁盘队列、丢包、温度、服务 | [系统指标](metrics.md) |
 | 启用或关闭模块,扩展新功能 | [模块与微内核](modules.md) |
 | 采集文件、注册表、网络操作,看每进程流量 | [活动采集](activity-capture.md) |
 | 阻止程序运行或联网 | [拦截与策略](enforcement.md) |
+| 长期运行,自动处置,防篡改日志 | [EDR 代理](edr.md) |
 | 了解检测规则,编写自己的规则 | [检测](detection.md) |
 | 取证、证据链、离线分析 | [调查与证据](investigation.md) |
 | 判断它能否替代某个专业工具 | [与专业工具对比](comparison.md) |

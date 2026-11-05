@@ -35,6 +35,19 @@ jobs:
         run: cargo test --release --locked fuzz_ -- --ignored
         env:
           PW_FUZZ_ITERATIONS: "3000"
+      - name: Compile the Windows driver (only if the WDK is installed)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $head = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Include" -Recurse -Filter fltKernel.h -ErrorAction SilentlyContinue | Select-Object -Last 1
+          if (-not $head) { "WDK not installed: the driver was not compiled"; exit 0 }
+          $km = $head.Directory.FullName
+          $root = Split-Path $km
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" && cl /nologo /c /kernel /W4 /WX /GS /D_AMD64_ /DAMD64 /D_WIN64 /DNTDDI_VERSION=0x0A000000 /I`"$km`" /I`"$root\shared`" /I`"$root\crt`" driver\windows\procwatch.c"
+          if ($LASTEXITCODE -ne 0) { throw "driver failed to compile" }
+          "The driver compiled. It has still never been loaded."
       - name: Self-test (measured capture rates etc.)
         timeout-minutes: 5
         env:

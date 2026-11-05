@@ -113,22 +113,32 @@ sudo procwatch --enforce policy.yml --output decisions.jsonl
 | Linux 执行拦截 | CI 实测通过:审计模式放行并记录;强制模式匹配程序被拒、其他程序照常运行;结束后恢复 |
 | Windows 网络拦截 | CI 实测通过:curl 连接在过滤器生效期间失败,结束后恢复 |
 
-## Windows 文件、注册表和进程的事前拦截
+## Windows 文件和注册表拦截
 
-这部分**没有实现**。用户态没有办法在 Windows 上阻止文件打开或注册表写入,必须使用内核驱动:
+这部分需要驱动,源码在 [`driver/windows/`](../driver/windows/README.md)。**驱动从未被加载运行过**,只有在 CI 的 WDK 步骤通过时才算编译过。
 
-| 目标 | 机制 |
+| 规则 | 说明 |
 |---|---|
-| 文件 | 文件系统微过滤驱动(minifilter)的 PreCreate 回调 |
-| 注册表 | `CmRegisterCallbackEx` |
-| 进程创建 | `PsSetCreateProcessNotifyRoutineEx` |
+| `on: open` | 阻止打开文件用于写入或删除 |
+| `on: registry` | 阻止修改键和值 |
 
-没有实现的原因不是技术上做不到,而是前提条件不具备:
+```yaml
+mode: enforce
+rules:
+  - { id: guard-tools, on: open, action: block, path: ['C:\\Tools\\*'] }
+  - { id: guard-run, on: registry, action: block, path: ['HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run*'] }
+```
 
-1. **无法测试。** 驱动要在开启测试签名的虚拟机里加载和调试,而 CI runner 不能重启进入测试签名模式,项目的开发机是 macOS。
-2. **失败代价高。** 用户态 bug 最多让 procwatch 崩溃,驱动 bug 是蓝屏,甚至开机循环。
-3. **正式发布需要签名。** 需要 EV 代码签名证书和微软 attestation 签名。
+驱动没有加载时,这些规则会让策略启动失败,而不是静默不生效。
 
-如果要继续,需要准备:一台可重置的 Windows 测试虚拟机(启用测试签名和内核调试)、WDK、以及用于发布的 EV 证书。设计上驱动只负责把决策请求发给用户态,等待超时后默认放行,这样 procwatch 退出或卡住时系统不受影响。
+驱动的限制:
 
-macOS 的情况类似:Endpoint Security 需要苹果批准的 `com.apple.developer.endpoint-security.client` 授权,否则只能在关闭 SIP 的开发机上运行。
+- 路径只支持末尾的 `*`。
+- 不支持 `process` 和 `except`。
+- 注册表根只支持 `HKLM` 和 `HKU`。`HKCU` 因用户而异,请写成 `HKU\\<SID>\\…`。
+- 不阻止读取和程序启动。程序启动用 `on: start` + `kill`。
+- 决策写入内核调试日志,不会回到 `--enforce` 的输出。
+
+要在正式环境使用,需要 EV 代码签名证书、微软认证签名和微软分配的 altitude。这些只能由项目所有者申请。
+
+macOS 的文件拦截仍然没有实现,需要 Apple 授权的 Endpoint Security。

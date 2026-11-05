@@ -1,6 +1,7 @@
 //! Command-line entry points. Each mode is a thin caller of the modules
 //! below; the interactive one lives in `ui::terminal`.
 
+pub mod agent;
 pub mod coverage;
 pub mod metrics;
 pub mod modules;
@@ -42,7 +43,7 @@ Usage:
   procwatch --selftest [--json]     measure process-capture rates, PID-reuse protection, file-event latency
                                     and own overhead on this machine (harmless workloads only)
   procwatch --scan PATH... [--yara DIR] [--json]
-                                    match files (folders recursively) against YARA-subset content rules;
+                                    match files (folders recursively) against YARA content rules;
                                     exit status 1 if anything matched
   procwatch --monitor [--output FILE] [--minutes N] [--activity]
                                     run without a screen and stream new events as ECS JSON lines;
@@ -52,6 +53,18 @@ Usage:
   procwatch --enforce POLICY [--output FILE] [--minutes N]
                                     apply a policy (audit mode only logs); needs root/administrator.
                                     Everything ends when procwatch exits. See docs/enforcement.md
+  procwatch --agent POLICY [--output FILE] [--minutes N]
+                                    EDR agent: detections, playbooks, blocking and a tamper-evident
+                                    log, restarted if it dies. Audit mode only logs. See docs/edr.md
+  procwatch --agent-check POLICY    show what an agent policy would do, and refuse unsafe ones
+  procwatch --agent-verify [FILE]   check an agent log's hash chain; exit status 1 if it was changed
+  procwatch --capture-check [FILE]  check capture.yml, the filter for activity capture
+  procwatch --capture-packets FILE [--seconds N] [--interface IF] [--max-mb N] [--snaplen N]
+                                    save packets for Wireshark: pcap on Linux and macOS, pcapng on
+                                    Windows; needs root/administrator (default 60 s, 100 MB)
+  procwatch --boot-log enable|disable|status|read [FILE] [--json]
+                                    Windows: record file, registry and process activity from early
+                                    boot, and read it back; needs administrator
   procwatch --modules [--json]      list modules and what each supports on this system
   procwatch --module-enable NAME    run a module from the next start
   procwatch --module-disable NAME   leave a module out from the next start
@@ -161,6 +174,79 @@ pub fn main() -> anyhow::Result<()> {
                 std::process::exit(2);
             }
             std::process::exit(enforce::run(std::path::Path::new(file), value("--output").map(std::path::Path::new), minutes.and_then(Result::ok)));
+        }
+        Some("--agent" | "--agent-worker" | "--agent-check") => {
+            let Some(file) = args.get(1) else {
+                eprintln!("{} needs a policy file\n\n{USAGE}", args[0]);
+                std::process::exit(2);
+            };
+            let value = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
+            let path = std::path::Path::new(file);
+            let minutes = match value("--minutes").map(|m| m.parse::<u64>()) {
+                None => None,
+                Some(Ok(m)) => Some(m),
+                Some(Err(_)) => {
+                    eprintln!("--minutes needs a number\n\n{USAGE}");
+                    std::process::exit(2);
+                }
+            };
+            let output = value("--output").map(std::path::PathBuf::from);
+            std::process::exit(match args[0].as_str() {
+                "--agent-check" => agent::check(path),
+                "--agent" => agent::run(path, output.as_deref(), minutes),
+                _ => agent::worker(path, output.as_deref(), minutes),
+            });
+        }
+        Some("--agent-verify") => std::process::exit(agent::verify_log(args.get(1).map(std::path::Path::new))),
+        Some("--capture-check") => {
+            let path = args.get(1).map(std::path::PathBuf::from).or_else(|| crate::common::paths::config_path().map(|p| p.with_file_name("capture.yml")));
+            let parsed = match &path {
+                Some(p) if p.exists() => crate::activity::filter::CaptureConfig::load_from(p),
+                _ => Err("no capture.yml: everything is kept".to_string()),
+            };
+            match parsed {
+                Ok(c) => {
+                    println!("registry reads: {}\ncall stacks: {}\n{} rules", c.registry_reads, c.stacks, c.rules.len());
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Some("--capture-packets") => {
+            let Some(file) = args.get(1).filter(|a| !a.starts_with("--")) else {
+                eprintln!("--capture-packets needs a file name\n\n{USAGE}");
+                std::process::exit(2);
+            };
+            let value = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
+            let mut o = network::pcap::Options { interface: value("--interface"), ..Default::default() };
+            for (flag, slot, scale) in [("--seconds", &mut o.seconds, 1u64), ("--max-mb", &mut o.max_bytes, 1 << 20)] {
+                if let Some(v) = value(flag) {
+                    let Ok(n) = v.parse::<u64>() else {
+                        eprintln!("{flag} needs a number\n\n{USAGE}");
+                        std::process::exit(2);
+                    };
+                    *slot = n.saturating_mul(scale);
+                }
+            }
+            if let Some(v) = value("--snaplen") {
+                let Ok(n) = v.parse::<u32>() else {
+                    eprintln!("--snaplen needs a number\n\n{USAGE}");
+                    std::process::exit(2);
+                };
+                o.snaplen = n.clamp(64, 262_144);
+            }
+            std::process::exit(network::pcap::run(std::path::Path::new(file), &o));
+        }
+        Some("--boot-log") => {
+            let Some(action) = args.get(1) else {
+                eprintln!("--boot-log needs enable, disable, status or read\n\n{USAGE}");
+                std::process::exit(2);
+            };
+            let file = args.get(2).filter(|a| !a.starts_with("--")).map(std::path::Path::new);
+            std::process::exit(crate::activity::boot::run(action, file, args.iter().any(|a| a == "--json")));
         }
         Some("--modules") => std::process::exit(modules::list(args.iter().any(|a| a == "--json"))),
         Some(flag @ ("--module-enable" | "--module-disable")) => {
@@ -310,7 +396,7 @@ fn headless_capture() -> baseline::Baseline {
     baseline::Baseline::capture(&tree, &conns)
 }
 
-/// `--scan`: YARA-subset rules over files and folders.
+/// `--scan`: YARA rules over files and folders.
 fn headless_scan(paths: &[&String], yara_dir: Option<&str>, json: bool) -> i32 {
     let (rules, errors) = yara::load(yara_dir.map(std::path::Path::new));
     for e in &errors {

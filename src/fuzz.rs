@@ -112,6 +112,12 @@ fn walk(k: crate::host::artifacts::regf::Key, depth: usize, budget: &mut usize) 
 }
 
 pub(crate) fn binaries(data: &[u8]) {
+    let _ = crate::files::binfmt::pe_exports(data);
+    let mut at = 0;
+    while let Some((.., next)) = crate::network::pcap::bpf_record(data, at) {
+        assert!(next > at, "a packet record must move forward");
+        at = next;
+    }
     let _ = crate::files::binfmt::header(data);
     let _ = crate::files::binfmt::structure(data);
     let _ = crate::files::binfmt::indicators(data);

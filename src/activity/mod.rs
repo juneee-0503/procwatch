@@ -11,8 +11,10 @@
 //! limit drops the excess. Drops are counted and shown: a capture that lost
 //! events must say so.
 
+pub mod boot;
+pub mod filter;
 pub mod module;
-mod probes;
+pub mod probes;
 #[cfg(target_os = "linux")]
 use probes::linux;
 #[cfg(target_os = "macos")]
@@ -32,6 +34,8 @@ pub enum Class {
     File,
     Registry,
     Network,
+    #[cfg_attr(not(windows), allow(dead_code))]
+    Process,
 }
 
 impl Class {
@@ -40,6 +44,7 @@ impl Class {
             Class::File => "file",
             Class::Registry => "registry",
             Class::Network => "network",
+            Class::Process => "process",
         }
     }
 }
@@ -57,11 +62,15 @@ pub struct Activity {
     /// Merged repeats of the same operation on the same target.
     pub count: u32,
     pub bytes: u64,
+    /// What the operation returned, where the source says.
+    pub status: Option<String>,
+    /// Call stack, innermost first, where capture has it switched on.
+    pub stack: Option<Arc<Vec<String>>>,
 }
 
 impl Activity {
     pub fn new(pid: u32, class: Class, op: &'static str, path: impl Into<String>) -> Activity {
-        Activity { time: Local::now(), pid, name: Arc::from(""), class, op, path: path.into(), detail: String::new(), count: 1, bytes: 0 }
+        Activity { time: Local::now(), pid, name: Arc::from(""), class, op, path: path.into(), detail: String::new(), count: 1, bytes: 0, status: None, stack: None }
     }
 
     #[cfg_attr(not(any(windows, test)), allow(dead_code))]
@@ -92,6 +101,9 @@ pub struct Batcher {
     out: Emit<Vec<Activity>>,
     items: Vec<Activity>,
     index: HashMap<(u32, &'static str, String), usize>,
+    config: filter::CaptureConfig,
+    /// Reading a file: nothing arrives faster than it can be taken.
+    offline: bool,
     window: Instant,
     in_window: u32,
     me: u32,
@@ -100,19 +112,28 @@ pub struct Batcher {
 pub type SharedBatcher = Arc<Mutex<Batcher>>;
 
 impl Batcher {
-    pub fn new(out: Emit<Vec<Activity>>) -> Batcher {
-        Batcher { out, items: Vec::new(), index: HashMap::new(), window: Instant::now(), in_window: 0, me: std::process::id() }
+    pub fn new(out: Emit<Vec<Activity>>, config: filter::CaptureConfig) -> Batcher {
+        Batcher { out, items: Vec::new(), index: HashMap::new(), config, offline: false, window: Instant::now(), in_window: 0, me: std::process::id() }
+    }
+
+    #[cfg(windows)]
+    pub fn offline(out: Emit<Vec<Activity>>) -> Batcher {
+        Batcher { offline: true, ..Batcher::new(out, filter::CaptureConfig::default()) }
     }
 
     pub fn push(&mut self, a: Activity) {
         if a.pid == self.me {
             return; // our own reads would feed back forever
         }
+        if self.config.verdict(a.class, a.op, &a.path, None) == filter::Verdict::Drop {
+            return;
+        }
         if self.window.elapsed() >= Duration::from_secs(1) {
             self.window = Instant::now();
             self.in_window = 0;
         }
-        let key = (a.pid, a.op, a.path.clone());
+        // A failure must not hide among successes on the same target.
+        let key = (a.pid, a.op, format!("{}\0{}", a.path, a.status.as_deref().unwrap_or("")));
         if let Some(i) = self.index.get(&key) {
             let cur = &mut self.items[*i];
             cur.count += 1;
@@ -120,7 +141,7 @@ impl Batcher {
             return;
         }
         self.in_window += 1;
-        if self.in_window > MAX_PER_SECOND {
+        if !self.offline && self.in_window > MAX_PER_SECOND {
             DROPPED.fetch_add(1, Ordering::Relaxed);
             return;
         }
@@ -175,12 +196,12 @@ impl Drop for Capture {
 }
 
 /// Start capturing. Err says why it can't run, for the user to see.
-pub fn start(out: Emit<Vec<Activity>>) -> Result<Capture, String> {
+pub fn start(out: Emit<Vec<Activity>>, config: filter::CaptureConfig) -> Result<Capture, String> {
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let batcher: SharedBatcher = Arc::new(Mutex::new(Batcher::new(out)));
+    let batcher: SharedBatcher = Arc::new(Mutex::new(Batcher::new(out, config.clone())));
     #[cfg(windows)]
     {
-        let trace = probes::windows::start_activity(batcher.clone())?;
+        let trace = probes::windows::start_activity(batcher.clone(), &config)?;
         let sink = batcher.clone();
         crate::network::traffic::set_connection_sink(Some(Emit::new(move |c: crate::network::traffic::ConnOp| {
             if let Ok(mut b) = sink.lock() {
@@ -211,7 +232,7 @@ pub fn start(out: Emit<Vec<Activity>>) -> Result<Capture, String> {
     }
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
-        let _ = (batcher, stop);
+        let _ = (batcher, stop, config);
         Err("not available on this platform".into())
     }
 }
@@ -269,13 +290,41 @@ pub fn real_mounts(mountinfo: &str) -> Vec<String> {
 
 
 
+/// Common NTSTATUS codes by name; anything else as a number.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+pub fn ntstatus(code: u32) -> String {
+    match code {
+        0 => "SUCCESS".into(),
+        0xC000_0022 => "ACCESS_DENIED".into(),
+        0xC000_0034 => "NAME_NOT_FOUND".into(),
+        0xC000_0035 => "NAME_COLLISION".into(),
+        0xC000_003A => "PATH_NOT_FOUND".into(),
+        0xC000_0043 => "SHARING_VIOLATION".into(),
+        0xC000_00BA => "FILE_IS_A_DIRECTORY".into(),
+        0xC000_0101 => "DIRECTORY_NOT_EMPTY".into(),
+        0xC000_0056 => "DELETE_PENDING".into(),
+        0x8000_0005 => "BUFFER_OVERFLOW".into(),
+        0x8000_0006 => "NO_MORE_FILES".into(),
+        0x8000_001A => "NO_MORE_ENTRIES".into(),
+        0xC000_0023 => "BUFFER_TOO_SMALL".into(),
+        c => format!("{c:#010x}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn results_read_as_names() {
+        assert_eq!(ntstatus(0), "SUCCESS");
+        assert_eq!(ntstatus(0xC000_0034), "NAME_NOT_FOUND");
+        assert_eq!(ntstatus(0xC000_9999), "0xc0009999");
+    }
+
     fn batcher() -> (Batcher, std::sync::mpsc::Receiver<Vec<Activity>>) {
         let (out, rx) = Emit::channel();
-        (Batcher::new(out), rx)
+        (Batcher::new(out, filter::CaptureConfig::default()), rx)
     }
 
     #[test]

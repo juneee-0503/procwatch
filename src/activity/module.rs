@@ -48,7 +48,9 @@ impl Module for ActivityModule {
                     c.publish(BATCH, b);
                     c.current()
                 });
-                match start(out) {
+                // A bad filter file must be seen, not capture everything.
+                let started = super::filter::CaptureConfig::load().and_then(|cfg| start(out, cfg));
+                match started {
                     Ok(cap) => {
                         ctx.publish::<State>(STATE, Ok(Some(cap.method)));
                         self.capture = Some(cap);

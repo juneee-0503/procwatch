@@ -1,0 +1,12 @@
+# An agent policy. Audit mode writes down what it would do; read the log
+# before changing to enforce. See docs/edr.md.
+mode: audit
+activity: false
+playbooks:
+  - id: record-high
+    when: { min_severity: high }
+    do: [collect]
+  - id: stop-miners
+    when: { rule: ["*miner*"] }
+    do: [collect, suspend, kill]
+    cooldown_seconds: 600

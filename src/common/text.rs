@@ -46,6 +46,34 @@ pub fn csv_field(s: &str) -> String {
     }
 }
 
+/// `*` is any run of characters, `?` one character. Case-insensitive on
+/// Windows, where paths are.
+pub fn glob(pattern: &str, text: &str) -> bool {
+    let fold = |s: &str| -> Vec<char> {
+        if cfg!(windows) { s.to_lowercase().chars().collect() } else { s.chars().collect() }
+    };
+    let (p, t) = (fold(pattern), fold(text));
+    let (mut i, mut j) = (0, 0);
+    let mut back: Option<(usize, usize)> = None;
+    while j < t.len() {
+        if i < p.len() && p[i] == '*' {
+            back = Some((i, j));
+            i += 1;
+        } else if i < p.len() && (p[i] == '?' || p[i] == t[j]) {
+            i += 1;
+            j += 1;
+        } else if let Some((bi, bj)) = back {
+            // Let the last star take one more character.
+            back = Some((bi, bj + 1));
+            i = bi + 1;
+            j = bj + 1;
+        } else {
+            return false;
+        }
+    }
+    p[i..].iter().all(|c| *c == '*')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

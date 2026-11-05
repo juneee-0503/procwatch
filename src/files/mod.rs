@@ -8,3 +8,4 @@ pub mod intel;
 pub mod module;
 pub mod watch;
 pub mod yara;
+pub mod symbols;

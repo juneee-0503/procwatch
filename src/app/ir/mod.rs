@@ -275,6 +275,7 @@ pub struct Ir {
     pub capture_method: Option<&'static str>,
     /// Why the capture couldn't start.
     pub capture_error: Option<String>,
+    pub capture_filter: crate::activity::filter::CaptureConfig,
     pub ac_selected: usize,
     pub ac_offset: usize,
     /// Sequence number of the oldest kept operation.
@@ -420,6 +421,7 @@ impl Ir {
             activity: VecDeque::new(),
             capture_method: None,
             capture_error: None,
+            capture_filter: Default::default(),
             ac_selected: 0,
             ac_offset: 0,
             ac_base: 0,
@@ -527,7 +529,7 @@ fn activity_line(a: &crate::activity::Activity, host: &str) -> String {
     let (file, registry) = match a.class {
         crate::activity::Class::File => (Some(a.path.as_str()), None),
         crate::activity::Class::Registry => (None, Some(a.path.as_str())),
-        crate::activity::Class::Network => (None, None),
+        crate::activity::Class::Network | crate::activity::Class::Process => (None, None),
     };
     let mut v = crate::forensics::stdexport::ecs_event(a.time, &id, a.class.label(), a.op, Some(a.pid), &a.name, &a.path, None, None, file, host);
     if let Some(r) = registry {
@@ -538,6 +540,13 @@ fn activity_line(a: &crate::activity::Activity, host: &str) -> String {
     }
     if a.bytes > 0 {
         v["procwatch"] = json!({ "bytes": a.bytes });
+    }
+    if let Some(st) = &a.status {
+        v["event"]["outcome"] = json!(if st == "SUCCESS" { "success" } else { "failure" });
+        v["event"]["reason"] = json!(st);
+    }
+    if let Some(stack) = &a.stack {
+        v["process"]["thread"] = json!({ "stack": stack.as_slice() });
     }
     v.to_string()
 }

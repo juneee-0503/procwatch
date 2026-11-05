@@ -26,7 +26,7 @@
 | `--snapshot FILE` | 保存基线,`-` 输出到 stdout |
 | `--diff FILE [--json]` | 与基线比较,有变化时退出码 1 |
 | `--sweep FILE [--json]` | IOC 扫描,有命中时退出码 1 |
-| `--scan PATH… [--yara DIR] [--json]` | YARA 子集内容扫描。不跟随子目录中的符号链接,跳过 FIFO 和设备文件 |
+| `--scan PATH… [--yara DIR] [--json]` | YARA 内容扫描。不跟随子目录中的符号链接,跳过 FIFO 和设备文件 |
 | `--offline CASE [--iocs F] [--sigma D] [--yara D] [--artifacts D] [--json]` | 离线分析案件 |
 | `--check-rules [DIR]` | 校验 Sigma 规则 |
 | `--coverage [--json]` | 列出规则覆盖的 ATT&CK 技术。说明规则关注什么,不代表检出率 |
@@ -77,3 +77,40 @@ procwatch --enforce POLICY [--output FILE] [--minutes N]
 | `--soak MINUTES` | 无界面运行完整流水线,报告内存、CPU 和各阶段耗时。内存持续增长、线程崩溃、消息处理跟不上都算失败 |
 
 环境变量 `PW_SELFTEST_URL` 指向一个已知大小的文件时,`--selftest` 会下载它来检验流量统计的准确性。默认不访问网络。
+
+## 抓包
+
+| 命令 | 说明 |
+|---|---|
+| `--capture-packets FILE [--seconds N] [--interface IF] [--max-mb N] [--snaplen N]` | 把数据包存为文件,需要 root 或管理员。默认 60 秒、100 MB、每包 65535 字节。文件已存在时拒绝覆盖 |
+
+Linux 和 macOS 写 pcap,Windows 用内置的 pktmon 写 pcapng,并且不支持 `--interface`。macOS 不指定接口时使用默认路由的接口,Linux 不指定时捕获全部接口。
+
+数据包可能含有密码和隐私数据。文件权限是 0600,只有所有者能读。
+
+## 开机日志
+
+| 命令 | 说明 |
+|---|---|
+| `--boot-log enable` | 配置 ETW AutoLogger,从下次开机开始记录。需要管理员 |
+| `--boot-log status` | 显示是否已配置、是否在记录、丢失事件数、日志大小 |
+| `--boot-log read [FILE] [--json]` | 停止记录并读取日志,默认读最新一份 |
+| `--boot-log disable` | 删除配置并停止记录 |
+
+只支持 Windows。详见[活动采集](activity-capture.md)。
+
+## EDR 代理
+
+| 命令 | 说明 |
+|---|---|
+| `--agent POLICY [--output FILE] [--minutes N]` | 运行代理。默认只记录 |
+| `--agent-check POLICY` | 显示策略会做什么,拒绝不安全的策略 |
+| `--agent-verify [FILE]` | 校验日志的哈希链,被改动时退出码为 1 |
+
+详见 [EDR 代理](edr.md)。
+
+## 采集过滤
+
+| 命令 | 说明 |
+|---|---|
+| `--capture-check [FILE]` | 检查 `capture.yml` 是否有效 |

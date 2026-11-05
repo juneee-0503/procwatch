@@ -278,12 +278,13 @@ pub fn activity(frame: &mut Frame, app: &mut App, area: Rect) {
         ColSpec::new("Class", 8, false),
         ColSpec::new("Operation", 16, false),
         ColSpec::new("Size", 9, true),
+        ColSpec::new("Result", 16, false),
         ColSpec::new("Target", 0, false),
     ];
     let height = table.height.saturating_sub(1) as usize;
     app.ir.ac_selected = app.ir.ac_selected.min(total - 1);
     app.ir.ac_offset = scroll_window(app.ir.ac_offset, app.ir.ac_selected, height, total);
-    let target_w = (table.width as usize).saturating_sub(76);
+    let target_w = (table.width as usize).saturating_sub(93);
     let rows = app
         .visible_activity()
         .iter()
@@ -299,12 +300,55 @@ pub fn activity(frame: &mut Frame, app: &mut App, area: Rect) {
                 vec![Span::styled(e.class.label(), source_style(e.class.label()))],
                 vec![Span::raw(op)],
                 vec![muted(if e.bytes > 0 { crate::ui::human_bytes(e.bytes) } else { String::new() })],
+                vec![match e.status.as_deref() {
+                    Some("SUCCESS") | None => muted(e.status.clone().unwrap_or_default()),
+                    Some(s) => Span::styled(s.to_string(), Style::new().fg(WARN)),
+                }],
                 vec![Span::raw(truncate_left(&e.path, target_w))],
             ]
         })
         .collect();
     let mut scroll = 0;
     app.hit.list_rows = draw_table(frame, table, &specs, rows, &mut scroll, Some(app.ir.ac_selected - app.ir.ac_offset));
+}
+
+/// One operation in full, with its call stack.
+pub fn activity_detail(frame: &mut Frame, app: &mut App, screen: Rect) {
+    let rect = centered(screen, screen.width.saturating_sub(6), screen.height.saturating_sub(4));
+    frame.render_widget(Clear, rect);
+    let block = Block::bordered().title(Span::styled(" Operation ", Style::new().fg(ACCENT)));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let Some(e) = app.visible_activity().get(app.ir.ac_selected).and_then(|s| app.activity_at(*s)) else { return };
+    let row = |k: &str, v: String| Line::from(vec![muted(format!(" {k:<10}")), Span::raw(v)]);
+    let mut lines = vec![
+        row("Time", e.time.format("%Y-%m-%d %H:%M:%S%.3f").to_string()),
+        row("Process", format!("{} ({})", e.name, e.pid)),
+        row("Operation", format!("{} {}", e.class.label(), e.op)),
+        row("Target", e.path.clone()),
+    ];
+    if let Some(s) = &e.status {
+        lines.push(row("Result", s.clone()));
+    }
+    if e.count > 1 {
+        lines.push(row("Repeated", format!("{} times", e.count)));
+    }
+    if e.bytes > 0 {
+        lines.push(row("Size", crate::ui::human_bytes(e.bytes)));
+    }
+    if !e.detail.is_empty() {
+        lines.push(row("Detail", e.detail.clone()));
+    }
+    lines.push(Line::from(""));
+    match &e.stack {
+        Some(stack) => {
+            lines.push(Line::from(heading(" Call stack (innermost first)")));
+            lines.extend(stack.iter().enumerate().map(|(i, f)| Line::from(muted(format!(" {i:>3}  {f}")))));
+        }
+        None => lines.push(Line::from(muted(" No call stack: Windows only, with `stacks: true` in capture.yml."))),
+    }
+    let scroll = app.perf_scroll.min(lines.len().saturating_sub(1)) as u16;
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
 }
 
 /// What the shown operations add up to, like Procmon's Count Occurrences.

@@ -567,9 +567,103 @@ pub fn analyze(path: &Path) -> std::io::Result<Deep> {
     Ok(Deep { format: header(&buf), entropy: Some(entropy(&buf)), indicators: indicators(&buf), scanned_bytes: buf.len(), structure: structure(&buf) })
 }
 
+/// A PE file's exported functions as (RVA, name), sorted by address. Bounds
+/// are checked throughout: the file may be crafted.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+pub fn pe_exports(b: &[u8]) -> Vec<(u32, String)> {
+    const MAX_EXPORTS: usize = 200_000;
+    let u16_at = |at: usize| Some(u16::from_le_bytes(b.get(at..at.checked_add(2)?)?.try_into().ok()?));
+    let u32_at = |at: usize| Some(u32::from_le_bytes(b.get(at..at.checked_add(4)?)?.try_into().ok()?));
+    let parse = || -> Option<Vec<(u32, String)>> {
+        let pe = u32_at(0x3c)? as usize;
+        if b.get(pe..pe.checked_add(4)?)? != b"PE\0\0" {
+            return None;
+        }
+        let sections = u16_at(pe + 6)? as usize;
+        let opt_size = u16_at(pe + 20)? as usize;
+        let opt = pe + 24;
+        let dirs = opt + if u16_at(opt)? == 0x20b { 112 } else { 96 };
+        let export_rva = u32_at(dirs)?;
+        if export_rva == 0 {
+            return None;
+        }
+        let table = opt + opt_size;
+        let offset = |rva: u32| -> Option<usize> {
+            (0..sections.min(96)).find_map(|i| {
+                let s = table + i * 40;
+                let (va, size, raw) = (u32_at(s + 12)?, u32_at(s + 8)?.max(u32_at(s + 16)?), u32_at(s + 20)?);
+                (rva >= va && rva - va < size).then(|| (raw + (rva - va)) as usize)
+            })
+        };
+        let e = offset(export_rva)?;
+        let names = (u32_at(e + 24)? as usize).min(MAX_EXPORTS);
+        let (functions, name_table, ordinals) = (offset(u32_at(e + 28)?)?, offset(u32_at(e + 32)?)?, offset(u32_at(e + 36)?)?);
+        let mut out = Vec::with_capacity(names);
+        for i in 0..names {
+            let Some(at) = u32_at(name_table + i * 4).and_then(offset) else { continue };
+            let Some(ordinal) = u16_at(ordinals + i * 2) else { continue };
+            let Some(rva) = u32_at(functions + ordinal as usize * 4) else { continue };
+            let Some(tail) = b.get(at..) else { continue };
+            let end = tail.iter().take(512).position(|c| *c == 0).unwrap_or(0);
+            if end > 0 && rva != 0 {
+                out.push((rva, String::from_utf8_lossy(&tail[..end]).into_owned()));
+            }
+        }
+        Some(out)
+    };
+    let mut v = parse().unwrap_or_default();
+    v.sort();
+    v
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// A one-section PE exporting `Alpha` at 0x1100 and `Beta` at 0x1000.
+    fn tiny_pe() -> Vec<u8> {
+        let mut b = vec![0u8; 0x400];
+        let put = |b: &mut [u8], at: usize, v: &[u8]| b[at..at + v.len()].copy_from_slice(v);
+        put(&mut b, 0x3c, &0x40u32.to_le_bytes());
+        put(&mut b, 0x40, b"PE\0\0");
+        put(&mut b, 0x46, &1u16.to_le_bytes()); // sections
+        put(&mut b, 0x54, &240u16.to_le_bytes()); // optional header size
+        put(&mut b, 0x58, &0x20bu16.to_le_bytes()); // PE32+
+        put(&mut b, 0x58 + 112, &0x1000u32.to_le_bytes()); // export directory
+        let s = 0x58 + 240;
+        put(&mut b, s + 8, &0x300u32.to_le_bytes()); // virtual size
+        put(&mut b, s + 12, &0x1000u32.to_le_bytes()); // virtual address
+        put(&mut b, s + 16, &0x300u32.to_le_bytes()); // raw size
+        put(&mut b, s + 20, &0x200u32.to_le_bytes()); // raw offset
+        let e = 0x200;
+        put(&mut b, e + 24, &2u32.to_le_bytes()); // names
+        put(&mut b, e + 28, &0x1040u32.to_le_bytes()); // functions
+        put(&mut b, e + 32, &0x1050u32.to_le_bytes()); // name pointers
+        put(&mut b, e + 36, &0x1060u32.to_le_bytes()); // ordinals
+        put(&mut b, 0x240, &0x1100u32.to_le_bytes());
+        put(&mut b, 0x244, &0x1000u32.to_le_bytes());
+        put(&mut b, 0x250, &0x1070u32.to_le_bytes());
+        put(&mut b, 0x254, &0x1080u32.to_le_bytes());
+        put(&mut b, 0x262, &1u16.to_le_bytes());
+        put(&mut b, 0x270, b"Alpha\0");
+        put(&mut b, 0x280, b"Beta\0");
+        b
+    }
+
+    #[test]
+    fn pe_export_tables() {
+        assert_eq!(pe_exports(&tiny_pe()), vec![(0x1000, "Beta".to_string()), (0x1100, "Alpha".to_string())]);
+        assert!(pe_exports(b"MZ").is_empty());
+        assert!(pe_exports(&[]).is_empty());
+        let good = tiny_pe();
+        for cut in (0..good.len()).step_by(16) {
+            let _ = pe_exports(&good[..cut]);
+        }
+        let mut wild = good.clone();
+        wild[0x218..0x21c].copy_from_slice(&u32::MAX.to_le_bytes());
+        wild[0x21c..0x220].copy_from_slice(&u32::MAX.to_le_bytes());
+        let _ = pe_exports(&wild);
+    }
 
     #[test]
     fn headers() {

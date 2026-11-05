@@ -70,6 +70,7 @@ impl App {
                 if self.stack_pending == Some(pid) {
                     self.stack_pending = None;
                 }
+                let result = result.or_else(|why| self.captured_stacks(pid).ok_or(why));
                 self.stacks.insert(pid, StackEntry { start_time, fetched: Instant::now(), result });
             }
             WorkerMsg::FileList(result) => {
