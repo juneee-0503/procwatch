@@ -3,13 +3,12 @@
 //! APIs don't say which process made a change.
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Sender;
 
 use chrono::{DateTime, Local};
 use notify::{EventKind, RecursiveMode, Watcher};
 use serde::Serialize;
 
-use crate::sampler::WorkerMsg;
+use crate::common::emit::Emit;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FsEvent {
@@ -69,7 +68,7 @@ pub fn autostart_location(path: &str) -> bool {
 
 /// Start watching; the returned watcher must be kept alive. Paths that
 /// can't be watched are reported back in the error list.
-pub fn start(paths: &[String], tx: Sender<WorkerMsg>) -> (Option<notify::RecommendedWatcher>, Vec<String>) {
+pub fn start(paths: &[String], events: Emit<FsEvent>) -> (Option<notify::RecommendedWatcher>, Vec<String>) {
     let mut errors = Vec::new();
     let (mut window, mut sent) = (std::time::Instant::now(), 0u32);
     let handler = move |res: notify::Result<notify::Event>| {
@@ -93,7 +92,7 @@ pub fn start(paths: &[String], tx: Sender<WorkerMsg>) -> (Option<notify::Recomme
                 DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 continue;
             }
-            let _ = tx.send(WorkerMsg::Fs(FsEvent { time: Local::now(), kind, path: p.display().to_string(), pid: None }));
+            events.send(FsEvent { time: Local::now(), kind, path: p.display().to_string(), pid: None });
         }
     };
     let mut watcher = match notify::recommended_watcher(handler) {

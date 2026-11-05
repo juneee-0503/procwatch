@@ -9,6 +9,7 @@
 //! - file-change latency in a watched folder
 //! - procwatch's own CPU and memory while sampling
 
+use crate::common::emit::Emit;
 use std::collections::HashMap;
 #[cfg(unix)]
 use std::collections::HashSet;
@@ -66,8 +67,8 @@ fn capture(r: &mut Report) {
     // One parent runs children of each lifetime in sequence.
     // The first sleep gives the watcher time to attach before measuring.
     let script: String = "sleep 0.4; ".to_string() + &LIFETIMES.iter().map(|d| format!("for i in 1 2 3 4; do sleep {d}; done; ")).collect::<String>() + "sleep 0.2";
-    let (tx, rx) = std::sync::mpsc::channel();
-    let Some(w) = crate::deeptrace::Watcher::start(tx) else {
+    let (events, rx) = Emit::channel();
+    let Some(w) = crate::deeptrace::Watcher::start(crate::deeptrace::Output { events, errors: Emit::new(|_| true) }) else {
         r.notes.push("deep trace watcher could not start".into());
         return;
     };
@@ -105,7 +106,7 @@ fn capture(r: &mut Report) {
     let mut deep: Vec<crate::deeptrace::DtEvent> = Vec::new();
     let until = Instant::now() + Duration::from_millis(800);
     while Instant::now() < until {
-        if let Ok(crate::sampler::WorkerMsg::Deep(evs)) = rx.recv_timeout(Duration::from_millis(100)) {
+        if let Ok(evs) = rx.recv_timeout(Duration::from_millis(100)) {
             deep.extend(evs);
         }
     }
@@ -174,8 +175,8 @@ fn pid_reuse(r: &mut Report) {
 #[cfg(windows)]
 fn capture_windows(r: &mut Report) {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
-    let (tx, rx) = std::sync::mpsc::channel();
-    let Some(w) = crate::deeptrace::Watcher::start(tx) else {
+    let (events, rx) = Emit::channel();
+    let Some(w) = crate::deeptrace::Watcher::start(crate::deeptrace::Output { events, errors: Emit::new(|_| true) }) else {
         r.notes.push("deep trace watcher could not start".into());
         return;
     };
@@ -209,7 +210,7 @@ fn capture_windows(r: &mut Report) {
     let mut deep: Vec<crate::deeptrace::DtEvent> = Vec::new();
     let until = Instant::now() + Duration::from_millis(800);
     while Instant::now() < until {
-        if let Ok(crate::sampler::WorkerMsg::Deep(evs)) = rx.recv_timeout(Duration::from_millis(100)) {
+        if let Ok(evs) = rx.recv_timeout(Duration::from_millis(100)) {
             deep.extend(evs);
         }
     }
@@ -251,7 +252,7 @@ fn file_latency(r: &mut Report) {
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = Emit::channel();
     let (_w, errors) = crate::fswatch::start(&[dir.display().to_string()], tx);
     if !errors.is_empty() {
         r.notes.push(format!("file watch: {}", errors.join("; ")));
@@ -262,7 +263,7 @@ fn file_latency(r: &mut Report) {
     let _ = std::fs::write(&f, b"selftest");
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
-        if let Ok(crate::sampler::WorkerMsg::Fs(e)) = rx.recv_timeout(Duration::from_millis(50)) {
+        if let Ok(e) = rx.recv_timeout(Duration::from_millis(50)) {
             if e.path.ends_with("probe.txt") {
                 r.file_event_latency_ms = Some(t0.elapsed().as_millis() as u64);
                 break;
@@ -296,7 +297,7 @@ fn activity_probe(r: &mut Report) {
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = Emit::channel();
     match crate::activity::start(tx) {
         Err(e) => r.activity.push(format!("capture: not available ({e})")),
         Ok(c) => {
@@ -307,7 +308,7 @@ fn activity_probe(r: &mut Report) {
             let until = Instant::now() + Duration::from_secs(3);
             let mut unnamed: Vec<String> = Vec::new();
             while Instant::now() < until {
-                if let Ok(crate::sampler::WorkerMsg::Activity(batch)) = rx.recv_timeout(Duration::from_millis(100)) {
+                if let Ok(batch) = rx.recv_timeout(Duration::from_millis(100)) {
                     for a in batch {
                         let path = a.path.to_lowercase();
                         let ours = path.contains(&needle) || path.contains("procwatch-selftest") || path.ends_with("a.txt") || path.ends_with("b.txt");
@@ -333,7 +334,7 @@ fn activity_probe(r: &mut Report) {
 /// Accuracy on real traffic, when CI names a file of known size to fetch.
 fn traffic_download_probe(r: &mut Report) {
     let Ok(url) = std::env::var("PW_SELFTEST_URL") else { return };
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = Emit::channel();
     let Ok(t) = crate::netio::start(tx) else { return };
     std::thread::sleep(Duration::from_millis(500));
     let dest = std::env::temp_dir().join(format!("procwatch-selftest-download-{}", std::process::id()));
@@ -344,7 +345,7 @@ fn traffic_download_probe(r: &mut Report) {
     let mut seen = (0, 0);
     let until = Instant::now() + Duration::from_secs(12);
     while Instant::now() < until {
-        if let Ok(crate::sampler::WorkerMsg::Traffic(m)) = rx.recv_timeout(Duration::from_millis(200)) {
+        if let Ok(m) = rx.recv_timeout(Duration::from_millis(200)) {
             if let Some(v) = m.get(&pid) {
                 seen = *v;
             }
@@ -359,7 +360,7 @@ fn traffic_download_probe(r: &mut Report) {
 fn traffic_probe(r: &mut Report) {
     use std::io::{Read, Write};
     const SIZE: usize = 4 << 20;
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = Emit::channel();
     let t = match crate::netio::start(tx) {
         Ok(t) => t,
         Err(e) => {
@@ -393,7 +394,7 @@ fn traffic_probe(r: &mut Report) {
     let mut seen = (0, 0);
     let until = Instant::now() + Duration::from_secs(5);
     while Instant::now() < until {
-        if let Ok(crate::sampler::WorkerMsg::Traffic(m)) = rx.recv_timeout(Duration::from_millis(200)) {
+        if let Ok(m) = rx.recv_timeout(Duration::from_millis(200)) {
             if let Some(v) = m.get(&me) {
                 seen = *v;
             }

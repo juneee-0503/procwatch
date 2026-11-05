@@ -171,7 +171,7 @@ impl Filterable for Facts<'_> {
 pub const TRUST_RULES: &str = "PW-002,PW-004,PW-013,PW-014,PW-018";
 
 pub fn path() -> Option<PathBuf> {
-    crate::config::path().map(|p| p.with_file_name("suppressions.txt"))
+    crate::common::paths::config_path().map(|p| p.with_file_name("suppressions.txt"))
 }
 
 pub fn parse(text: &str) -> Vec<Suppression> {
@@ -206,7 +206,7 @@ pub fn append(s: &Suppression) -> anyhow::Result<PathBuf> {
         text.push('\n');
     }
     text.push_str(&format!("{} | {} | {}\n", s.rule, s.filter, s.reason.replace('\n', " ")));
-    crate::config::write_atomic(&p, &text)?;
+    crate::common::paths::write_atomic(&p, &text)?;
     Ok(p)
 }
 

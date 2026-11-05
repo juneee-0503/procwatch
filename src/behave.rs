@@ -201,7 +201,7 @@ pub fn builtin() -> Vec<Rule> {
 pub fn load() -> (Vec<Rule>, Vec<String>) {
     let mut rules = builtin();
     let mut errors = Vec::new();
-    if let Some(dir) = crate::config::path().map(|p| p.with_file_name("behavior")).filter(|d| d.is_dir()) {
+    if let Some(dir) = crate::common::paths::config_path().map(|p| p.with_file_name("behavior")).filter(|d| d.is_dir()) {
         for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
             if e.path().extension().is_some_and(|x| x == "yml" || x == "yaml") {
                 match std::fs::read_to_string(e.path()) {

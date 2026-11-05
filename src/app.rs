@@ -688,7 +688,7 @@ impl App {
                 let mut ir = ir::Ir::new(tx.clone(), &cfg.watch);
                 #[cfg(target_os = "linux")]
                 if crate::fsattr::unavailable_reason().is_none() && !cfg!(test) {
-                    ir.deep.attribution = match crate::fsattr::start_fanotify(&ir.watch_paths, tx.clone()) {
+                    ir.deep.attribution = match crate::fsattr::start_fanotify(&ir.watch_paths, crate::common::emit::Emit::to(tx.clone(), WorkerMsg::Fs)) {
                         Ok(()) => "fanotify on watched folders' mounts".into(),
                         Err(e) => format!("fanotify unavailable: {e}"),
                     };

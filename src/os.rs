@@ -132,7 +132,7 @@ pub fn list_open_files() -> anyhow::Result<Vec<Hit>> {
 #[cfg(target_os = "macos")]
 mod imp {
     use super::*;
-    use crate::inspect::run_command;
+    use crate::common::command::run_command;
 
     pub fn scan() -> anyhow::Result<Vec<Hit>> {
         // One lsof for the whole system: p = pid, c = command, f = fd,

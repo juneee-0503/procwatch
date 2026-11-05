@@ -229,7 +229,7 @@ fn gatekeeper(path: &str) -> Option<String> {
     #[cfg(target_os = "macos")]
     {
         let target = path.find(".app/").map(|i| &path[..i + 4]).unwrap_or(path);
-        let out = crate::inspect::run_command(
+        let out = crate::common::command::run_command(
             std::process::Command::new("/usr/sbin/spctl").args(["--assess", "--type", "execute", "-vv", target]),
             std::time::Duration::from_secs(15),
         )
@@ -252,7 +252,7 @@ fn gatekeeper(path: &str) -> Option<String> {
 fn entitlements(path: &str) -> Vec<String> {
     #[cfg(target_os = "macos")]
     {
-        use crate::inspect::run_command;
+        use crate::common::command::run_command;
         use std::process::Command;
         use std::time::Duration;
         let Ok(o) = run_command(Command::new("codesign").args(["-d", "--entitlements", "-", "--xml", path]), Duration::from_secs(10)) else {
@@ -297,7 +297,7 @@ pub fn risky_entitlement(e: &str) -> bool {
 fn origin(path: &str) -> Vec<String> {
     #[cfg(target_os = "macos")]
     {
-        use crate::inspect::run_command;
+        use crate::common::command::run_command;
         use std::process::Command;
         use std::time::Duration;
         let mut out = Vec::new();

@@ -12,6 +12,7 @@ use chrono::{DateTime, Local};
 use serde::Serialize;
 
 use crate::fileinfo;
+use crate::common::paths::risky_location;
 use crate::inspect::{self, SignatureStatus};
 
 #[derive(Debug, Clone, Serialize)]
@@ -156,14 +157,6 @@ fn expand_env(s: &str) -> String {
         }
     }
     out
-}
-
-/// Folders where legitimate auto-start programs rarely live.
-pub fn risky_location(path: &str) -> bool {
-    let p = path.to_lowercase().replace('\\', "/");
-    ["/tmp/", "/private/tmp/", "/var/tmp/", "/private/var/folders/", "/dev/shm/", "/downloads/", "/users/shared/", "/appdata/local/temp/", "/users/public/", "/windows/temp/"]
-        .iter()
-        .any(|d| p.contains(d))
 }
 
 fn enrich(it: &mut Item, known: &std::collections::HashMap<String, crate::intel::ExeInfo>) {
@@ -370,7 +363,7 @@ fn sudoers(items: &mut Vec<Item>, notes: &mut Vec<String>) {
 #[cfg(target_os = "macos")]
 mod imp {
     use super::*;
-    use crate::inspect::run_command;
+    use crate::common::command::run_command;
     use std::process::Command;
 
     fn launchd(items: &mut Vec<Item>, dir: &Path, category: &str, scope: &str) {
@@ -616,7 +609,7 @@ mod imp {
                 }
             }
         }
-        if let Ok(o) = crate::inspect::run_command(std::process::Command::new("crontab").arg("-l"), Duration::from_secs(5)) {
+        if let Ok(o) = crate::common::command::run_command(std::process::Command::new("crontab").arg("-l"), Duration::from_secs(5)) {
             cron_lines(&mut items, &String::from_utf8_lossy(&o.stdout), "crontab (current user)", "user", false);
         }
         for (dir, scope) in [(h.join(".config/autostart"), "user"), (PathBuf::from("/etc/xdg/autostart"), "system")] {
@@ -716,7 +709,7 @@ mod imp {
 #[cfg(target_os = "windows")]
 mod imp {
     use super::*;
-    use crate::inspect::run_command;
+    use crate::common::command::run_command;
     use std::process::Command;
 
     const SCRIPT: &str = r#"

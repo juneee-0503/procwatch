@@ -662,7 +662,7 @@ pub fn builtin() -> Vec<Rule> {
 }
 
 pub fn default_dir() -> Option<std::path::PathBuf> {
-    crate::config::path().map(|p| p.with_file_name("yara"))
+    crate::common::paths::config_path().map(|p| p.with_file_name("yara"))
 }
 
 /// Built-in rules plus the user's folder.

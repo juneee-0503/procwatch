@@ -163,7 +163,7 @@ pub fn options(frame: &mut Frame, app: &mut App, screen: Rect) {
     // Keep the cursor visible on short terminals.
     let cursor_line = lines.iter().position(|l| l.style == sel_style()).unwrap_or(0);
     let scroll = cursor_line.saturating_sub(inner.height.saturating_sub(2) as usize);
-    let footer = crate::config::path().map(|p| format!(" Saved to {}", p.display())).unwrap_or_default();
+    let footer = crate::common::paths::config_path().map(|p| format!(" Saved to {}", p.display())).unwrap_or_default();
     frame.render_widget(Paragraph::new(lines).scroll((scroll as u16, 0)), Rect { height: inner.height.saturating_sub(1), ..inner });
     frame.render_widget(Paragraph::new(muted(footer)), Rect { y: inner.bottom().saturating_sub(1), height: 1, ..inner });
 }

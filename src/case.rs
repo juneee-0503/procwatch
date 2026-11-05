@@ -439,7 +439,7 @@ impl Case {
             problems: prov.problems.clone(),
         };
         reg.push(item.clone());
-        crate::config::write_atomic(&self.dir.join("evidence.json"), &serde_json::to_string_pretty(&reg)?)?;
+        crate::common::paths::write_atomic(&self.dir.join("evidence.json"), &serde_json::to_string_pretty(&reg)?)?;
         Ok(item)
     }
 
@@ -486,7 +486,7 @@ impl Case {
             let mut reg = self.register();
             if let Some(item) = reg.iter_mut().rev().find(|i| i.path == old) {
                 item.path = new.clone();
-                crate::config::write_atomic(&self.dir.join("evidence.json"), &serde_json::to_string_pretty(&reg)?)?;
+                crate::common::paths::write_atomic(&self.dir.join("evidence.json"), &serde_json::to_string_pretty(&reg)?)?;
             }
         }
         self.log("kept earlier collection", &format!("{old} → {new} sha256={hash}"))

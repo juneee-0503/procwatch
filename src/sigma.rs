@@ -412,7 +412,7 @@ pub fn builtin() -> Vec<Rule> {
 
 /// Default rule folder: `sigma/` next to the settings file.
 pub fn default_dir() -> Option<std::path::PathBuf> {
-    crate::config::path().map(|p| p.with_file_name("sigma"))
+    crate::common::paths::config_path().map(|p| p.with_file_name("sigma"))
 }
 
 // ── evaluation ─────────────────────────────────────────────────────────

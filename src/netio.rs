@@ -9,15 +9,22 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Sender;
 use std::sync::Arc;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::time::Duration;
 
-use crate::sampler::WorkerMsg;
+use crate::common::emit::Emit;
 
 /// Per pid: bytes received, bytes sent.
 pub type Totals = HashMap<u32, (u64, u64)>;
+
+/// A connection opened or closed, on platforms with exact events.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub struct ConnOp {
+    pub pid: u32,
+    pub op: &'static str,
+    pub remote: String,
+}
 
 /// A running counter; stops when dropped.
 pub struct Traffic {
@@ -33,11 +40,11 @@ impl Drop for Traffic {
     }
 }
 
-pub fn start(tx: Sender<WorkerMsg>) -> Result<Traffic, String> {
+pub fn start(out: Emit<Totals>) -> Result<Traffic, String> {
     let stop = Arc::new(AtomicBool::new(false));
     #[cfg(windows)]
     {
-        let trace = crate::etw::start_traffic(tx, stop.clone())?;
+        let trace = windows::start_traffic(out, stop.clone())?;
         Ok(Traffic { stop, method: "ETW Kernel-Network", _trace: trace })
     }
     #[cfg(target_os = "linux")]
@@ -49,7 +56,7 @@ pub fn start(tx: Sender<WorkerMsg>) -> Result<Traffic, String> {
                 let mut c = linux::Counter::default();
                 while !s.load(Ordering::Relaxed) {
                     if let Some(t) = c.sample() {
-                        if tx.send(WorkerMsg::Traffic(t)).is_err() {
+                        if !out.send(t) {
                             return;
                         }
                     }
@@ -67,7 +74,7 @@ pub fn start(tx: Sender<WorkerMsg>) -> Result<Traffic, String> {
             .spawn(move || {
                 while !s.load(Ordering::Relaxed) {
                     if let Some(t) = macos::sample() {
-                        if tx.send(WorkerMsg::Traffic(t)).is_err() {
+                        if !out.send(t) {
                             return;
                         }
                     }
@@ -79,10 +86,106 @@ pub fn start(tx: Sender<WorkerMsg>) -> Result<Traffic, String> {
     }
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
-        let _ = (tx, stop);
+        let _ = (out, stop);
         Err("not available on this platform".into())
     }
 }
+
+#[cfg(windows)]
+mod windows {
+    use super::*;
+    use std::net::IpAddr;
+    use std::sync::Mutex;
+
+    use ferrisetw::parser::Parser;
+    use ferrisetw::provider::Provider;
+    use ferrisetw::schema_locator::SchemaLocator;
+    use ferrisetw::trace::UserTrace;
+    use ferrisetw::EventRecord;
+
+    use crate::common::etw::start;
+
+    const KERNEL_NETWORK: &str = "7DD42A49-5329-4832-8DFD-43D979153A88";
+    /// Kernel-Network keywords: IPv4 and IPv6.
+    const NET_KEYWORDS: u64 = 0x10 | 0x20;
+    const MAX_TRAFFIC_PIDS: usize = 16_384;
+
+    /// Who wants connection events, while an activity capture runs.
+    static SINK: Mutex<Option<Emit<ConnOp>>> = Mutex::new(None);
+
+    pub fn set_connection_sink(sink: Option<Emit<ConnOp>>) {
+        if let Ok(mut s) = SINK.lock() {
+            *s = sink;
+        }
+    }
+
+    pub fn start_traffic(out: Emit<Totals>, stop: Arc<AtomicBool>) -> Result<UserTrace, String> {
+        let totals: Arc<Mutex<Totals>> = Arc::default();
+        let shared = totals.clone();
+        let provider = Provider::by_guid(KERNEL_NETWORK)
+            .any(NET_KEYWORDS)
+            .add_callback(move |r: &EventRecord, sl: &SchemaLocator| {
+                // The event says which process; the header is often System.
+                let id = r.event_id();
+                let (received, sent, op) = match id {
+                    11 | 27 | 43 | 59 => (true, false, ""),
+                    10 | 26 | 42 | 58 => (false, true, ""),
+                    12 | 28 => (false, false, "connect"),
+                    15 | 31 => (false, false, "accept"),
+                    13 | 29 => (false, false, "disconnect"),
+                    _ => return,
+                };
+                let Ok(schema) = sl.event_schema(r) else { return };
+                let p = Parser::create(r, &schema);
+                let Ok(pid) = p.try_parse::<u32>("PID") else { return };
+                if received || sent {
+                    let size = u64::from(p.try_parse::<u32>("size").unwrap_or(0));
+                    if let Ok(mut t) = shared.lock() {
+                        let e = t.entry(pid).or_default();
+                        if received {
+                            e.0 += size;
+                        } else {
+                            e.1 += size;
+                        }
+                    }
+                    return;
+                }
+                if let Ok(s) = SINK.lock() {
+                    if let Some(sink) = s.as_ref() {
+                        let ip = p.try_parse::<IpAddr>("daddr").map(|a| a.to_string()).unwrap_or_default();
+                        // Network byte order, whatever the schema says.
+                        let port = p.try_parse::<u16>("dport").map(u16::swap_bytes).unwrap_or(0);
+                        sink.send(ConnOp { pid, op, remote: format!("{ip}:{port}") });
+                    }
+                }
+            })
+            .build();
+        let trace = start("procwatch-traffic", vec![provider])?;
+        let _ = std::thread::Builder::new().name("traffic".into()).spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                let now = totals
+                    .lock()
+                    .map(|mut t| {
+                        // Exited processes' entries; rates only need the live ones.
+                        if t.len() > MAX_TRAFFIC_PIDS {
+                            t.clear();
+                        }
+                        t.clone()
+                    })
+                    .unwrap_or_default();
+                if !now.is_empty() && !out.send(now) {
+                    return;
+                }
+            }
+        });
+        Ok(trace)
+    }
+
+}
+
+#[cfg(windows)]
+pub use windows::set_connection_sink;
 
 /// One `name.pid,bytes_in,bytes_out,` line of `nettop -P -x`.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -103,7 +206,7 @@ mod macos {
     pub fn sample() -> Option<Totals> {
         let mut cmd = std::process::Command::new("/usr/bin/nettop");
         cmd.args(["-P", "-x", "-L", "1", "-J", "bytes_in,bytes_out"]);
-        let out = crate::inspect::run_command(&mut cmd, Duration::from_secs(8)).ok()?;
+        let out = crate::common::command::run_command(&mut cmd, Duration::from_secs(8)).ok()?;
         let text = String::from_utf8_lossy(&out.stdout);
         let totals: Totals = text.lines().filter_map(parse_nettop).map(|(pid, rx, tx)| (pid, (rx, tx))).collect();
         (!totals.is_empty()).then_some(totals)

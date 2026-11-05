@@ -11,15 +11,12 @@
 //! caller falls back to unattributed change notifications.
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-use std::sync::mpsc::Sender;
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 use chrono::Local;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::fswatch::FsEvent;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-use crate::sampler::WorkerMsg;
+use crate::common::emit::Emit;
 
 /// Why attribution isn't running (for the health view), or None if it is.
 pub fn unavailable_reason() -> Option<String> {
@@ -68,7 +65,7 @@ pub fn parse_fs_usage(line: &str) -> Option<(&'static str, String, u32)> {
 
 /// Run fs_usage for `pids` until the returned child is killed.
 #[cfg(target_os = "macos")]
-pub fn start_fs_usage(pids: &[u32], tx: Sender<WorkerMsg>) -> Option<std::process::Child> {
+pub fn start_fs_usage(pids: &[u32], events: Emit<FsEvent>) -> Option<std::process::Child> {
     use std::io::BufRead;
     if pids.is_empty() || unsafe { libc::geteuid() } != 0 {
         return None;
@@ -82,7 +79,7 @@ pub fn start_fs_usage(pids: &[u32], tx: Sender<WorkerMsg>) -> Option<std::proces
     let _ = std::thread::Builder::new().name("fs_usage".into()).spawn(move || {
         for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
             if let Some((kind, path, pid)) = parse_fs_usage(&line) {
-                if tx.send(WorkerMsg::Fs(FsEvent { time: Local::now(), kind, path, pid: Some(pid) })).is_err() {
+                if !events.send(FsEvent { time: Local::now(), kind, path, pid: Some(pid) }) {
                     break;
                 }
             }
@@ -94,7 +91,7 @@ pub fn start_fs_usage(pids: &[u32], tx: Sender<WorkerMsg>) -> Option<std::proces
 // ── Linux: fanotify ────────────────────────────────────────────────────
 
 #[cfg(target_os = "linux")]
-pub fn start_fanotify(paths: &[String], tx: Sender<WorkerMsg>) -> Result<(), String> {
+pub fn start_fanotify(paths: &[String], events: Emit<FsEvent>) -> Result<(), String> {
     use std::ffi::CString;
     let fd = unsafe { libc::fanotify_init(libc::FAN_CLASS_NOTIF | libc::FAN_CLOEXEC, (libc::O_RDONLY | libc::O_LARGEFILE) as u32) };
     if fd < 0 {
@@ -136,7 +133,7 @@ pub fn start_fanotify(paths: &[String], tx: Sender<WorkerMsg>) -> Result<(), Str
                         if m.pid != me && watched.iter().any(|w| path.starts_with(w.as_str())) {
                             let kind = if m.mask & libc::FAN_CLOSE_WRITE != 0 { "modified" } else { "changed" };
                             let ev = FsEvent { time: Local::now(), kind, path, pid: Some(m.pid as u32) };
-                            if tx.send(WorkerMsg::Fs(ev)).is_err() {
+                            if !events.send(ev) {
                                 return;
                             }
                         }

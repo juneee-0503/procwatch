@@ -1,4 +1,5 @@
 mod app;
+mod common;
 mod artifacts;
 mod baseline;
 mod behave;
@@ -130,7 +131,7 @@ fn main() -> anyhow::Result<()> {
     match args.first().map(String::as_str) {
         Some("-h" | "--help") => {
             println!("{USAGE}");
-            if let Some(p) = config::path() {
+            if let Some(p) = common::paths::config_path() {
                 println!("\nSettings file: {}", p.display());
             }
             return Ok(());

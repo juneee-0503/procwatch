@@ -15,7 +15,7 @@ use serde::Serialize;
 use crate::intel::{ExeInfo, Sig};
 use crate::model::{Confidence, Severity};
 use crate::network::{ConnState, Connection};
-use crate::persistence::risky_location;
+use crate::common::paths::risky_location;
 use crate::process::ProcessInfo;
 
 #[derive(Debug, Serialize)]

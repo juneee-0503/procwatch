@@ -358,7 +358,7 @@ pub struct SweepState {
 impl Ir {
     pub fn new(tx: Sender<WorkerMsg>, watch: &[String]) -> Self {
         let watch_paths = if watch.is_empty() { fswatch::default_paths() } else { watch.to_vec() };
-        let (watcher, watch_errors) = fswatch::start(&watch_paths, tx);
+        let (watcher, watch_errors) = fswatch::start(&watch_paths, crate::common::emit::Emit::to(tx, WorkerMsg::Fs));
         Ir {
             intel: crate::intel::Intel::new(),
             triage: HashMap::new(),
@@ -1133,7 +1133,7 @@ impl App {
             self.set_status(StatusLevel::Info, "Activity capture stopped".into());
             return;
         }
-        match crate::activity::start(self.tx.clone()) {
+        match crate::activity::start(crate::common::emit::Emit::to(self.tx.clone(), WorkerMsg::Activity)) {
             Ok(c) => {
                 self.ir.capture_error = None;
                 self.set_status(StatusLevel::Success, format!("Capturing activity: {}", c.method));
@@ -1325,7 +1325,7 @@ impl App {
         }
         if !self.ir.traffic_asked && !cfg!(test) {
             self.ir.traffic_asked = true;
-            match crate::netio::start(self.tx.clone()) {
+            match crate::netio::start(crate::common::emit::Emit::to(self.tx.clone(), WorkerMsg::Traffic)) {
                 Ok(t) => self.ir.traffic = Some(t),
                 Err(e) => self.ir.traffic_error = Some(e),
             }

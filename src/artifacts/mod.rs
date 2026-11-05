@@ -394,7 +394,7 @@ pub fn collect_dir(dir: &Path) -> Scan {
 #[cfg(windows)]
 mod windows {
     use super::*;
-    use crate::inspect::run_command_capped;
+    use crate::common::command::run_command_capped;
     use std::process::Command;
     use std::time::Duration;
 

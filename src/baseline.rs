@@ -200,7 +200,7 @@ impl Baseline {
 
 /// Default location: next to the settings file.
 pub fn default_path() -> Option<PathBuf> {
-    crate::config::path().map(|p| p.with_file_name("baseline.json"))
+    crate::common::paths::config_path().map(|p| p.with_file_name("baseline.json"))
 }
 
 /// Plain-text rendering for the command line.

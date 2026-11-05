@@ -233,7 +233,7 @@ fn macho_structure(b: &[u8], st: &mut Structure) {
                 // LC_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB, LC_REEXPORT_DYLIB, LC_LOAD_UPWARD_DYLIB
                 let name_off = u32le(b, o + 8).unwrap_or(0) as usize;
                 let lib = cstr(b, o + name_off, size.saturating_sub(name_off));
-                if crate::persistence::risky_location(&lib) {
+                if crate::common::paths::risky_location(&lib) {
                     st.anomalies.push(format!("links a library from a user-writable location: {lib}"));
                 }
                 st.libraries.push(lib);

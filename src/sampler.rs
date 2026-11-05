@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::common::emit::Emit;
 use crate::gpu::{self, GpuSnapshot};
 use crate::inspect::{self, DeepInfo};
 use crate::network::{self, Connection};
@@ -102,6 +103,11 @@ impl SamplerCtl {
 }
 
 const MAX_QUEUED_SNAPSHOTS: u64 = 2;
+
+/// Deep trace reporting into the worker channel.
+pub fn deep_output(tx: &Sender<WorkerMsg>) -> crate::deeptrace::Output {
+    crate::deeptrace::Output { events: Emit::to(tx.clone(), WorkerMsg::Deep), errors: Emit::to(tx.clone(), WorkerMsg::Error) }
+}
 
 /// What a bounded drain left behind.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

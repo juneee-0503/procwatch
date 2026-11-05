@@ -177,7 +177,7 @@ fn send(pid: u32, sig: Sig) -> Result<()> {
 
 #[cfg(windows)]
 fn send(pid: u32, sig: Sig) -> Result<()> {
-    use crate::inspect::run_command;
+    use crate::common::command::run_command;
     use std::process::Command;
     use std::time::Duration;
     use windows_sys::Win32::Foundation::CloseHandle;

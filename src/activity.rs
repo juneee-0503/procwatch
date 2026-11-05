@@ -13,13 +13,12 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local};
 
-use crate::sampler::WorkerMsg;
+use crate::common::emit::Emit;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Class {
@@ -83,7 +82,7 @@ pub fn dropped() -> u64 {
 
 /// Collects events from a source thread and hands batches to the UI.
 pub struct Batcher {
-    tx: Sender<WorkerMsg>,
+    out: Emit<Vec<Activity>>,
     items: Vec<Activity>,
     index: HashMap<(u32, &'static str, String), usize>,
     window: Instant,
@@ -94,8 +93,8 @@ pub struct Batcher {
 pub type SharedBatcher = Arc<Mutex<Batcher>>;
 
 impl Batcher {
-    pub fn new(tx: Sender<WorkerMsg>) -> Batcher {
-        Batcher { tx, items: Vec::new(), index: HashMap::new(), window: Instant::now(), in_window: 0, me: std::process::id() }
+    pub fn new(out: Emit<Vec<Activity>>) -> Batcher {
+        Batcher { out, items: Vec::new(), index: HashMap::new(), window: Instant::now(), in_window: 0, me: std::process::id() }
     }
 
     pub fn push(&mut self, a: Activity) {
@@ -128,7 +127,7 @@ impl Batcher {
         if self.items.is_empty() {
             return true;
         }
-        self.tx.send(WorkerMsg::Activity(std::mem::take(&mut self.items))).is_ok()
+        self.out.send(std::mem::take(&mut self.items))
     }
 }
 
@@ -159,7 +158,7 @@ impl Drop for Capture {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         #[cfg(windows)]
-        crate::etw::set_activity_sink(None);
+        crate::netio::set_connection_sink(None);
         #[cfg(target_os = "macos")]
         {
             let _ = self.child.kill();
@@ -169,13 +168,19 @@ impl Drop for Capture {
 }
 
 /// Start capturing. Err says why it can't run, for the user to see.
-pub fn start(tx: Sender<WorkerMsg>) -> Result<Capture, String> {
+pub fn start(out: Emit<Vec<Activity>>) -> Result<Capture, String> {
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let batcher: SharedBatcher = Arc::new(Mutex::new(Batcher::new(tx)));
+    let batcher: SharedBatcher = Arc::new(Mutex::new(Batcher::new(out)));
     #[cfg(windows)]
     {
         let trace = crate::etw::start_activity(batcher.clone())?;
-        crate::etw::set_activity_sink(Some(batcher.clone()));
+        let sink = batcher.clone();
+        crate::netio::set_connection_sink(Some(Emit::new(move |c: crate::netio::ConnOp| {
+            if let Ok(mut b) = sink.lock() {
+                b.push(Activity::new(c.pid, Class::Network, c.op, c.remote));
+            }
+            true
+        })));
         spawn_flusher(batcher, stop.clone());
         Ok(Capture { stop, method: "ETW Kernel-File and Kernel-Registry", _trace: trace })
     }
@@ -202,20 +207,6 @@ pub fn start(tx: Sender<WorkerMsg>) -> Result<Capture, String> {
         let _ = (batcher, stop);
         Err("not available on this platform".into())
     }
-}
-
-/// `\REGISTRY\MACHINE\...` as people write it.
-#[cfg_attr(not(windows), allow(dead_code))]
-pub fn registry_path(raw: &str) -> String {
-    let trimmed = raw.trim_start_matches('\\');
-    let upper = trimmed.to_ascii_uppercase();
-    for (native, short) in [("REGISTRY\\MACHINE", "HKLM"), ("REGISTRY\\USER", "HKU"), ("REGISTRY\\A", "HKA")] {
-        if upper.starts_with(native) {
-            // ASCII prefix, so the same byte length in both.
-            return format!("{short}{}", &trimmed[native.len()..]);
-        }
-    }
-    raw.to_string()
 }
 
 /// Windows autostart keys: a write to one is worth a detection, and here
@@ -454,9 +445,9 @@ mod macos {
 mod tests {
     use super::*;
 
-    fn batcher() -> (Batcher, std::sync::mpsc::Receiver<WorkerMsg>) {
-        let (tx, rx) = std::sync::mpsc::channel();
-        (Batcher::new(tx), rx)
+    fn batcher() -> (Batcher, std::sync::mpsc::Receiver<Vec<Activity>>) {
+        let (out, rx) = Emit::channel();
+        (Batcher::new(out), rx)
     }
 
     #[test]
@@ -467,13 +458,13 @@ mod tests {
         b.push(Activity::new(5, Class::File, "read", "/a"));
         b.push(Activity::new(std::process::id(), Class::File, "write", "/a"));
         assert!(b.flush());
-        let Ok(WorkerMsg::Activity(v)) = rx.try_recv() else { panic!("no batch") };
+        let Ok(v) = rx.try_recv() else { panic!("no batch") };
         assert_eq!(v.len(), 2);
         assert_eq!((v[0].count, v[0].bytes), (2, 15));
         // The next batch starts over.
         b.push(Activity::new(5, Class::File, "write", "/a"));
         assert!(b.flush());
-        let Ok(WorkerMsg::Activity(v)) = rx.try_recv() else { panic!("no batch") };
+        let Ok(v) = rx.try_recv() else { panic!("no batch") };
         assert_eq!(v[0].count, 1);
     }
 
@@ -489,11 +480,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_paths_and_autostart_keys() {
-        assert_eq!(registry_path(r"\REGISTRY\MACHINE\SOFTWARE\X"), r"HKLM\SOFTWARE\X");
-        assert_eq!(registry_path(r"\Registry\User\S-1-5\Software"), r"HKU\S-1-5\Software");
-        assert_eq!(registry_path("relative\\key"), "relative\\key");
-        assert_eq!(registry_path("\\REGISTRY\\MACHINE\\キー"), "HKLM\\キー");
+    fn autostart_keys() {
         assert!(is_autostart_key(r"HKU\S-1\Software\Microsoft\Windows\CurrentVersion\Run\x"));
         assert!(is_autostart_key(r"HKLM\SYSTEM\CurrentControlSet\Services\evil\ImagePath"));
         assert!(!is_autostart_key(r"HKLM\SOFTWARE\Vendor\Settings"));

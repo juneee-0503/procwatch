@@ -8,7 +8,7 @@ use chrono::{DateTime, Local};
 use serde::Serialize;
 
 #[allow(unused_imports)]
-use crate::inspect::{run_command, run_command_capped};
+use crate::common::command::{run_command, run_command_capped};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Entry {

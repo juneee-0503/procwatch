@@ -86,7 +86,7 @@ pub fn quarantine(case: &Case, path: &Path) -> anyhow::Result<Quarantined> {
         mode,
         restored: false,
     };
-    crate::config::write_atomic(&dest.with_extension("json"), &serde_json::to_string_pretty(&rec)?)?;
+    crate::common::paths::write_atomic(&dest.with_extension("json"), &serde_json::to_string_pretty(&rec)?)?;
     let id = case.register_quarantine(&dest, &rec.original_path).map(|i| i.id).unwrap_or_else(|e| format!("(not registered: {e})"));
     case.log("quarantined file", &format!("{id} {} → {} sha256={sha}", rec.original_path, rec.stored_as))?;
     Ok(rec)
@@ -162,7 +162,7 @@ pub fn restore(case: &Case, q: &Quarantined) -> anyhow::Result<()> {
     }
     let mut rec = q.clone();
     rec.restored = true;
-    crate::config::write_atomic(&record, &serde_json::to_string_pretty(&rec)?)?;
+    crate::common::paths::write_atomic(&record, &serde_json::to_string_pretty(&rec)?)?;
     case.log("restored file", &format!("{} sha256={}", q.original_path, q.sha256))?;
     Ok(())
 }

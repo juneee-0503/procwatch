@@ -5,7 +5,8 @@
 //! requires elevated privileges, which is an OS restriction, not a
 //! limitation of this tool).
 
-use super::{run_command, DeepInfo, OpenFile, SignatureStatus};
+use super::{DeepInfo, OpenFile, SignatureStatus};
+use crate::common::command::run_command;
 use std::process::Command;
 use std::thread;
 use std::time::Duration;

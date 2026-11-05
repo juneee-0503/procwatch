@@ -40,7 +40,7 @@ pub fn system_gpu_usage() -> GpuSnapshot {
 #[cfg(target_os = "windows")]
 mod windows_impl {
     use super::GpuSnapshot;
-    use crate::inspect::run_command;
+    use crate::common::command::run_command;
     use std::process::Command;
     use std::time::Duration;
 

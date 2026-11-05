@@ -137,7 +137,7 @@ fn describe(process: HANDLE, value: usize, kind: u16, types: &mut HashMap<u16, S
             0 => None,
             pid => Some(format!("process {pid}")),
         },
-        "Key" => query_string(dup, OBJECT_NAME_INFORMATION).map(|n| crate::activity::registry_path(&n)),
+        "Key" => query_string(dup, OBJECT_NAME_INFORMATION).map(|n| crate::common::paths::registry_path(&n)),
         "Mutant" | "Section" | "Event" | "Semaphore" | "Directory" | "SymbolicLink" | "Timer" => query_string(dup, OBJECT_NAME_INFORMATION),
         _ => None,
     };

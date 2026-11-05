@@ -15,6 +15,7 @@
 //! and the watcher reports how it observed it, so the timeline can say how
 //! precise each entry is.
 
+use crate::common::emit::Emit;
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, Sender};
 #[cfg(any(test, target_os = "linux", target_os = "windows"))]
@@ -72,16 +73,23 @@ pub struct Watcher {
     tx: Sender<Cmd>,
 }
 
+/// Where the watcher reports.
+#[derive(Clone)]
+pub struct Output {
+    pub events: Emit<Vec<DtEvent>>,
+    pub errors: Emit<String>,
+}
+
 impl Watcher {
     /// Start the watcher; events are delivered through `out` in batches.
-    pub fn start(out: Sender<crate::sampler::WorkerMsg>) -> Option<Watcher> {
+    pub fn start(out: Output) -> Option<Watcher> {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::Builder::new()
             .name("deeptrace".into())
             .spawn(move || {
                 let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| imp::run(rx, &out)));
                 if let Err(e) = r {
-                    let _ = out.send(crate::sampler::WorkerMsg::Error(format!("deep trace stopped: {}", crate::sampler::panic_text(&e))));
+                    out.errors.send(format!("deep trace stopped: {}", crate::sampler::panic_text(&e)));
                 }
             })
             .ok()?;
@@ -122,11 +130,11 @@ struct Book {
 }
 
 #[allow(dead_code)]
-fn send(out: &Sender<crate::sampler::WorkerMsg>, batch: &mut Vec<DtEvent>) -> bool {
+fn send(out: &Output, batch: &mut Vec<DtEvent>) -> bool {
     if batch.is_empty() {
         return true;
     }
-    out.send(crate::sampler::WorkerMsg::Deep(std::mem::take(batch))).is_ok()
+    out.events.send(std::mem::take(batch))
 }
 
 #[allow(dead_code)]
@@ -209,10 +217,10 @@ mod imp {
         }
     }
 
-    pub fn run(rx: Receiver<Cmd>, out: &Sender<crate::sampler::WorkerMsg>) {
+    pub fn run(rx: Receiver<Cmd>, out: &Output) {
         let kq = unsafe { libc::kqueue() };
         if kq < 0 {
-            let _ = out.send(crate::sampler::WorkerMsg::Error("deep trace: kqueue unavailable".into()));
+            out.errors.send("deep trace: kqueue unavailable".into());
             return;
         }
         let mut watched: HashSet<u32> = HashSet::new();
@@ -534,7 +542,7 @@ mod imp {
         DtEvent { at: Local::now(), kind, pid, ppid, start: crate::process::native::start_time(pid).unwrap_or(0), path: exe(pid), args: args(pid), via: "procfs poll" }
     }
 
-    pub fn run(rx: Receiver<Cmd>, out: &Sender<crate::sampler::WorkerMsg>) {
+    pub fn run(rx: Receiver<Cmd>, out: &Output) {
         let mut b = Book { watched: HashSet::new(), exe: HashMap::new() };
         let mut parent: HashMap<u32, u32> = HashMap::new();
         let mut batch = Vec::new();
@@ -713,7 +721,7 @@ mod imp {
         out
     }
 
-    pub fn run(rx: Receiver<Cmd>, out: &Sender<crate::sampler::WorkerMsg>) {
+    pub fn run(rx: Receiver<Cmd>, out: &Output) {
         let mut watched: HashMap<u32, u64> = HashMap::new();
         let mut parent: HashMap<u32, u32> = HashMap::new();
         let mut batch = Vec::new();
@@ -750,7 +758,7 @@ mod imp {
                                 pid,
                                 ppid: Some(ppid),
                                 start: crate::process::native::start_time(pid).unwrap_or(0),
-                                path: Some(crate::etw::dos_path(&image)),
+                                path: Some(crate::common::etw::dos_path(&image)),
                                 args: None,
                                 via: "ETW",
                             });
@@ -817,7 +825,7 @@ mod imp {
     pub fn method() -> &'static str {
         "unsupported"
     }
-    pub fn run(_rx: Receiver<Cmd>, _out: &Sender<crate::sampler::WorkerMsg>) {}
+    pub fn run(_rx: Receiver<Cmd>, _out: &Output) {}
 }
 
 #[cfg(all(test, unix))]
@@ -829,8 +837,8 @@ mod tests {
     /// millisecond lifetimes; polling needs them longer than its interval.
     #[test]
     fn sees_short_lived_children() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let w = Watcher::start(tx).expect("watcher");
+        let (events, rx) = Emit::channel();
+        let w = Watcher::start(Output { events, errors: Emit::new(|_| true) }).expect("watcher");
         let mut sh = std::process::Command::new("/bin/sh")
             .args(["-c", if cfg!(target_os = "macos") { "sleep 0.3; for i in 1 2 3 4 5; do /usr/bin/true; done; sleep 0.3" } else { "sleep 0.3; for i in 1 2 3 4 5; do sleep 0.1; done; sleep 0.3" }])
             .spawn()
@@ -841,7 +849,7 @@ mod tests {
         let mut spawns = 0;
         let mut exits = 0;
         while std::time::Instant::now() < deadline {
-            if let Ok(crate::sampler::WorkerMsg::Deep(evs)) = rx.recv_timeout(Duration::from_millis(200)) {
+            if let Ok(evs) = rx.recv_timeout(Duration::from_millis(200)) {
                 spawns += evs.iter().filter(|e| e.kind == DtKind::Spawn).count();
                 exits += evs.iter().filter(|e| e.kind == DtKind::Exit && e.pid == sh.id()).count();
             }

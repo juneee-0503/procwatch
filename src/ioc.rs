@@ -176,7 +176,7 @@ pub fn sweep(iocs: &[Ioc], obs: &[Obs]) -> Vec<Hit> {
 
 /// Default indicator file: next to the settings file.
 pub fn default_path() -> Option<std::path::PathBuf> {
-    crate::config::path().map(|p| p.with_file_name("iocs.txt"))
+    crate::common::paths::config_path().map(|p| p.with_file_name("iocs.txt"))
 }
 
 #[cfg(test)]

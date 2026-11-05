@@ -105,7 +105,7 @@ impl Profiles {
         if let Some(d) = p.parent() {
             std::fs::create_dir_all(d)?;
         }
-        crate::config::write_atomic(&p, &serde_json::to_string(self)?)?;
+        crate::common::paths::write_atomic(&p, &serde_json::to_string(self)?)?;
         self.dirty = false;
         Ok(())
     }

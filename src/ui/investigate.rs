@@ -633,7 +633,7 @@ pub fn file_report(frame: &mut Frame, app: &mut App, screen: Rect) {
         if !r.origin.is_empty() {
             lines.push(Line::from(vec![Span::styled(format!(" {:<14}", "Origin"), Style::new().fg(TEXT_DIM)), Span::styled(r.origin.join(" · "), Style::new().fg(WARN))]));
         }
-        if crate::persistence::risky_location(&r.path) {
+        if crate::common::paths::risky_location(&r.path) {
             lines.push(Line::from(Span::styled(" ! located in a temporary or user-writable folder", Style::new().fg(BAD))));
         }
     }

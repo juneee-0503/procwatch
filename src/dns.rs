@@ -9,7 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 #[cfg(any(target_os = "macos", windows))]
-use crate::inspect::run_command;
+use crate::common::command::run_command;
 
 /// Background reverse-DNS resolver with a shared cache.
 pub struct Resolver {

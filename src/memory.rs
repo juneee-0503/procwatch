@@ -9,7 +9,7 @@
 use serde::Serialize;
 
 use crate::inspect::{self, SignatureStatus};
-use crate::persistence::risky_location;
+use crate::common::paths::risky_location;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Region {
@@ -89,7 +89,7 @@ fn module_anomalies(r: &mut Report, modules: &[String]) {
 #[cfg(target_os = "macos")]
 mod imp {
     use super::*;
-    use crate::inspect::run_command;
+    use crate::common::command::run_command;
     use std::process::Command;
     use std::time::Duration;
 
@@ -204,7 +204,7 @@ mod imp {
 #[cfg(target_os = "windows")]
 mod imp {
     use super::*;
-    use crate::inspect::run_command;
+    use crate::common::command::run_command;
     use std::process::Command;
     use std::time::Duration;
 

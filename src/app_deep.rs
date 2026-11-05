@@ -131,7 +131,7 @@ impl Drop for Helper {
 impl App {
     fn deep_watcher(&mut self) -> Option<&Watcher> {
         if self.ir.deep.watcher.is_none() {
-            self.ir.deep.watcher = Watcher::start(self.tx.clone());
+            self.ir.deep.watcher = Watcher::start(crate::sampler::deep_output(&self.tx));
         }
         self.ir.deep.watcher.as_ref()
     }
@@ -327,7 +327,7 @@ impl App {
                 return;
             }
             self.ir.deep.fs_usage.stop();
-            self.ir.deep.fs_usage = Helper(crate::fsattr::start_fs_usage(&pids, self.tx.clone()));
+            self.ir.deep.fs_usage = Helper(crate::fsattr::start_fs_usage(&pids, crate::common::emit::Emit::to(self.tx.clone(), WorkerMsg::Fs)));
             self.ir.deep.attribution = if self.ir.deep.fs_usage.0.is_some() { format!("fs_usage on {} traced processes", pids.len()) } else { String::new() };
             self.ir.deep.fs_usage_pids = pids;
             self.ir.deep.fs_usage_at = Some(Instant::now());

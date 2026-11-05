@@ -371,7 +371,7 @@ impl App {
             if !exists && !in_cache {
                 why.push("file missing on disk (deleted or replaced after load)".into());
             }
-            if crate::persistence::risky_location(&path) {
+            if crate::common::paths::risky_location(&path) {
                 why.push("user-writable or temporary location".into());
             }
             match intel.get(&path).map(|x| x.sig) {
