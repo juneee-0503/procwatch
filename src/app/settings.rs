@@ -120,8 +120,16 @@ impl App {
 
     pub fn settings_toggle(&mut self, item: &Item) {
         match (item.key, item.kind) {
-            ("notify", _) => self.notify = !self.notify,
-            ("confirm_end", _) => self.confirm_end = !self.confirm_end,
+            ("notify", _) => {
+                self.notify = !self.notify;
+                self.save_config();
+                return;
+            }
+            ("confirm_end", _) => {
+                self.confirm_end = !self.confirm_end;
+                self.save_config();
+                return;
+            }
             ("sound", _) => {
                 self.settings.alarm.sound = !self.settings.alarm.sound;
                 self.board.sound = self.settings.alarm.sound;
@@ -215,6 +223,7 @@ impl App {
                     return Err("between 250 and 60000".into());
                 }
                 self.ctl.interval_ms.store(n, Ordering::Relaxed);
+                self.save_config();
                 return Ok(());
             }
             "volume" => {
@@ -305,10 +314,8 @@ impl App {
         }
     }
 
-    fn save_kernel_config(&mut self) {
-        let result = crate::engine::save_config(&self.kernel_config).map_err(|e| e.to_string());
-        let sealed = result.and_then(|()| crate::engine::config_path().map_or(Ok(()), |p| crate::common::integrity::seal_config(&p)));
-        if let Err(e) = sealed {
+    pub(crate) fn save_kernel_config(&mut self) {
+        if let Err(e) = crate::engine::save_config(&self.kernel_config) {
             self.set_status(StatusLevel::Error, format!("Couldn't save: {e}"));
         }
     }

@@ -157,14 +157,6 @@ impl DefenseConfig {
     /// Webhook addresses are secrets, and whoever edits this file chooses
     /// where alarms go and what commands run.
     pub fn load_from(path: &Path) -> Result<DefenseConfig, String> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            let m = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
-            if m.mode() & 0o022 != 0 {
-                return Err(format!("{}: other users can write to it", path.display()));
-            }
-        }
         let text = crate::common::integrity::read_config(path)?;
         DefenseConfig::parse(&text).map_err(|e| format!("{}: {e}", path.display()))
     }

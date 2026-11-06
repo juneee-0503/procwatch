@@ -182,7 +182,7 @@ pub fn curl_config(url: &str, body: &str) -> String {
 
 fn webhook(url: &str, format: Format, n: &Notice) -> Result<(), String> {
     let mut child = crate::common::command::tool("curl")
-        .args(["--config", "-", "--output", "/dev/null"])
+        .args(["--config", "-"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())

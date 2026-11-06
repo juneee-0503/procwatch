@@ -1,12 +1,19 @@
 //! Reading the records the kernel programs write.
 
+use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
-use super::program::{Kind, ARG0, ARG1, ARGC, ARGS, ARG_LEN, COMM, KIND, MAX_ARGS, PATH, PATH_LEN, RECORD, TASK, UID};
+use super::program::{Kind, ARG0, ARG1, ARGC, ARGS, ARG_LEN, COMM, KIND, MAX_ARGS, PATH, PATH_LEN, RECORD, TASK, TIME, UID};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Event {
     pub kind: Kind,
+    /// Thread and process together, as the kernel reports them.
+    pub task: u64,
+    /// Kernel time, in nanoseconds.
+    pub time: u64,
     /// The process, not the thread.
     pub pid: u32,
     pub uid: u32,
@@ -53,6 +60,8 @@ pub fn decode(b: &[u8]) -> Option<Event> {
     let task = u64_at(b, TASK)?;
     let mut e = Event {
         kind,
+        task,
+        time: u64_at(b, TIME)?,
         pid: (task >> 32) as u32,
         uid: u64_at(b, UID)? as u32,
         comm: text(b.get(COMM as usize..COMM as usize + 16)?),
@@ -76,6 +85,38 @@ pub fn decode(b: &[u8]) -> Option<Event> {
         }
     }
     Some(e)
+}
+
+/// Drops the copies of one system call. Depending on the kernel, a program
+/// attached once per CPU runs once for each attachment: the copies come from
+/// one thread, say the same thing, and arrive within microseconds.
+#[derive(Default)]
+pub struct Dedup {
+    last: HashMap<u64, (u64, u64)>,
+}
+
+fn fingerprint(e: &Event) -> u64 {
+    let mut h = DefaultHasher::new();
+    (e.kind as u32, e.arg0, e.arg1, &e.path, &e.args, e.addr).hash(&mut h);
+    h.finish()
+}
+
+impl Dedup {
+    const WINDOW_NS: u64 = 1_000_000;
+    const MAX_THREADS: usize = 65_536;
+
+    /// True for the first of a set of copies.
+    pub fn first(&mut self, e: &Event) -> bool {
+        if self.last.len() >= Self::MAX_THREADS {
+            self.last.clear();
+        }
+        let print = fingerprint(e);
+        let copy = self.last.get(&e.task).is_some_and(|(at, seen)| *seen == print && e.time.abs_diff(*at) < Self::WINDOW_NS);
+        if !copy {
+            self.last.insert(e.task, (e.time, print));
+        }
+        !copy
+    }
 }
 
 #[cfg(test)]
@@ -114,6 +155,23 @@ pub mod tests {
         r[PATH as usize..][..2].copy_from_slice(&10u16.to_ne_bytes());
         r[PATH as usize + 8..][..16].copy_from_slice(&"2001:db8::1".parse::<Ipv6Addr>().unwrap().octets());
         assert_eq!(decode(&r).unwrap().addr, "[2001:db8::1]:3333".parse().ok());
+    }
+
+    #[test]
+    fn copies_of_one_call_count_once() {
+        let mut d = Dedup::default();
+        let mut e = decode(&record(Kind::Exec, 7, "x")).unwrap();
+        e.path = "/bin/true".into();
+        assert!(d.first(&e));
+        e.time += 5_000;
+        assert!(!d.first(&e), "the same call, moments later");
+        e.time += 5_000_000;
+        assert!(d.first(&e), "the same program run again");
+        e.path = "/bin/ls".into();
+        e.time += 1;
+        assert!(d.first(&e), "something else");
+        e.task += 1;
+        assert!(d.first(&e), "another thread");
     }
 
     #[test]

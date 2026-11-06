@@ -206,7 +206,7 @@ impl InputPurpose {
             InputPurpose::IsolationAllow => {
                 "Optional management IP to keep reachable (empty = loopback only). Scripts are written, not run."
             }
-            InputPurpose::Setting(_) => "Enter saves. Rules and destinations left empty are removed. Destination: webhook URL dingtalk min high, syslog, file PATH, command PROGRAM.",
+            InputPurpose::Setting(_) => "Enter saves. Left empty, a rule or destination is removed.",
             InputPurpose::Finding { .. } => "Start with high: or low: to set severity (default medium).",
         }
     }

@@ -15,7 +15,6 @@ fn typing(mode: &Mode) -> bool {
 /// They are the same keys, and must do the same thing.
 fn half_width(c: char) -> char {
     match c {
-        '，' => ',',
         '！' => '!',
         '？' => '?',
         '：' => ':',
@@ -229,7 +228,7 @@ fn boot_key(app: &mut App, key: KeyEvent) {
     match app.boot.phase {
         BootPhase::Standby => match key.code {
             KeyCode::Enter | KeyCode::Char(' ') => app.boot.phase = BootPhase::Select,
-            KeyCode::Char(',') | KeyCode::F(2) => app.mode = Mode::Settings { cursor: 0 },
+            KeyCode::Char(',') => app.mode = Mode::Settings { cursor: 0 },
             KeyCode::Char('q') => app.should_quit = true,
             _ => {}
         },
@@ -278,7 +277,7 @@ fn settings_key(app: &mut App, key: KeyEvent, cursor: usize) {
                 Kind::Number | Kind::Text | Kind::Rule(_) | Kind::Destination(_) => app.mode = Mode::Input { purpose: app::InputPurpose::Setting(cursor), input: item.value, error: None },
             }
         }
-        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char(',') | KeyCode::F(2) => app.mode = Mode::Normal,
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char(',') => app.mode = Mode::Normal,
         _ => {}
     }
 }
@@ -344,7 +343,7 @@ fn normal_key(app: &mut App, key: KeyEvent) {
             app.mode = Mode::Alarms { cursor: 0 };
             return;
         }
-        KeyCode::Char(',') | KeyCode::F(2) => {
+        KeyCode::Char(',') => {
             app.mode = Mode::Settings { cursor: 0 };
             return;
         }
@@ -1222,16 +1221,15 @@ mod key_tests {
     fn full_width_keys_work_outside_text_fields() {
         let mut app = app::tests_support::app();
         let press = |app: &mut App, k| handle_key(app, KeyEvent::new(k, KeyModifiers::NONE));
+        press(&mut app, KeyCode::Char(','));
+        assert!(matches!(app.mode, Mode::Settings { .. }), "settings open on the English comma");
+        app.mode = Mode::Normal;
         press(&mut app, KeyCode::Char('，'));
-        assert!(matches!(app.mode, Mode::Settings { .. }));
-        app.mode = Mode::Normal;
-        press(&mut app, KeyCode::F(2));
-        assert!(matches!(app.mode, Mode::Settings { .. }));
-        app.mode = Mode::Normal;
+        assert!(matches!(app.mode, Mode::Normal), "and only that");
         press(&mut app, KeyCode::Char('、'));
         assert!(matches!(app.mode, Mode::Search));
-        press(&mut app, KeyCode::Char('，'));
-        assert_eq!(app.query, "，", "in a text field it stays what was typed");
+        press(&mut app, KeyCode::Char('、'));
+        assert_eq!(app.query, "、", "in a text field it stays what was typed");
     }
 
     #[test]

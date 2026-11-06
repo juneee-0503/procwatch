@@ -48,10 +48,6 @@ impl KernelConfig {
         shipped.chain(self.alerts.iter().cloned()).collect()
     }
 
-    pub fn load(path: Option<&Path>) -> KernelConfig {
-        path.and_then(|p| std::fs::read_to_string(p).ok()).map(|t| KernelConfig::parse(&t)).unwrap_or_default()
-    }
-
     pub fn serialize(&self) -> String {
         let mut out = String::from("# procwatch modules. See docs/modules.md.\n");
         out.push_str(&format!("disabled = {}\n", self.disabled.iter().cloned().collect::<Vec<_>>().join(", ")));

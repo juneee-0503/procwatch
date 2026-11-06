@@ -122,6 +122,7 @@ pub fn read_config(path: &Path) -> Result<String, String> {
 }
 
 fn read_config_at(path: &Path, manifest: Option<&Path>) -> Result<String, String> {
+    crate::common::paths::trusted(path)?;
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let Some(manifest) = manifest else { return Ok(text) };
     let mut m = load(manifest);

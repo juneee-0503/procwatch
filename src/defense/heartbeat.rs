@@ -305,6 +305,11 @@ fn serve(mut s: TcpStream, key: &[u8], watcher: &mut Watcher, dir: Option<&std::
 fn report(f: &Finding, destinations: &[crate::defense::alarm::Destination]) {
     use crate::kernel::alarm::Priority;
     crate::safe_println!("{}", serde_json::to_string(f).unwrap_or_default());
+    // Anyone who can reach the port can send a bad beat: noted, but it must
+    // not let them flood the people on call.
+    if f.kind == "refused beat" {
+        return;
+    }
     let routine = matches!(f.kind, "first contact" | "back");
     let notice = crate::defense::alarm::Notice { priority: if routine { Priority::Low } else { Priority::High }, title: format!("{}: {}", f.host, f.kind), detail: f.detail.clone(), source: "heartbeat".into(), rule: f.kind.to_string() };
     for d in destinations {

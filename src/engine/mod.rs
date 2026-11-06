@@ -89,8 +89,13 @@ pub fn config_path() -> Option<std::path::PathBuf> {
     crate::common::paths::config_path().map(|p| crate::kernel::config::path_beside(&p))
 }
 
+/// A file that fails its checks is reported, and modules start without it.
 pub fn load_config() -> KernelConfig {
-    KernelConfig::load(config_path().as_deref())
+    let Some(path) = config_path().filter(|p| p.exists()) else { return KernelConfig::default() };
+    match crate::common::integrity::read_config(&path) {
+        Ok(text) => KernelConfig::parse(&text),
+        Err(e) => KernelConfig { problems: vec![e], ..KernelConfig::default() },
+    }
 }
 
 /// Save what `Kernel::set_enabled` changed.
@@ -99,7 +104,8 @@ pub fn save_config(c: &KernelConfig) -> std::io::Result<()> {
     if let Some(d) = p.parent() {
         std::fs::create_dir_all(d)?;
     }
-    crate::common::paths::write_atomic(&p, &c.serialize())
+    crate::common::paths::write_atomic(&p, &c.serialize())?;
+    crate::common::integrity::seal_config(&p).map_err(std::io::Error::other)
 }
 
 /// Start the kernel alone: modules wait to be chosen and activated.

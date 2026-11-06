@@ -32,6 +32,12 @@ pub const DEFAULT_HOLD: Duration = Duration::from_secs(15);
 pub const DEFAULT_CLEAR_HOLD: Duration = Duration::from_secs(30);
 /// Recovery threshold when a rule names none, as a share of the limit.
 const DEFAULT_HYSTERESIS: f64 = 0.1;
+/// A metric alarm whose metric stopped arriving can never recover on its
+/// own: after this long it ends, because nothing supports it any more.
+const STALE: Duration = Duration::from_secs(120);
+/// An acknowledged alarm from an event has no metric to clear it. It ends
+/// after this, so the same thing happening again alarms again.
+const ACK_HOLD: Duration = Duration::from_secs(600);
 /// Most alarm instances tracked. Labels can be many; alarms must stay few.
 const MAX_ENTRIES: usize = 4096;
 
@@ -100,7 +106,9 @@ mod wall {
 impl AlarmEvent {
     pub fn new(key: impl Into<String>, rule: impl Into<String>, title: impl Into<String>, priority: Priority, source: impl Into<String>) -> AlarmEvent {
         let id = identity();
-        AlarmEvent { key: key.into(), host: id.host.clone(), instance: id.instance.clone(), rule: rule.into(), title: title.into(), priority, phase: Phase::Firing, source: source.into(), detail: String::new(), value: None, at: SystemTime::now() }
+        // Titles can quote what an attacker typed, and they reach a terminal.
+        let title: String = title.into().chars().map(|c| if c.is_control() { '\u{fffd}' } else { c }).collect();
+        AlarmEvent { key: key.into(), host: id.host.clone(), instance: id.instance.clone(), rule: rule.into(), title, priority, phase: Phase::Firing, source: source.into(), detail: String::new(), value: None, at: SystemTime::now() }
     }
 
     pub fn detail(mut self, text: impl Into<String>) -> AlarmEvent {
@@ -237,6 +245,8 @@ struct Entry {
     event: AlarmEvent,
     /// Alarms raised from events have no metric to clear them.
     expires: Option<Instant>,
+    /// When the metric last reported.
+    seen: Instant,
 }
 
 /// Evaluates rules and holds every alarm that is not normal.
@@ -292,10 +302,11 @@ impl Engine {
             let shown = if labels.is_empty() { s.metric.to_string() } else { format!("{}{{{labels}}}", s.metric) };
             let title = format!("{shown} is {:.1}", s.value);
             let event = AlarmEvent::new(key.clone(), rule.text.clone(), title, rule.priority, s.metric);
-            self.entries.insert(key.clone(), Entry { state: State::Observing, rule: Some(i), since: now, clearing: None, event, expires: None });
+            self.entries.insert(key.clone(), Entry { state: State::Observing, rule: Some(i), since: now, clearing: None, event, expires: None, seen: now });
         }
         let (hold, clear_hold) = (rule.hold, rule.clear_hold);
         let e = self.entries.get_mut(&key)?;
+        e.seen = now;
         e.event.value = Some(s.value);
         match e.state {
             State::Observing if !abnormal => {
@@ -350,7 +361,7 @@ impl Engine {
             self.overflow += 1;
         }
         let out = event.clone();
-        self.entries.insert(event.key.clone(), Entry { state: State::Firing, rule: None, since: now, clearing: None, event, expires });
+        self.entries.insert(event.key.clone(), Entry { state: State::Firing, rule: None, since: now, clearing: None, event, expires, seen: now });
         Some(out)
     }
 
@@ -364,10 +375,14 @@ impl Engine {
         Some(e.event)
     }
 
-    pub fn acknowledge(&mut self, key: &str) -> Option<AlarmEvent> {
+    pub fn acknowledge(&mut self, key: &str, now: Instant) -> Option<AlarmEvent> {
         let e = self.entries.get_mut(key)?;
         if e.state != State::Firing {
             return None;
+        }
+        // The kernel itself ends the alarms about modules, when they return.
+        if e.rule.is_none() && e.event.source != "kernel.module" {
+            e.expires = Some(now + ACK_HOLD);
         }
         e.state = State::Acknowledged;
         e.event.phase = Phase::Acknowledged;
@@ -377,7 +392,8 @@ impl Engine {
 
     /// Alarms whose time is up.
     pub fn expire(&mut self, now: Instant) -> Vec<AlarmEvent> {
-        let due: Vec<String> = self.entries.iter().filter(|(_, e)| e.expires.is_some_and(|t| now >= t)).map(|(k, _)| k.clone()).collect();
+        let stale = |e: &Entry| e.rule.is_some() && now.duration_since(e.seen) >= STALE;
+        let due: Vec<String> = self.entries.iter().filter(|(_, e)| e.expires.is_some_and(|t| now >= t) || stale(e)).map(|(k, _)| k.clone()).collect();
         due.iter().filter_map(|k| self.clear(k)).collect()
     }
 }
@@ -497,8 +513,8 @@ mod tests {
         assert_eq!(phases(e.feed(&s(95.0), at(10))), [Phase::Firing]);
         assert!(e.feed(&s(95.0), at(11)).is_empty(), "no event while nothing changes");
         let key = e.entries.keys().next().unwrap().clone();
-        assert_eq!(e.acknowledge(&key).unwrap().phase, Phase::Acknowledged);
-        assert!(e.acknowledge(&key).is_none());
+        assert_eq!(e.acknowledge(&key, at(11)).unwrap().phase, Phase::Acknowledged);
+        assert!(e.acknowledge(&key, at(11)).is_none());
         assert!(e.feed(&s(70.0), at(12)).is_empty(), "clearing must last too");
         assert_eq!(phases(e.feed(&s(70.0), at(17))), [Phase::Recovered]);
         assert_eq!(e.entries.len(), 0, "back to normal");
@@ -559,7 +575,7 @@ mod tests {
         assert!(e.raise(ev(Priority::Medium), None, t).is_none());
         assert!(e.raise(ev(Priority::Low), None, t).is_none());
         assert_eq!(e.raise(ev(Priority::High), None, t).unwrap().priority, Priority::High);
-        e.acknowledge("k");
+        e.acknowledge("k", t);
         assert_eq!(e.clear("k").unwrap().phase, Phase::Recovered);
     }
 
@@ -570,6 +586,42 @@ mod tests {
         e.raise(AlarmEvent::new("k", "r", "x", Priority::Low, "s"), Some(Duration::from_secs(60)), t);
         assert!(e.expire(t + Duration::from_secs(59)).is_empty());
         assert_eq!(phases(e.expire(t + Duration::from_secs(60))), [Phase::Recovered]);
+    }
+
+    /// The same attack repeated must alarm again, even after an old one was
+    /// acknowledged.
+    #[test]
+    fn an_acknowledged_event_alarm_ends_so_the_next_can_fire() {
+        let mut e = Engine::default();
+        let t = Instant::now();
+        let ev = || AlarmEvent::new("k", "r", "x", Priority::High, "defense");
+        e.raise(ev(), None, t);
+        e.acknowledge("k", t);
+        assert!(e.expire(t + ACK_HOLD - Duration::from_secs(1)).is_empty());
+        assert_eq!(phases(e.expire(t + ACK_HOLD)), [Phase::Recovered]);
+        assert!(e.raise(ev(), None, t + ACK_HOLD).is_some(), "it can fire again");
+        e.raise(AlarmEvent::new("m", "module-lost", "x", Priority::High, "kernel.module"), None, t);
+        e.acknowledge("m", t);
+        assert!(e.expire(t + ACK_HOLD * 10).is_empty() , "a module stays lost until it returns");
+    }
+
+    /// A module unloaded while its metric was alarming: no sample will ever
+    /// clear it, and a lamp must not stay on for ever about nothing.
+    #[test]
+    fn a_metric_that_stops_reporting_ends_its_alarm() {
+        let mut e = Engine::new(vec![Rule::parse(RULE).unwrap()]);
+        let t = Instant::now();
+        e.feed(&s(95.0), t);
+        assert_eq!(e.feed(&s(95.0), t + Duration::from_secs(10)).len(), 1);
+        assert!(e.expire(t + Duration::from_secs(100)).is_empty());
+        assert_eq!(phases(e.expire(t + Duration::from_secs(10) + STALE)), [Phase::Recovered]);
+        assert_eq!(e.firing(), 0);
+    }
+
+    #[test]
+    fn titles_cannot_carry_terminal_escapes() {
+        let e = AlarmEvent::new("k", "r", "bad\x1b]0;owned\x07name\n", Priority::Low, "s");
+        assert!(!e.title.chars().any(char::is_control), "{:?}", e.title);
     }
 
     #[test]
@@ -632,7 +684,7 @@ mod tests {
                 let t = Instant::now();
                 e.raise(AlarmEvent::new("a", "r", "x", Priority::High, "s"), None, t);
                 for k in keys {
-                    if let Some(ev) = e.acknowledge(&k) {
+                    if let Some(ev) = e.acknowledge(&k, t) {
                         prop_assert_eq!(ev.phase, Phase::Acknowledged);
                     }
                 }

@@ -179,6 +179,7 @@ pub fn run(minutes: u64) -> i32 {
     let ctl = Arc::new(SamplerCtl { interval_ms: AtomicU64::new(cfg.interval_ms), paused: AtomicBool::new(false), refresh_now: AtomicBool::new(false), snapshots_queued: Default::default() });
     let kernel = crate::engine::start(tx.clone(), ctl.clone(), crate::app::watch_paths(&cfg));
     let mut app = App::new(tx, ctl, cfg);
+    app.board.sound = false;
     app.kernel = Some(kernel.clone());
     let mut term = match Terminal::new(TestBackend::new(160, 45)) {
         Ok(t) => t,

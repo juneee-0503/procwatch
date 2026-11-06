@@ -5,17 +5,69 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// The settings file; other files live beside it.
+/// The home to keep files in. Under `sudo` this is root's, not the caller's:
+/// `$HOME` may still name the user's, where any of their processes could
+/// plant settings for root to act on, and where root's files would lock the
+/// user out of their own.
+#[cfg(unix)]
+fn home() -> Option<PathBuf> {
+    if unsafe { libc::geteuid() } == 0 && std::env::var_os("SUDO_UID").is_some() {
+        let pw = unsafe { libc::getpwuid(0) };
+        if !pw.is_null() {
+            let dir = unsafe { std::ffi::CStr::from_ptr((*pw).pw_dir) };
+            return Some(PathBuf::from(std::ffi::OsStr::new(&*dir.to_string_lossy())));
+        }
+    }
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+/// Refuses a file root shouldn't trust: settings can name commands to run,
+/// so running as root means they must be root's, and nobody else's to change.
+pub fn trusted(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let m = fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        if m.mode() & 0o022 != 0 {
+            return Err(format!("{}: other users can write to it", path.display()));
+        }
+        let me = unsafe { libc::geteuid() };
+        if me == 0 && m.uid() != 0 {
+            return Err(format!("{}: root won't use a file owned by another user", path.display()));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
 pub fn config_path() -> Option<PathBuf> {
     #[cfg(windows)]
     let base = std::env::var_os("APPDATA").map(PathBuf::from);
     #[cfg(not(windows))]
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")));
+    let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| home().map(|h| h.join(".config")));
     base.map(|b| b.join("procwatch").join("config"))
 }
 
 /// Write-then-rename so a crash never leaves a truncated file.
+#[cfg(unix)]
+fn keep_access(new: &fs::File, old: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(m) = fs::symlink_metadata(old) else { return Ok(()) };
+    new.set_permissions(fs::Permissions::from_mode(m.mode() & 0o777))?;
+    // Only root can give a file away; anyone else keeps what they have.
+    if unsafe { libc::geteuid() } == 0 {
+        std::os::unix::fs::fchown(new, Some(m.uid()), Some(m.gid()))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn keep_access(_: &fs::File, _: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 pub fn write_atomic(path: &std::path::Path, text: &str) -> std::io::Result<()> {
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,8 +75,11 @@ pub fn write_atomic(path: &std::path::Path, text: &str) -> std::io::Result<()> {
     // file into place; synced, so a crash can't leave an empty one there.
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let tmp = path.with_extension(format!("tmp{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
-    let result = fs::File::create(&tmp).and_then(|mut f| {
+    // Private unless the file it replaces was shared on purpose: these hold
+    // webhook addresses and tokens, and a service may read them as a group.
+    let result = private_file().write(true).create_new(true).open(&tmp).and_then(|mut f| {
         f.write_all(text.as_bytes())?;
+        keep_access(&f, path)?;
         f.sync_all()
     });
     let result = result.and_then(|()| fs::rename(&tmp, path));
@@ -106,11 +161,11 @@ pub fn data_dir() -> Option<PathBuf> {
         return Some(PathBuf::from(x).join("procwatch").join("events"));
     }
     #[cfg(target_os = "macos")]
-    return std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support/procwatch/events"));
+    return home().map(|h| h.join("Library/Application Support/procwatch/events"));
     #[cfg(windows)]
     return std::env::var_os("LOCALAPPDATA").map(|h| PathBuf::from(h).join("procwatch").join("events"));
     #[cfg(not(any(target_os = "macos", windows)))]
-    return std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share/procwatch/events"));
+    return home().map(|h| h.join(".local/share/procwatch/events"));
 }
 
 /// Folders where legitimate auto-start programs rarely live.
@@ -139,6 +194,23 @@ pub fn registry_path(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn replacing_a_file_keeps_it_as_private_as_it_was() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = private_temp_dir("atomic").unwrap();
+        let path = dir.join("defense.yml");
+        write_atomic(&path, "token: secret").unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600, "a new file is private");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+        write_atomic(&path, "changed").unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o640, "one shared with a group stays so");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "changed");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(trusted(&path).is_err(), "anyone could rewrite this");
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn private_paths_are_exclusive_and_closed() {

@@ -487,6 +487,9 @@ impl App {
         if !self.ir.dns_asked && !self.ir.dns_pending && self.module_on("network") {
             self.collect_dns();
         }
+        if self.ir.capture_method.is_some() && !self.module_on("activity") {
+            self.ir.capture_method = None;
+        }
         if !self.tab_on(self.tab) {
             // Its module was switched off.
             if let Some(first) = self.first_tab() {

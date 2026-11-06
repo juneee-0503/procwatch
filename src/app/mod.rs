@@ -834,7 +834,6 @@ impl App {
         }
     }
 
-    /// Change page, clearing the per-page search and badges.
     /// Whether a module was chosen. With no kernel (a replay, a test) every
     /// page has something to show.
     pub fn module_on(&self, name: &str) -> bool {
@@ -850,6 +849,7 @@ impl App {
         Tab::ALL.into_iter().find(|t| self.tab_on(*t))
     }
 
+    /// Change page, clearing the per-page search and badges.
     pub fn switch_tab(&mut self, tab: Tab) {
         if !self.tab_on(tab) {
             self.set_status(StatusLevel::Info, format!("The {} module isn't loaded. Press M to load it.", tab.module()));

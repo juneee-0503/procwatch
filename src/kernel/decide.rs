@@ -45,6 +45,8 @@ struct Open {
     event: AlarmEvent,
     last_told: Instant,
     told: bool,
+    /// Seen by someone: no more reminders, but they'll want to hear it ended.
+    acknowledged: bool,
 }
 
 #[derive(Default)]
@@ -98,7 +100,7 @@ impl Decider {
         let external = intensity(e.priority).external;
         match e.phase {
             Phase::Firing => {
-                self.open.insert(e.key.clone(), Open { event: e.clone(), last_told: now, told: !muted && external });
+                self.open.insert(e.key.clone(), Open { event: e.clone(), last_told: now, told: !muted && external, acknowledged: false });
                 if muted || !external {
                     return Vec::new();
                 }
@@ -115,7 +117,9 @@ impl Decider {
                 }
             }
             Phase::Acknowledged => {
-                self.open.remove(&e.key);
+                if let Some(o) = self.open.get_mut(&e.key) {
+                    o.acknowledged = true;
+                }
                 Vec::new()
             }
             Phase::Recovered => {
@@ -147,7 +151,7 @@ impl Decider {
         let silenced = self.silenced.clone();
         for o in self.open.values_mut() {
             let Some(every) = intensity(o.event.priority).remind else { continue };
-            if !silenced.iter().any(|s| o.event.source.starts_with(s.as_str())) && now.duration_since(o.last_told) >= every {
+            if !o.acknowledged && !silenced.iter().any(|s| o.event.source.starts_with(s.as_str())) && now.duration_since(o.last_told) >= every {
                 o.last_told = now;
                 o.told = true;
                 let mut n = message(&o.event);
@@ -195,6 +199,14 @@ mod tests {
         assert!(d.tick(t + Duration::from_secs(301)).is_empty());
         d.on_event(&ev("a", Priority::High, Phase::Acknowledged, "x"), t + Duration::from_secs(302));
         assert!(d.tick(t + Duration::from_secs(9000)).is_empty());
+    }
+
+    #[test]
+    fn whoever_acknowledged_still_hears_it_ended() {
+        let (mut d, t) = (Decider::default(), Instant::now());
+        d.on_event(&ev("a", Priority::High, Phase::Firing, "x"), t);
+        d.on_event(&ev("a", Priority::High, Phase::Acknowledged, "x"), t);
+        assert_eq!(d.on_event(&ev("a", Priority::High, Phase::Recovered, "x"), t).len(), 1);
     }
 
     #[test]

@@ -284,6 +284,7 @@ pub fn run(policy_path: &Path, log: Option<&Path>, minutes: Option<u64>) -> i32 
     let alarms = kernel.alarms().subscribe();
     let mut app = App::new(tx, ctl, cfg);
     app.kernel = Some(kernel);
+    app.board.sound = false;
     let mode = if policy.mode == Mode::Enforce { "enforce" } else { "audit" };
     record(&mut chain, json!({ "kind": "agent started", "mode": mode, "policy": policy_path.display().to_string(), "pid": std::process::id(), "hardening": hardened }));
     eprintln!("agent: mode {mode}, {} playbooks, logging to {}", policy.playbooks.len(), log_path.display());

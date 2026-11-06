@@ -211,7 +211,7 @@ mod tests {
     }
 
     fn event(kind: Kind, pid: u32, comm: &str, path: &str) -> Event {
-        Event { kind, pid, uid: 33, comm: comm.into(), path: path.into(), args: Vec::new(), addr: None, arg0: 0, arg1: 0, peer: None }
+        Event { kind, task: 0, time: 0, pid, uid: 33, comm: comm.into(), path: path.into(), args: Vec::new(), addr: None, arg0: 0, arg1: 0, peer: None }
     }
 
     fn exec(comm: &str, path: &str, args: &[&str]) -> Event {

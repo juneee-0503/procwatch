@@ -83,7 +83,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     draw_hints(frame, app, hints);
     // Always in sight, and clickable: nobody should need to know a key.
-    const BUTTON: &str = " ⚙ Settings F2 ";
+    const BUTTON: &str = " ⚙ Settings , ";
     let width = BUTTON.width() as u16;
     if hints.width > width * 3 && matches!(app.mode, Mode::Normal) {
         let rect = Rect { x: hints.right() - width, width, ..hints };

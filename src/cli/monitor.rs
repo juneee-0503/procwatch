@@ -50,6 +50,8 @@ pub fn run(out: Option<&Path>, minutes: Option<u64>, activity: bool) -> i32 {
     let kernel = crate::engine::start(tx.clone(), ctl.clone(), crate::app::watch_paths(&cfg));
     let mut app = App::new(tx, ctl, cfg);
     app.kernel = Some(kernel);
+    // No one is watching, and a terminal bell would land in the JSON stream.
+    app.board.sound = false;
     if activity {
         app.ir.activity_out = Some(Vec::new());
         // The module needs a moment to start, and answers asynchronously.

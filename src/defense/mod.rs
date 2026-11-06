@@ -78,6 +78,7 @@ pub struct Threat {
 
 impl Threat {
     pub fn new(time: DateTime<Local>, rule: &'static str, severity: Severity, stage: Stage, title: String) -> Threat {
+        let title = crate::common::text::printable(&title).replace(['\n', '\t'], " ");
         Threat { time, rule, title, severity, stage, source: None, user: None, pid: None, started: None, host: crate::kernel::model::identity().host.clone(), evidence: String::new() }
     }
     pub fn source_ip(mut self, ip: IpAddr) -> Threat {

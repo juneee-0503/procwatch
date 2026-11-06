@@ -68,7 +68,11 @@ impl Board {
 
     /// What should sound now, if anything.
     fn due_tone(&mut self, now: Instant) -> Option<Tone> {
-        let worst = self.worst()?.priority;
+        let Some(worst) = self.worst().map(|e| e.priority) else {
+            // Quiet: the next alarm sounds at once, not when this one was due.
+            self.last_tone = None;
+            return None;
+        };
         if !self.sound || self.audio_paused() {
             return None;
         }
@@ -97,7 +101,8 @@ impl App {
 
     pub(crate) fn board_tick(&mut self) -> bool {
         let now = Instant::now();
-        if let Some(tone) = self.board.due_tone(now) {
+        // Maintenance quiets everything, on this screen as well as elsewhere.
+        if let Some(tone) = self.board.due_tone(now).filter(|_| crate::common::maintenance::remaining().is_none()) {
             if !cfg!(test) {
                 sound::play(tone, f64::from(self.board.volume) / 100.0);
             }
@@ -187,6 +192,18 @@ mod tests {
         assert_eq!(b.due_tone(t), Some(Tone::Low));
         assert_eq!(b.due_tone(t + Duration::from_secs(19)), None);
         assert_eq!(b.due_tone(t + Tone::Low.period()), Some(Tone::Low));
+    }
+
+    #[test]
+    fn a_new_alarm_after_silence_sounds_at_once() {
+        let mut b = Board::default();
+        let t = Instant::now();
+        b.apply(ev("a", Priority::High, Phase::Firing));
+        b.due_tone(t);
+        b.apply(ev("a", Priority::High, Phase::Recovered));
+        assert_eq!(b.due_tone(t + Duration::from_secs(1)), None);
+        b.apply(ev("b", Priority::High, Phase::Firing));
+        assert_eq!(b.due_tone(t + Duration::from_secs(2)), Some(Tone::High));
     }
 
     #[test]

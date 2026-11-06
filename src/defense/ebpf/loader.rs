@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver};
 use std::sync::Arc;
 
-use super::event::{decode, Event};
+use super::event::{decode, Dedup, Event};
 use super::program::{self, Kind, Maps, RECORD};
 
 const MAP_CREATE: i32 = 0;
@@ -23,6 +23,7 @@ const PERF_SET_BPF: libc::c_ulong = 0x4004_2408;
 const PERF_ENABLE: libc::c_ulong = 0x2400;
 const PERF_FLAG_CLOEXEC: libc::c_ulong = 8;
 const RING_SIZE: usize = 16 << 20;
+const MAX_ATTACHMENTS: libc::c_long = 64;
 const BUSY: u32 = 1 << 31;
 const DISCARD: u32 = 1 << 30;
 const HEADER: usize = 8;
@@ -81,13 +82,12 @@ fn tracepoint(name: &str) -> Option<u64> {
     ["/sys/kernel/tracing", "/sys/kernel/debug/tracing"].iter().find_map(|root| std::fs::read_to_string(format!("{root}/events/syscalls/{name}/id")).ok()?.trim().parse().ok())
 }
 
-fn attach(id: u64, program: &OwnedFd) -> std::io::Result<OwnedFd> {
+fn attach_on(id: u64, program: &OwnedFd, cpu: i32) -> std::io::Result<OwnedFd> {
     let mut attr = [0u64; 16];
     attr[0] = u64::from(PERF_TYPE_TRACEPOINT) | u64::from(PERF_ATTR_SIZE) << 32;
     attr[1] = id;
     attr[2] = 1; // sample period
-    // One event is enough: the program belongs to the tracepoint, on every CPU.
-    let n = unsafe { libc::syscall(libc::SYS_perf_event_open, attr.as_ptr(), -1, 0, -1, PERF_FLAG_CLOEXEC) };
+    let n = unsafe { libc::syscall(libc::SYS_perf_event_open, attr.as_ptr(), -1, cpu, -1, PERF_FLAG_CLOEXEC) };
     if n < 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -98,6 +98,28 @@ fn attach(id: u64, program: &OwnedFd) -> std::io::Result<OwnedFd> {
         }
     }
     Ok(event)
+}
+
+/// Once per CPU. One event used to be enough, but on newer kernels (seen on
+/// 7.0) a program attached on CPU 0 only runs there. Older kernels then run
+/// it once per attachment, which `Dedup` undoes. The kernel allows a
+/// tracepoint 64 programs, and offline CPUs refuse: neither stops the rest.
+fn attach(id: u64, program: &OwnedFd) -> std::io::Result<Vec<OwnedFd>> {
+    let cpus = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_CONF) }.clamp(1, MAX_ATTACHMENTS);
+    let mut events = Vec::new();
+    let mut first_error = None;
+    for cpu in 0..cpus as i32 {
+        match attach_on(id, program, cpu) {
+            Ok(e) => events.push(e),
+            Err(e) => {
+                first_error.get_or_insert(e);
+            }
+        }
+    }
+    match (events.is_empty(), first_error) {
+        (true, Some(e)) => Err(e),
+        _ => Ok(events),
+    }
 }
 
 /// The shared memory of a ring buffer.
@@ -202,7 +224,7 @@ impl Sensor {
                 continue;
             };
             let p = load(name, &code)?;
-            events.push(attach(id, &p).map_err(|e| format!("{name}: {e}"))?);
+            events.extend(attach(id, &p).map_err(|e| format!("{name}: {e}"))?);
             programs.push(p);
             attached.push(name);
         }
@@ -216,9 +238,13 @@ impl Sensor {
         std::thread::Builder::new()
             .name("ebpf".into())
             .spawn(move || {
+                let mut copies = Dedup::default();
                 while !halt.load(Ordering::Relaxed) {
                     ring.drain(|record| {
                         let Some(mut e) = decode(record) else { return };
+                        if !copies.first(&e) {
+                            return;
+                        }
                         count.fetch_add(1, Ordering::Relaxed);
                         // The descriptors must be read now, while they exist.
                         if e.kind == Kind::Exec {

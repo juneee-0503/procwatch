@@ -72,7 +72,7 @@ impl CaptureConfig {
     }
 
     pub fn load_from(path: &Path) -> Result<CaptureConfig, String> {
-        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let text = crate::common::integrity::read_config(path)?;
         CaptureConfig::parse(&text).map_err(|e| format!("{}: {e}", path.display()))
     }
 

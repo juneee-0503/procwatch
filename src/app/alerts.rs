@@ -18,9 +18,13 @@ impl App {
         let Some(k) = self.kernel.clone() else { return };
         let enable = k.status().iter().find(|s| s.name == name).is_none_or(|s| s.state == crate::kernel::ModuleState::Disabled || s.state == crate::kernel::ModuleState::Failed);
         k.set_enabled(name, enable);
-        if let Err(e) = crate::engine::save_config(&k.config()) {
-            self.set_status(StatusLevel::Error, format!("Couldn't save modules.conf: {e}"));
+        // Not the kernel's copy: that one hasn't seen rules added in Settings.
+        if enable {
+            self.kernel_config.disabled.remove(name);
+        } else {
+            self.kernel_config.disabled.insert(name.to_string());
         }
+        self.save_kernel_config();
     }
 
     // ── alerts ─────────────────────────────────────────────────────────
@@ -125,7 +129,8 @@ impl App {
 
     pub fn selected_alert_pid(&self) -> Option<u32> {
         let idx = *self.visible_alerts().get(self.alert_selected)?;
-        self.alerts.get(idx).map(|a| a.pid)
+        // Alarms about the machine rather than a process carry no pid.
+        self.alerts.get(idx).map(|a| a.pid).filter(|p| *p != 0)
     }
 
     // ── baseline ───────────────────────────────────────────────────────

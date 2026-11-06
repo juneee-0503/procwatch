@@ -420,7 +420,7 @@ impl Kernel {
         match input {
             Input::Raise { event, lasts } => engine.raise(event, lasts, Instant::now()),
             Input::Clear(key) => engine.clear(&key),
-            Input::Acknowledge(key) => engine.acknowledge(&key),
+            Input::Acknowledge(key) => engine.acknowledge(&key, Instant::now()),
             Input::SetRules(rules) => {
                 engine.set_rules(rules);
                 None
@@ -519,6 +519,8 @@ impl Kernel {
                 s.run.fetch_add(1, Ordering::Relaxed);
                 s.beat.store(0, Ordering::Relaxed);
                 self.set_state(i, ModuleState::Disabled, None);
+                // Unloaded on purpose: its signal isn't lost any more.
+                self.0.hub.send(Input::Clear(format!("module-lost|{}", s.name)));
             }
             _ => {}
         }
