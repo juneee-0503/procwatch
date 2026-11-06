@@ -140,3 +140,13 @@ Linux 和 macOS 写 pcap,Windows 用内置的 pktmon 写 pcapng,并且不支持 
 | `--dictionary` | 列出全部指标、类型和平台差异 |
 
 详见[安全与自保护](security.md)和[部署](deployment.md)。
+
+## 测试报警
+
+| 命令 | 说明 |
+|---|---|
+| `--alarm-trigger high\|medium\|low [--count N]` | 让运行中的会话触发测试报警,N 最多 200 |
+| `--alarm-clear` | 结束测试报警 |
+| `--alarm-test` | 直接向配置的目的地发一条,不经过报警引擎 |
+
+通常用 `scripts/trigger-alarm.sh`,见[报警](alarms.md#手动触发)。

@@ -125,3 +125,27 @@ alert = disk.queue_depth{device=sda} >= 32 priority medium
 | `command /usr/local/bin/page-oncall` | 运行命令,不经过 shell |
 
 `min` 默认 `high`。保存后立即生效,选 Send a test alarm 试发一条。详见[服务器防御](defense.md#报警)。
+
+## 手动触发
+
+检查灯、声音和通知是否正常,不用等真的出问题:
+
+```bash
+scripts/trigger-alarm.sh high
+```
+
+Windows 上用 `.\scripts\trigger-alarm.ps1 high`。
+
+| 参数 | 效果 |
+|---|---|
+| `high`、`medium`、`low` | 触发一条 |
+| `all` | 三级各一条 |
+| `sequence` | 低、中、高依次触发,间隔 5 秒 |
+| `storm [N]` | 同时触发 N 条中级报警,默认 20,用来看合并和限流 |
+| `clear` | 结束全部测试报警 |
+
+需要 procwatch 正在运行,已过 STANDBY,加载了 `alarm` 模块,并且和脚本是同一个用户。没有会话接收时,脚本会报错而不是悄悄结束。
+
+测试报警走真实链路:响铃、亮灯、写记录、发通知。标题固定以 `[TEST]` 开头,所以配置了目的地时对方也会收到,看得出是测试。
+
+高优先级报警不会自己结束。确认后灯不再闪,但仍留在列表里,用 `clear` 结束。

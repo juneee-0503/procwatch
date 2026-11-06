@@ -77,6 +77,9 @@ Usage:
   procwatch --ebpf-check            load the eBPF sensor and report what this kernel allows
   procwatch --defense-check [FILE]  check defense.yml and show what is watched
   procwatch --alarm-test            send a test alarm to every configured destination
+  procwatch --alarm-trigger high|medium|low [--count N]
+                                    raise test alarms in a running session, marked [TEST]
+  procwatch --alarm-clear           end the test alarms
   procwatch --unban-all             lift every address the agent banned
   procwatch --history [METRIC] [--hours N] [--json]
                                     metrics kept on disk; no metric lists what is recorded
@@ -347,6 +350,41 @@ pub fn main() -> anyhow::Result<()> {
             std::process::exit(0);
         }
         Some("--ebpf-check") => std::process::exit(crate::defense::ebpf::check()),
+        Some("--alarm-trigger") => {
+            use crate::defense::alarm::Trigger;
+            let value = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
+            let Some(priority) = args.get(1).and_then(|l| crate::kernel::alarm::Priority::parse(l)) else {
+                eprintln!("--alarm-trigger needs high, medium or low\n\n{USAGE}");
+                std::process::exit(2);
+            };
+            let Ok(count) = value("--count").map_or(Ok(1), |c| c.parse::<u32>()) else {
+                eprintln!("--count needs a number\n\n{USAGE}");
+                std::process::exit(2);
+            };
+            // Numbered from the clock, so repeating raises new alarms.
+            let base = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_micros().wrapping_add((d.as_secs() % 4000) as u32 * 1_000_000));
+            let list: Vec<Trigger> = (0..count.clamp(1, 200)).map(|i| Trigger::Raise { priority, n: base.wrapping_add(i) }).collect();
+            std::process::exit(match crate::defense::alarm::request(&list) {
+                Ok(()) => {
+                    println!("{} {} alarm(s) raised.", list.len(), priority.label());
+                    0
+                }
+                Err(e) => {
+                    eprintln!("procwatch: {e}");
+                    1
+                }
+            });
+        }
+        Some("--alarm-clear") => std::process::exit(match crate::defense::alarm::request(&[crate::defense::alarm::Trigger::Clear]) {
+            Ok(()) => {
+                println!("Test alarms ended.");
+                0
+            }
+            Err(e) => {
+                eprintln!("procwatch: {e}");
+                1
+            }
+        }),
         Some("--alarm-test") => std::process::exit(alarm_test()),
         Some("--unban-all") => match crate::defense::ban::clear() {
             Ok(()) => {

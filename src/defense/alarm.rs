@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::kernel::alarm::{AlarmEvent, Hub, Phase, Priority};
+use crate::kernel::alarm::{AlarmEvent, Hub, Input, Phase, Priority};
 pub use crate::kernel::decide::Notice;
 use crate::kernel::decide::Decider;
 use crate::kernel::module::Importance;
@@ -324,6 +324,71 @@ fn deliver(destinations: Vec<Destination>, rx: Receiver<Notice>, hub: Hub, probl
 
 pub const PROBLEM: &str = "alarm.problem";
 
+/// Most test alarms taken at once, and the largest request file.
+const MAX_TRIGGERS: usize = 256;
+const MAX_TRIGGER_FILE: u64 = 64 * 1024;
+
+/// A request to raise a test alarm or end them, left for the running module.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Trigger {
+    Raise { priority: Priority, n: u32 },
+    Clear,
+}
+
+pub fn trigger_path() -> Option<std::path::PathBuf> {
+    crate::common::paths::data_dir().map(|d| d.join("alarm-trigger.jsonl"))
+}
+
+/// Take what is waiting. The file is moved first, so a request written
+/// meanwhile isn't lost, and anything unusual about it is ignored.
+fn take_triggers(path: &std::path::Path) -> Vec<Trigger> {
+    let Ok(m) = std::fs::symlink_metadata(path) else { return Vec::new() };
+    let taking = path.with_extension("taking");
+    if !m.is_file() || m.len() > MAX_TRIGGER_FILE {
+        let _ = std::fs::remove_file(path);
+        return Vec::new();
+    }
+    if std::fs::rename(path, &taking).is_err() {
+        return Vec::new();
+    }
+    let text = std::fs::read_to_string(&taking).unwrap_or_default();
+    let _ = std::fs::remove_file(&taking);
+    text.lines().filter_map(|l| serde_json::from_str(l).ok()).take(MAX_TRIGGERS).collect()
+}
+
+/// Always marked: a test must never pass for a real alarm.
+fn test_alarm(priority: Priority, n: u32) -> AlarmEvent {
+    let title = format!("[TEST] {} priority alarm {n}: nothing is wrong", priority.label());
+    AlarmEvent::new(format!("manual|{}|{n}", priority.label()), "manual-test", title, priority, "manual-test").detail("raised by --alarm-trigger")
+}
+
+/// Leave a request and wait for the module to take it, so that a session
+/// that isn't there is reported instead of quietly doing nothing.
+pub fn request(triggers: &[Trigger]) -> Result<(), String> {
+    let path = trigger_path().ok_or("no data folder")?;
+    if let Some(d) = path.parent() {
+        crate::common::paths::ensure_private_dir(d).map_err(|e| e.to_string())?;
+    }
+    let mut text = String::new();
+    for t in triggers {
+        text.push_str(&serde_json::to_string(t).map_err(|e| e.to_string())?);
+        text.push('\n');
+    }
+    let mut f = crate::common::paths::private_file().create(true).append(true).open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    f.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+    drop(f);
+    let until = Instant::now() + Duration::from_secs(4);
+    while Instant::now() < until {
+        if !path.exists() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let _ = std::fs::remove_file(&path);
+    Err("nothing took the request: start procwatch as this user with the alarm module loaded, and get past STANDBY".into())
+}
+
 /// Largest local record before an older generation replaces it.
 const MAX_RECORD: u64 = 16 << 20;
 
@@ -348,12 +413,14 @@ pub struct AlarmModule {
     tx: Option<Sender<Notice>>,
     problems: Option<Receiver<String>>,
     record: Option<std::path::PathBuf>,
+    /// Test alarms raised and not yet ended.
+    raised: Vec<String>,
 }
 
 impl AlarmModule {
     pub fn new(destinations: Vec<Destination>) -> AlarmModule {
         let record = crate::common::paths::data_dir().map(|d| d.join("alarms.jsonl"));
-        AlarmModule { destinations, decider: Decider::default(), events: None, tx: None, problems: None, record }
+        AlarmModule { destinations, decider: Decider::default(), events: None, tx: None, problems: None, record, raised: Vec::new() }
     }
 
     /// A module's signal is gone: what it provided can't be trusted.
@@ -411,6 +478,16 @@ impl Module for AlarmModule {
 
     fn tick(&mut self, ctx: &Context) {
         let now = Instant::now();
+        for t in trigger_path().map(|p| take_triggers(&p)).unwrap_or_default() {
+            match t {
+                Trigger::Raise { priority, n } => {
+                    let event = test_alarm(priority, n);
+                    self.raised.push(event.key.clone());
+                    ctx.raise(event, None);
+                }
+                Trigger::Clear => self.raised.drain(..).for_each(|k| ctx.alarms().send(Input::Clear(k))),
+            }
+        }
         self.decider.maintenance(crate::common::maintenance::remaining().map(|left| now + left));
         // The start-up check's probe proves the channel works; it isn't an alarm.
         let events: Vec<AlarmEvent> = self.events.as_ref().map(|rx| rx.try_iter().filter(|e| e.rule != "selfcheck").collect()).unwrap_or_default();
@@ -475,6 +552,22 @@ mod tests {
         for bad in ["", "pager", "webhook ftp://x", "webhook https://x fax", "file", "command", "syslog min urgent", "syslog min"] {
             assert!(Destination::parse(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn test_alarms_are_taken_once_and_always_marked() {
+        let dir = crate::common::paths::private_temp_dir("trigger").unwrap();
+        let path = dir.join("alarm-trigger.jsonl");
+        let a = serde_json::to_string(&Trigger::Raise { priority: Priority::High, n: 1 }).unwrap();
+        std::fs::write(&path, format!("{a}\nnonsense\n{{\"unknown\":1}}\n\"clear\"\n")).unwrap();
+        assert_eq!(take_triggers(&path), [Trigger::Raise { priority: Priority::High, n: 1 }, Trigger::Clear], "what can't be read is skipped");
+        assert!(take_triggers(&path).is_empty(), "taken once");
+        assert!(!path.exists());
+        std::fs::write(&path, "x".repeat(MAX_TRIGGER_FILE as usize + 1)).unwrap();
+        assert!(take_triggers(&path).is_empty());
+        assert!(!path.exists(), "an oversized file is dropped unread");
+        assert!(test_alarm(Priority::High, 3).title.starts_with("[TEST] "));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
