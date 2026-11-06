@@ -163,6 +163,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                     if let Some(e) = list.get(cursor) {
                         if let Some(t) = e.tab {
                             app.switch_tab(t);
+                            if app.tab != t {
+                                return;
+                            }
                         }
                         normal_key(app, KeyEvent::new(KeyCode::Char(e.key), if e.key.is_uppercase() { KeyModifiers::SHIFT } else { KeyModifiers::NONE }));
                     }
@@ -1006,11 +1009,8 @@ pub fn handle_mouse(app: &mut App, m: MouseEvent) {
     }
 
     if let MouseEventKind::Down(MouseButton::Left) = m.kind {
-        if let Some((_, tab)) = app.hit.tabs.iter().find(|(r, _)| r.contains(pos)) {
-            app.tab = *tab;
-            if app.tab == Tab::Alerts {
-                app.unread_alerts = 0;
-            }
+        if let Some((_, tab)) = app.hit.tabs.iter().find(|(r, _)| r.contains(pos)).copied() {
+            app.switch_tab(tab);
             app.detail_full = false;
             return;
         }

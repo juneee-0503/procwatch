@@ -103,6 +103,11 @@ impl App {
             let names: Vec<&str> = self.boot.choices.iter().filter(|c| c.chosen).map(|c| c.name).collect();
             crate::common::audit::record("monitoring started", &names.join(", "));
             let _ = k;
+            // Nothing will fill the process table if that wasn't chosen.
+            self.loaded |= !self.module_on("process");
+            if let Some(first) = self.first_tab() {
+                self.tab = first;
+            }
         }
     }
 

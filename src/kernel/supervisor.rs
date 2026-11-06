@@ -284,6 +284,11 @@ impl Kernel {
         }
     }
 
+    /// Whether a module is meant to be running now.
+    pub fn wanted(&self, name: &str) -> bool {
+        self.0.slots.iter().find(|s| s.name == name).is_some_and(|s| s.state.lock().is_ok_and(|g| g.wants_run))
+    }
+
     /// Load these modules now, for this session only.
     pub fn activate(&self, names: &[String]) {
         for s in &self.0.slots {
@@ -908,7 +913,9 @@ mod tests {
         let k = r.boot(Bus::default(), KernelConfig::default());
         std::thread::sleep(Duration::from_millis(350));
         assert_eq!(f.ticks.load(Ordering::SeqCst), 0);
+        assert!(!k.wanted("probe"));
         k.activate(&["probe".to_string()]);
+        assert!(k.wanted("probe"));
         wait_for("loading", || f.ticks.load(Ordering::SeqCst) > 0);
         k.activate(&[]);
         wait_for("unloading", || state(&k) == ModuleState::Disabled);

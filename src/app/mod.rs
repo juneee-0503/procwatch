@@ -94,6 +94,24 @@ impl Tab {
         Tab::Activity,
         Tab::Defense,
     ];
+    /// The module behind this page: without it there is nothing to show.
+    pub fn module(self) -> &'static str {
+        match self {
+            Tab::Processes => "process",
+            Tab::Performance => "performance",
+            Tab::Network => "network",
+            Tab::Files => "files",
+            Tab::Persistence => "persistence",
+            Tab::Timeline => "timeline",
+            Tab::Logs => "logs",
+            Tab::Trace => "trace",
+            Tab::Alerts => "detection",
+            Tab::Case => "case",
+            Tab::Activity => "activity",
+            Tab::Defense => "defense",
+        }
+    }
+
     pub fn title(self) -> &'static str {
         match self {
             Tab::Processes => "Processes",
@@ -814,7 +832,26 @@ impl App {
     }
 
     /// Change page, clearing the per-page search and badges.
+    /// Whether a module was chosen. With no kernel (a replay, a test) every
+    /// page has something to show.
+    pub fn module_on(&self, name: &str) -> bool {
+        self.kernel.as_ref().is_none_or(|k| k.wanted(name))
+    }
+
+    pub fn tab_on(&self, tab: Tab) -> bool {
+        self.ir.replay.is_some() || self.module_on(tab.module())
+    }
+
+    /// The first page that has something to show.
+    pub fn first_tab(&self) -> Option<Tab> {
+        Tab::ALL.into_iter().find(|t| self.tab_on(*t))
+    }
+
     pub fn switch_tab(&mut self, tab: Tab) {
+        if !self.tab_on(tab) {
+            self.set_status(StatusLevel::Info, format!("The {} module isn't loaded. Press M to load it.", tab.module()));
+            return;
+        }
         self.tab = tab;
         if tab == Tab::Alerts {
             self.unread_alerts = 0;
@@ -1212,6 +1249,29 @@ mod tests {
                 term.draw(|f| crate::ui::draw(f, &mut a)).unwrap();
             }
         }
+    }
+
+    /// Every module that can be chosen, with the page it opens: a page
+    /// with no module could not be left out of a session.
+    #[test]
+    fn only_chosen_modules_have_pages() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let ctl = Arc::new(SamplerCtl { interval_ms: AtomicU64::new(1500), paused: AtomicBool::new(false), refresh_now: AtomicBool::new(false), snapshots_queued: Default::default() });
+        let kernel = crate::engine::boot(tx, ctl, Vec::new());
+        let names: Vec<&str> = kernel.status().iter().map(|m| m.name).collect();
+        assert!(Tab::ALL.iter().all(|t| names.contains(&t.module())), "{names:?}");
+        let mut a = app();
+        a.kernel = Some(kernel.clone());
+        assert_eq!(a.first_tab(), None, "nothing is loaded in standby");
+        kernel.activate(&["network".to_string(), "defense".to_string()]);
+        let on: Vec<Tab> = Tab::ALL.into_iter().filter(|t| a.tab_on(*t)).collect();
+        assert_eq!(on, [Tab::Network, Tab::Defense]);
+        assert_eq!(a.first_tab(), Some(Tab::Network));
+        a.tab = Tab::Network;
+        a.switch_tab(Tab::Case);
+        assert_eq!(a.tab, Tab::Network, "a page that wasn't chosen can't be opened");
+        assert!(a.ensure_case().is_none(), "nor can its work start");
+        kernel.shutdown();
     }
 
     pub(super) fn app() -> App {

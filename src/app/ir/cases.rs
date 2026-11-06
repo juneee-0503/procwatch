@@ -7,6 +7,10 @@ impl App {
 
     /// The open case, creating one in the working directory if needed.
     pub(crate) fn ensure_case(&mut self) -> Option<&mut Case> {
+        if !self.tab_on(Tab::Case) {
+            self.set_status(StatusLevel::Info, "The case module isn't loaded. Press M to load it.".into());
+            return None;
+        }
         if self.ir.case.is_none() {
             match Case::create(Path::new(".")) {
                 Ok(c) => {

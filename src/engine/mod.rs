@@ -15,7 +15,7 @@ use crate::common::pacing::SamplerCtl;
 use crate::files::module::FilesModule;
 use crate::host::logs::module::LogsModule;
 use crate::kernel::supervisor::Registry;
-use crate::kernel::{Bus, Kernel, KernelConfig};
+use crate::kernel::{Bus, Capability, Kernel, KernelConfig, Module};
 use crate::network::module::NetworkModule;
 use crate::performance::exporter::ExporterModule;
 use crate::performance::history::{self, HistoryModule};
@@ -47,10 +47,25 @@ pub fn registry(ctl: Arc<SamplerCtl>, watch: Vec<String>) -> Registry {
     crate::common::redact::configure(settings.privacy.redact, settings.privacy.command_lines);
     let keep = settings.retention;
     r.add("history", "keeps metrics on disk", move || Box::new(HistoryModule::new(history::default_dir(), keep.days, keep.max_mb.saturating_mul(1 << 19))));
+    r.add("persistence", "autostart entries, and changes to them", || Box::new(Feature("autostart scanning")));
+    r.add("timeline", "every source merged into one timeline", || Box::new(Feature("timeline")));
+    r.add("detection", "host, Sigma and content rules", || Box::new(Feature("detection rules")));
+    r.add("case", "cases, evidence and reports", || Box::new(Feature("case management")));
     r.add("logs", "system logs, read on request", || Box::new(LogsModule));
     r.add("trace", "event-driven process lifecycle tracing", || Box::<TraceModule>::default());
     r.add("activity", "file, registry and network operations by process", || Box::<ActivityModule>::default());
     r
+}
+
+/// A function of the application that an operator can choose, with no work
+/// of its own for the kernel to schedule. Being loaded is what lets the
+/// application run it.
+struct Feature(&'static str);
+
+impl Module for Feature {
+    fn capabilities(&self) -> Vec<Capability> {
+        vec![Capability::yes(self.0)]
+    }
 }
 
 fn self_probe() -> crate::kernel::supervisor::SelfProbe {

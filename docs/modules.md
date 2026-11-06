@@ -200,3 +200,26 @@ r.add("battery", "battery health", || Box::new(BatteryModule::new()));
 | 自身 CPU 连续超过 15% | 降级:可选模块暂停,普通模块放慢 4 倍 |
 
 模块在同一个进程里用线程隔离。规格里提到的“高风险模块演进为独立子进程”尚未实现。
+
+## 模块与页面
+
+每个页面都属于一个模块,没有勾选模块就没有页面,也没有它背后的工作。
+
+| 页面 | 模块 |
+|---|---|
+| 进程 | `process` |
+| 性能 | `performance` |
+| 网络 | `network` |
+| 文件 | `files` |
+| 持久化 | `persistence` |
+| 时间线 | `timeline` |
+| 日志 | `logs` |
+| 追踪 | `trace` |
+| 检测 | `detection` |
+| 案件 | `case` |
+| 活动 | `activity` |
+| 防御 | `defense` |
+
+`gpu`、`alarm`、`exporter`、`history` 没有自己的页面。
+
+模块互不依赖,按勾选严格加载。有些页面靠别的模块补充数据:不加载 `process` 时,其他页面看不到进程名,检测也没有进程可判断。

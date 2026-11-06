@@ -13,13 +13,35 @@ use crate::app::boot::BootPhase;
 use crate::app::App;
 use crate::kernel::alarm::{Phase, Priority};
 
+/// The word, five rows high. Scaled to the screen by `standby_word`.
 const STANDBY: [&str; 5] = [
-    "███ ███  █  █  █ ██  ██  █ █",
-    "█    █  █ █ ██ █ █ █ █ █ █ █",
-    "███  █  ███ █ ██ █ █ ██   █ ",
-    "  █  █  █ █ █  █ █ █ █ █  █ ",
-    "███  █  █ █ █  █ ██  ██   █ ",
+    "##### ##### ##### #   # ####  ####  #   #",
+    "#       #   #   # ##  # #   # #   #  # # ",
+    "#####   #   ##### # # # #   # ####    #  ",
+    "    #   #   #   # #  ## #   # #   #   #  ",
+    "#####   #   #   # #   # ####  ####    #  ",
 ];
+const WORD_WIDTH: usize = 41;
+/// Rows the lines under the word need, with the gap above them.
+const CAPTION: u16 = 3;
+
+/// The word as large as `width` by `height` allows, each pixel `sx` by `sy`
+/// cells. A terminal cell is about twice as tall as wide, so two columns to
+/// a row keeps its shape. Too small for that, it is plain text.
+pub fn standby_word(width: u16, height: u16) -> Vec<String> {
+    let (rows, columns) = (height.saturating_sub(CAPTION + 2) as usize / STANDBY.len(), width.saturating_sub(4) as usize / WORD_WIDTH);
+    if rows == 0 || columns == 0 {
+        return vec!["S T A N D B Y".to_string()];
+    }
+    let sy = rows.min(columns.div_ceil(2));
+    let sx = columns.min(sy * 2);
+    let mut out = Vec::with_capacity(STANDBY.len() * sy);
+    for line in STANDBY {
+        let wide: String = line.chars().flat_map(|c| std::iter::repeat_n(if c == '#' { '█' } else { ' ' }, sx)).collect();
+        out.extend(std::iter::repeat_n(wide, sy));
+    }
+    out
+}
 
 fn log_view(frame: &mut Frame, app: &App, area: Rect) {
     let height = area.height as usize;
@@ -44,13 +66,14 @@ fn progress(frame: &mut Frame, app: &App, title: &str, screen: Rect) {
 }
 
 fn standby(frame: &mut Frame, screen: Rect) {
-    let width = STANDBY[0].chars().count() as u16;
-    let rect = centered(screen, width.min(screen.width), (STANDBY.len() as u16 + 3).min(screen.height));
-    let mut lines: Vec<Line> = STANDBY.iter().map(|l| Line::from(Span::styled(*l, Style::new().fg(WARN).add_modifier(Modifier::BOLD)))).collect();
+    let word = standby_word(screen.width, screen.height);
+    let mut lines: Vec<Line> = word.into_iter().map(|l| Line::from(Span::styled(l, Style::new().fg(WARN).add_modifier(Modifier::BOLD)))).collect();
     lines.push(Line::default());
     lines.push(Line::from(muted("Self-check passed. Nothing is being monitored.")));
     lines.push(Line::from(muted("enter choose modules  ,  settings  q  quit")));
-    frame.render_widget(Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center), rect);
+    let height = (lines.len() as u16).min(screen.height);
+    let area = Rect { y: screen.y + (screen.height - height) / 2, height, ..screen };
+    frame.render_widget(Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center), area);
 }
 
 fn select(frame: &mut Frame, app: &App, screen: Rect) {
@@ -186,7 +209,24 @@ mod tests {
     }
 
     #[test]
-    fn standby_lines_are_even() {
-        assert!(STANDBY.iter().all(|l| l.chars().count() == STANDBY[0].chars().count()));
+    fn the_word_is_even_and_fills_whatever_it_is_given() {
+        assert!(STANDBY.iter().all(|l| l.chars().count() == WORD_WIDTH));
+        let size = |w, h| {
+            let lines = standby_word(w, h);
+            (lines[0].chars().count(), lines.len())
+        };
+        assert_eq!(size(80, 24), (41, 5));
+        assert_eq!(size(130, 40), (123, 10));
+        assert_eq!(size(250, 70), (246, 15), "two columns to a row keeps its shape");
+        for (w, h) in [(45, 10), (80, 24), (100, 30), (200, 50), (300, 80), (400, 20), (46, 200)] {
+            let (width, height) = size(w, h);
+            assert!(width + 4 <= w as usize && height + CAPTION as usize + 2 <= h as usize, "{w}x{h} gave {width}x{height}");
+        }
+        assert!(size(200, 50).0 > size(100, 30).0, "a bigger screen gets a bigger word");
+    }
+
+    #[test]
+    fn a_tiny_screen_still_says_it() {
+        assert_eq!(standby_word(20, 5), ["S T A N D B Y"]);
     }
 }

@@ -67,6 +67,21 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     app.hit.search = Rect::default();
     app.hit.view_toggle = Rect::default();
     app.hit.pane_body = Rect::default();
+    if !app.tab_on(app.tab) {
+        let text = "No modules with a page are loaded. Press M to load one.";
+        frame.render_widget(Paragraph::new(Span::styled(text, Style::new().fg(Color::Gray))).alignment(ratatui::layout::Alignment::Center), Rect { y: body.y + body.height / 2, height: 1.min(body.height), ..body });
+    } else {
+        draw_page(frame, app, body);
+    }
+    draw_hints(frame, app, hints);
+    if tall {
+        const LAMP: u16 = 18;
+        boot::lamp(frame, app, Rect { x: size.width - LAMP, y: 0, width: LAMP, height: 3 });
+    }
+    draw_overlays(frame, app, size, body);
+}
+
+fn draw_page(frame: &mut Frame, app: &mut App, body: Rect) {
     match app.tab {
         Tab::Processes => processes::draw(frame, app, body),
         Tab::Performance => pages::performance(frame, app, body),
@@ -84,12 +99,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Tab::Alerts => analysis::alerts(frame, app, body),
         Tab::Case => investigate::case(frame, app, body),
     }
-    draw_hints(frame, app, hints);
-    if tall {
-        const LAMP: u16 = 18;
-        boot::lamp(frame, app, Rect { x: size.width - LAMP, y: 0, width: LAMP, height: 3 });
-    }
+}
 
+fn draw_overlays(frame: &mut Frame, app: &mut App, size: Rect, body: Rect) {
     if app.find.is_some() {
         overlays::find_results(frame, app, body);
     }
@@ -129,9 +141,10 @@ fn draw_title(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut x = area.x + spans[0].content.width() as u16;
     app.hit.tabs.clear();
     // Full names when they fit next to the summary, short ones otherwise.
-    let full: usize = Tab::ALL.iter().map(|t| t.title().width() + 4).sum::<usize>() + 60;
+    let tabs: Vec<Tab> = Tab::ALL.into_iter().filter(|t| app.tab_on(*t)).collect();
+    let full: usize = tabs.iter().map(|t| t.title().width() + 4).sum::<usize>() + 60;
     let compact = (area.width as usize) < full;
-    for t in Tab::ALL.iter() {
+    for t in tabs.iter() {
         let text = format!(" {} {} ", t.key(), if compact { t.short() } else { t.title() });
         let w = text.width() as u16;
         let style = if *t == app.tab {
@@ -167,6 +180,10 @@ fn draw_title(frame: &mut Frame, app: &mut App, area: Rect) {
         if w + 1 < area.width.saturating_sub(x - area.x) {
             frame.render_widget(Paragraph::new(line), Rect { x: area.right() - w, width: w, ..area });
         }
+        return;
+    }
+    // Without the process module these figures don't exist; zeros would lie.
+    if !app.module_on("process") {
         return;
     }
     let s = &app.stats;

@@ -6,6 +6,10 @@ impl App {
     // ── behavior trace ─────────────────────────────────────────────────
 
     pub fn start_trace(&mut self, pid: u32) {
+        if !self.tab_on(Tab::Trace) {
+            self.set_status(StatusLevel::Info, "The trace module isn't loaded. Press M to load it.".into());
+            return;
+        }
         if self.replaying() {
             self.set_status(StatusLevel::Info, "Not available while replaying a recording — this would act on the live system".into());
             return;

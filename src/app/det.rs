@@ -90,6 +90,9 @@ impl App {
     }
 
     pub(super) fn record_detection_pub(&mut self, hit: &RuleHit, subject: Entity, label: String, pid: Option<u32>, engine: &'static str) {
+        if !self.module_on("detection") {
+            return;
+        }
         let mut hit = hit.clone();
         if hit.suppressed.is_none() {
             let hint = if let Entity::File(p) = &subject { p.clone() } else { String::new() };
@@ -223,6 +226,9 @@ impl App {
 
     /// Sigma `network_connection` rules for sockets that just appeared.
     pub(super) fn sigma_on_sockets(&mut self, opened: &[(u32, crate::network::Connection)]) {
+        if !self.module_on("detection") {
+            return;
+        }
         if self.ir.det.sigma.is_empty() || opened.is_empty() {
             return;
         }
@@ -250,6 +256,9 @@ impl App {
 
     /// Sigma `file_*` rules for a file-change notification.
     pub(super) fn sigma_on_fs(&mut self, e: &FsEvent) {
+        if !self.module_on("detection") {
+            return;
+        }
         if self.ir.det.sigma.is_empty() {
             return;
         }
@@ -263,6 +272,9 @@ impl App {
 
     /// Sigma rules over freshly loaded event-log entries.
     pub(super) fn sigma_on_logs(&mut self) {
+        if !self.module_on("detection") {
+            return;
+        }
         if self.ir.det.sigma.is_empty() {
             return;
         }
@@ -290,6 +302,9 @@ impl App {
 
     /// Run Sigma over externally parsed records (EVTX, artifacts).
     pub(super) fn sigma_on_events(&mut self, events: &[(sigma::Event, DateTime<Local>, String)]) -> usize {
+        if !self.module_on("detection") {
+            return Default::default();
+        }
         let host = self.host_name();
         let found: Vec<(RuleHit, DateTime<Local>, String, String)> = events
             .iter()

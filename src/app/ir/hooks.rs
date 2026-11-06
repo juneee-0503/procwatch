@@ -480,12 +480,19 @@ impl App {
             (None, None) => (Local::now() - self.ir.watch_start).num_seconds() >= 30,
             (None, Some(last)) => last.elapsed() >= std::time::Duration::from_secs(900),
         };
-        if due && !scanning && self.tab != Tab::Persistence {
+        if due && !scanning && self.tab != Tab::Persistence && self.module_on("persistence") {
             self.ir.persist_auto = true;
             self.scan_persistence();
         }
-        if !self.ir.dns_asked && !self.ir.dns_pending {
+        if !self.ir.dns_asked && !self.ir.dns_pending && self.module_on("network") {
             self.collect_dns();
+        }
+        if !self.tab_on(self.tab) {
+            // Its module was switched off.
+            if let Some(first) = self.first_tab() {
+                self.tab = first;
+            }
+            return true;
         }
         if self.tab == Tab::Activity {
             self.refresh_activity_view();
