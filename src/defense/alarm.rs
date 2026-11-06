@@ -386,7 +386,7 @@ pub fn request(triggers: &[Trigger]) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(100));
     }
     let _ = std::fs::remove_file(&path);
-    Err("nothing took the request: start procwatch as this user with the alarm module loaded, and get past STANDBY".into())
+    Err("nothing took the request: procwatch must be running as this user, past STANDBY, with the alarm module loaded. A session started before you rebuilt can't answer: restart it".into())
 }
 
 /// Largest local record before an older generation replaces it.

@@ -13,23 +13,33 @@
 set -eu
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+# The most recently built one: that is the one likely to be running.
 find_binary() {
     if [ -n "${PROCWATCH:-}" ]; then
         printf '%s\n' "$PROCWATCH"
         return
     fi
-    for candidate in "$here/target/release/procwatch" "$here/target/debug/procwatch"; do
-        if [ -x "$candidate" ]; then
-            printf '%s\n' "$candidate"
-            return
-        fi
-    done
-    command -v procwatch || {
-        echo "procwatch not found: build it, or set PROCWATCH" >&2
-        exit 2
-    }
+    release=$here/target/release/procwatch
+    debug=$here/target/debug/procwatch
+    if [ -x "$release" ] && [ -x "$debug" ]; then
+        if [ "$release" -nt "$debug" ]; then printf '%s\n' "$release"; else printf '%s\n' "$debug"; fi
+    elif [ -x "$release" ]; then
+        printf '%s\n' "$release"
+    elif [ -x "$debug" ]; then
+        printf '%s\n' "$debug"
+    else
+        command -v procwatch || {
+            echo "procwatch not found: run cargo build, or set PROCWATCH" >&2
+            exit 2
+        }
+    fi
 }
 pw=$(find_binary)
+
+if ! "$pw" --help 2>&1 | grep -q -e --alarm-trigger; then
+    echo "$pw is older than this script. Run cargo build, then restart procwatch." >&2
+    exit 2
+fi
 
 case "${1:-}" in
 high | medium | low)
