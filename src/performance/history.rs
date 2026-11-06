@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 use crate::kernel::model::{Sample, SAMPLES};
 use crate::kernel::{Capability, Context, Event, Module};
 
-const KEEP_DAYS: i64 = 30;
 const MAX_SERIES: usize = 2000;
+/// The file format; rows without one predate it.
+const VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct Point {
@@ -25,6 +26,8 @@ pub struct Point {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Row {
+    #[serde(default)]
+    pub v: u32,
     pub t: DateTime<Local>,
     pub m: BTreeMap<String, Point>,
 }
@@ -68,13 +71,24 @@ pub fn default_dir() -> Option<PathBuf> {
     crate::common::paths::data_dir().map(|d| d.join("metrics"))
 }
 
-/// Remove days past keeping.
-fn prune(dir: &Path, today: NaiveDate) {
-    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-        let name = e.file_name().to_string_lossy().into_owned();
-        let day = name.strip_suffix(".jsonl").and_then(|d| d.parse::<NaiveDate>().ok());
-        if day.is_some_and(|d| (today - d).num_days() > KEEP_DAYS) {
-            let _ = std::fs::remove_file(e.path());
+/// Remove days past keeping, then the oldest until within the size limit.
+fn prune(dir: &Path, today: NaiveDate, keep_days: i64, max_bytes: u64) {
+    let mut days: Vec<(NaiveDate, PathBuf, u64)> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let day = name.strip_suffix(".jsonl")?.parse::<NaiveDate>().ok()?;
+            Some((day, e.path(), e.metadata().ok()?.len()))
+        })
+        .collect();
+    days.sort();
+    let mut total: u64 = days.iter().map(|d| d.2).sum();
+    for (day, path, size) in days {
+        // Today's file stays, or nothing could ever be written.
+        if day != today && ((today - day).num_days() > keep_days || total > max_bytes) && std::fs::remove_file(path).is_ok() {
+            total -= size;
         }
     }
 }
@@ -97,12 +111,14 @@ pub fn read(dir: &Path, hours: u64, now: DateTime<Local>) -> Vec<Row> {
 pub struct HistoryModule {
     dir: Option<PathBuf>,
     minute: Minute,
-    started: Option<DateTime<Local>>,
+    keep_days: i64,
+    max_bytes: u64,
+    failed: bool,
 }
 
 impl HistoryModule {
-    pub fn new(dir: Option<PathBuf>) -> HistoryModule {
-        HistoryModule { dir, minute: Minute::default(), started: None }
+    pub fn new(dir: Option<PathBuf>, keep_days: u64, max_bytes: u64) -> HistoryModule {
+        HistoryModule { dir, minute: Minute::default(), keep_days: keep_days as i64, max_bytes, failed: false }
     }
 
     fn flush(&mut self, now: DateTime<Local>) {
@@ -111,9 +127,11 @@ impl HistoryModule {
         if m.is_empty() {
             return;
         }
-        let Ok(line) = serde_json::to_string(&Row { t: now, m }) else { return };
-        if crate::common::paths::private_file().create(true).append(true).open(day_file(dir, now.date_naive())).and_then(|mut f| writeln!(f, "{line}")).is_ok() {
-            prune(dir, now.date_naive());
+        let Ok(line) = serde_json::to_string(&Row { v: VERSION, t: now, m }) else { return };
+        let written = crate::common::paths::private_file().create(true).append(true).open(day_file(dir, now.date_naive())).and_then(|mut f| writeln!(f, "{line}"));
+        self.failed = written.is_err();
+        if written.is_ok() {
+            prune(dir, now.date_naive(), self.keep_days, self.max_bytes);
         }
     }
 }
@@ -131,11 +149,14 @@ impl Module for HistoryModule {
         Some(Duration::from_secs(60))
     }
 
-    fn start(&mut self, _: &Context) -> Result<(), String> {
+    fn importance(&self) -> crate::kernel::module::Importance {
+        crate::kernel::module::Importance::Optional
+    }
+
+    fn self_test(&mut self) -> Result<String, String> {
         let dir = self.dir.as_ref().ok_or("no data folder")?;
         crate::common::paths::ensure_private_dir(dir).map_err(|e| e.to_string())?;
-        self.started = Some(Local::now());
-        Ok(())
+        Ok(format!("keeping {} days in {}", self.keep_days, dir.display()))
     }
 
     fn on_event(&mut self, e: &Event, _: &Context) {
@@ -146,8 +167,13 @@ impl Module for HistoryModule {
         }
     }
 
-    fn tick(&mut self, _: &Context) {
+    fn tick(&mut self, ctx: &Context) {
         self.flush(Local::now());
+        if self.failed {
+            ctx.error();
+        } else {
+            ctx.ok();
+        }
     }
 
     fn stop(&mut self) {
@@ -191,7 +217,7 @@ mod tests {
     #[test]
     fn minutes_summarise_and_read_back() {
         let dir = crate::common::paths::private_temp_dir("history").unwrap();
-        let mut h = HistoryModule::new(Some(dir.clone()));
+        let mut h = HistoryModule::new(Some(dir.clone()), 30, 1 << 30);
         for v in [1.0, 2.0, 6.0] {
             h.minute.add(series(&Sample::new("net.rx", v, Unit::BytesPerSecond).label("interface", "eth0")), v);
         }
@@ -209,13 +235,17 @@ mod tests {
     fn old_days_go_and_series_are_limited() {
         let dir = crate::common::paths::private_temp_dir("history").unwrap();
         let today = Local::now().date_naive();
-        let old = day_file(&dir, today - chrono::Duration::days(KEEP_DAYS + 1));
+        let old = day_file(&dir, today - chrono::Duration::days(31));
         let kept = day_file(&dir, today - chrono::Duration::days(2));
         std::fs::write(&old, "").unwrap();
-        std::fs::write(&kept, "").unwrap();
+        std::fs::write(&kept, "xxxx").unwrap();
         std::fs::write(dir.join("notes.txt"), "").unwrap();
-        prune(&dir, today);
+        prune(&dir, today, 30, 1 << 30);
         assert!(!old.exists() && kept.exists() && dir.join("notes.txt").exists());
+        let current = day_file(&dir, today);
+        std::fs::write(&current, "yyyy").unwrap();
+        prune(&dir, today, 30, 2);
+        assert!(!kept.exists() && current.exists(), "over the size limit, the oldest goes and today stays");
         let mut m = Minute::default();
         for i in 0..MAX_SERIES + 10 {
             m.add(i.to_string(), 1.0);

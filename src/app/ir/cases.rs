@@ -464,6 +464,13 @@ impl App {
     pub fn submit_input(&mut self, purpose: InputPurpose, input: String) {
         self.mode = Mode::Normal;
         match purpose {
+            InputPurpose::Setting(at) => {
+                let Some(item) = self.settings_items().get(at).cloned() else { return };
+                self.mode = match self.settings_set(&item, &input) {
+                    Ok(()) => Mode::Settings { cursor: at },
+                    Err(error) => Mode::Input { purpose: InputPurpose::Setting(at), input, error: Some(error) },
+                };
+            }
             InputPurpose::AnalyzePath => self.analyze_file(&input),
             InputPurpose::Note if !input.trim().is_empty() => {
                 if let Some(c) = self.ensure_case() {

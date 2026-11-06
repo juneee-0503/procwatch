@@ -3,6 +3,7 @@
 
 pub mod agent;
 pub mod coverage;
+pub mod service;
 pub mod metrics;
 pub mod modules;
 pub mod monitor;
@@ -55,7 +56,7 @@ Usage:
                                     Everything ends when procwatch exits. See docs/enforcement.md
   procwatch --agent POLICY [--output FILE] [--minutes N]
                                     EDR agent: detections, playbooks, blocking and a tamper-evident
-                                    log, restarted if it dies. Audit mode only logs. See docs/edr.md
+                                    log. Run it under a service manager. Audit mode only logs. See docs/edr.md
   procwatch --agent-check POLICY    show what an agent policy would do, and refuse unsafe ones
   procwatch --agent-verify [FILE]   check an agent log's hash chain; exit status 1 if it was changed
   procwatch --capture-check [FILE]  check capture.yml, the filter for activity capture
@@ -65,6 +66,14 @@ Usage:
   procwatch --boot-log enable|disable|status|read [FILE] [--json]
                                     Windows: record file, registry and process activity from early
                                     boot, and read it back; needs administrator
+  procwatch --heartbeat-receiver ADDR --key FILE [--period SECONDS] [--store DIR]
+                                    run on another machine: check beats and raise an alarm on silence
+  procwatch --maintenance MINUTES [REASON]   quiet alarms for a time; 0 ends it now
+  procwatch --accept-program        approve this program after an upgrade
+  procwatch --config-accept FILE    approve a configuration file edited by hand
+  procwatch --diagnose FILE         write a report for troubleshooting, with no secrets
+  procwatch --query health          ask a running agent how it is
+  procwatch --dictionary            list every metric, its kind and what varies by platform
   procwatch --ebpf-check            load the eBPF sensor and report what this kernel allows
   procwatch --defense-check [FILE]  check defense.yml and show what is watched
   procwatch --alarm-test            send a test alarm to every configured destination
@@ -79,6 +88,7 @@ Usage:
   procwatch --help";
 
 pub fn main() -> anyhow::Result<()> {
+    crate::kernel::model::set_host(sysinfo::System::host_name().unwrap_or_else(|| "unknown".to_string()));
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("-h" | "--help") => {
@@ -181,7 +191,7 @@ pub fn main() -> anyhow::Result<()> {
             }
             std::process::exit(enforce::run(std::path::Path::new(file), value("--output").map(std::path::Path::new), minutes.and_then(Result::ok)));
         }
-        Some("--agent" | "--agent-worker" | "--agent-check") => {
+        Some("--agent" | "--agent-check") => {
             let Some(file) = args.get(1) else {
                 eprintln!("{} needs a policy file\n\n{USAGE}", args[0]);
                 std::process::exit(2);
@@ -199,9 +209,18 @@ pub fn main() -> anyhow::Result<()> {
             let output = value("--output").map(std::path::PathBuf::from);
             std::process::exit(match args[0].as_str() {
                 "--agent-check" => agent::check(path),
-                "--agent" => agent::run(path, output.as_deref(), minutes),
-                _ => agent::worker(path, output.as_deref(), minutes),
+                _ => agent::run(path, output.as_deref(), minutes),
             });
+        }
+        #[cfg(windows)]
+        Some("--windows-service") => {
+            static POLICY: std::sync::OnceLock<(String, Option<String>)> = std::sync::OnceLock::new();
+            let value = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
+            let _ = POLICY.set((args.get(1).cloned().unwrap_or_default(), value("--output")));
+            std::process::exit(service::run_as_service(|| {
+                let Some((policy, output)) = POLICY.get() else { return 2 };
+                agent::run(std::path::Path::new(policy), output.as_deref().map(std::path::Path::new), None)
+            }));
         }
         Some("--agent-verify") => std::process::exit(agent::verify_log(args.get(1).map(std::path::Path::new))),
         Some("--capture-check") => {
@@ -255,6 +274,78 @@ pub fn main() -> anyhow::Result<()> {
             std::process::exit(crate::activity::boot::run(action, file, args.iter().any(|a| a == "--json")));
         }
         Some("--defense-check") => std::process::exit(defense_check(args.get(1).map(std::path::Path::new))),
+        Some("--heartbeat-receiver") => {
+            let value = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
+            let (Some(addr), Some(key)) = (args.get(1), value("--key")) else {
+                eprintln!("--heartbeat-receiver needs an address and --key FILE\n\n{USAGE}");
+                std::process::exit(2);
+            };
+            let period = value("--period").and_then(|p| p.parse().ok()).unwrap_or(15);
+            let store = value("--store").map(std::path::PathBuf::from);
+            std::process::exit(crate::defense::heartbeat::receive(addr, &key, std::time::Duration::from_secs(period), store.as_deref()));
+        }
+        Some("--maintenance") => {
+            let Some(Ok(minutes)) = args.get(1).map(|m| m.parse::<u64>()) else {
+                eprintln!("--maintenance needs a number of minutes\n\n{USAGE}");
+                std::process::exit(2);
+            };
+            if minutes == 0 {
+                crate::common::maintenance::end();
+                println!("Maintenance ended.");
+                std::process::exit(0);
+            }
+            let reason = args.get(2).map_or("not given", String::as_str);
+            match crate::common::maintenance::begin(minutes, reason) {
+                Ok(()) => {
+                    println!("Alarms are quiet for {minutes} minutes. This ends by itself.");
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("procwatch: {e}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        Some("--accept-program") => match crate::common::integrity::accept_program() {
+            Ok(h) => {
+                println!("Approved {h}");
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("procwatch: {e}");
+                std::process::exit(2);
+            }
+        },
+        Some("--config-accept") => {
+            let Some(file) = args.get(1) else {
+                eprintln!("--config-accept needs a file\n\n{USAGE}");
+                std::process::exit(2);
+            };
+            match crate::common::integrity::seal_config(std::path::Path::new(file)) {
+                Ok(()) => {
+                    println!("Approved {file}");
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("procwatch: {e}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        Some("--diagnose") => {
+            let Some(file) = args.get(1) else {
+                eprintln!("--diagnose needs a file name\n\n{USAGE}");
+                std::process::exit(2);
+            };
+            std::process::exit(service::diagnose(std::path::Path::new(file)));
+        }
+        Some("--query") => std::process::exit(service::ask(args.get(1).map_or("health", String::as_str))),
+        Some("--dictionary") => {
+            for m in crate::kernel::dictionary::METRICS {
+                println!("{:<26} {:<8?} {:<16?} {}{}", m.name, m.kind, m.unit, m.meaning, if m.caveat.is_empty() { String::new() } else { format!(" ({})", m.caveat) });
+            }
+            std::process::exit(0);
+        }
         Some("--ebpf-check") => std::process::exit(crate::defense::ebpf::check()),
         Some("--alarm-test") => std::process::exit(alarm_test()),
         Some("--unban-all") => match crate::defense::ban::clear() {
@@ -366,8 +457,8 @@ fn defense_check(file: Option<&std::path::Path>) -> i32 {
 }
 
 fn alarm_test() -> i32 {
-    use crate::common::model::Severity;
     use crate::defense::alarm::{send, Notice};
+    use crate::kernel::alarm::Priority;
     let config = match defense_config(None) {
         Ok(c) => c,
         Err(e) => {
@@ -379,8 +470,7 @@ fn alarm_test() -> i32 {
         eprintln!("no alarm destinations in defense.yml");
         return 1;
     }
-    let host = sysinfo::System::host_name().unwrap_or_default();
-    let notice = Notice { severity: Severity::Critical, rule: "alarm-test".into(), title: "Test alarm from procwatch: nothing is wrong".into(), source: None, detail: String::new(), host };
+    let notice = Notice { priority: Priority::High, rule: "alarm-test".into(), title: "Test alarm from procwatch: nothing is wrong".into(), source: "test".into(), detail: String::new() };
     let mut failed = 0;
     for d in &config.alarms {
         match send(d, &notice) {

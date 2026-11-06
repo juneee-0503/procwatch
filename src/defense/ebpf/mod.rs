@@ -40,16 +40,25 @@ pub fn check() -> i32 {
         println!("not on this kernel: {}", sensor.missing.join(", "));
     }
     let mark = "/bin/true";
+    // Attaching takes effect at once on some kernels and not on others.
+    std::thread::sleep(Duration::from_millis(300));
     for _ in 0..3 {
         let _ = std::process::Command::new(mark).status();
     }
     let until = Instant::now() + Duration::from_secs(2);
-    let mut seen = 0;
+    let (mut seen, mut execs, mut samples) = (0, 0, Vec::new());
     while Instant::now() < until {
         if let Ok(e) = sensor.rx.recv_timeout(Duration::from_millis(100)) {
-            seen += u32::from(e.kind == program::Kind::Exec && e.path == mark);
+            if e.kind == program::Kind::Exec {
+                execs += 1;
+                seen += u32::from(e.path == mark);
+                if samples.len() < 5 {
+                    samples.push(format!("{:?} by {} args {:?}", e.path, e.comm, e.args));
+                }
+            }
         }
     }
-    println!("saw {seen} of 3 test programs start; {} records lost", sensor.lost());
+    println!("saw {seen} of 3 test programs start; {} records read, {execs} execs, {} lost", sensor.seen.load(std::sync::atomic::Ordering::Relaxed), sensor.lost());
+    samples.iter().for_each(|s| println!("  {s}"));
     i32::from(seen != 3)
 }

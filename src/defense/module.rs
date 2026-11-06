@@ -13,6 +13,8 @@ use super::filter::Gate;
 use super::host::{Host, Saved};
 use super::tail::Tail;
 use super::{auth, ebpf, netattack, sniff, web, Threat};
+use crate::common::model::Severity;
+use crate::kernel::alarm::{AlarmEvent, Priority};
 use crate::kernel::model::{Sample, Unit, SAMPLES};
 use crate::kernel::{Capability, Context, Event, Module};
 
@@ -44,6 +46,15 @@ struct State {
 
 fn state_path() -> Option<PathBuf> {
     crate::common::paths::data_dir().map(|d| d.join("defense-state.json"))
+}
+
+fn priority_of(s: Severity) -> Option<Priority> {
+    match s {
+        Severity::Critical | Severity::High => Some(Priority::High),
+        Severity::Medium => Some(Priority::Medium),
+        Severity::Low => Some(Priority::Low),
+        Severity::Info => None,
+    }
 }
 
 pub struct DefenseModule {
@@ -154,12 +165,28 @@ impl DefenseModule {
     }
 
     fn report(&mut self, ctx: &Context, found: Vec<Threat>) {
-        for t in found {
+        for mut t in found {
             if !self.gate.admit(&t) {
                 continue;
             }
+            t.identify(&self.root);
             self.found[t.severity as usize] += 1;
+            if let Some(priority) = priority_of(t.severity) {
+                let key = format!("threat|{}|{}|{}|{}", t.rule, t.source.map(|s| s.to_string()).unwrap_or_default(), t.pid.unwrap_or(0), t.started.unwrap_or(0));
+                let event = AlarmEvent::new(key, t.rule, t.title.clone(), priority, "defense").detail(t.evidence.clone());
+                // A high alarm stays until someone has seen it.
+                let lasts = match priority {
+                    Priority::High => None,
+                    Priority::Medium => Some(Duration::from_secs(1800)),
+                    Priority::Low => Some(Duration::from_secs(600)),
+                };
+                ctx.raise(event, lasts);
+            }
             if let Some(incident) = self.chains.feed(&t) {
+                if let Some(priority) = priority_of(incident.severity) {
+                    let event = AlarmEvent::new(format!("attack|{}", incident.id), "attack-chain", incident.summary(), priority, "defense").detail(incident.steps.iter().rev().take(8).rev().map(|s| format!("{} {}", s.stage.label(), s.title)).collect::<Vec<_>>().join("\n"));
+                    ctx.raise(event, None);
+                }
                 ctx.publish::<Incident>(INCIDENTS, incident);
             }
             ctx.publish(THREATS, t);
@@ -264,6 +291,10 @@ impl Module for DefenseModule {
         vec![SAMPLES]
     }
 
+    fn importance(&self) -> crate::kernel::module::Importance {
+        crate::kernel::module::Importance::Core
+    }
+
     fn interval(&self) -> Option<Duration> {
         Some(Duration::from_millis(250))
     }
@@ -316,9 +347,8 @@ impl Module for DefenseModule {
 
     fn tick(&mut self, ctx: &Context) {
         if let Some(p) = self.sensor_problem.take() {
-            if is_root() {
-                ctx.publish(super::alarm::PROBLEM, format!("eBPF sensor unavailable, using slower checks: {p}"));
-            }
+            // Running on, with less: that is a state to show, not a fault.
+            ctx.degraded(Some(format!("no real-time sensor, using slower checks: {}", p.lines().next().unwrap_or(""))));
         }
         self.read_logs(ctx);
         self.read_syns(ctx);

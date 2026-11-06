@@ -52,3 +52,37 @@ PW_FUZZ_ITERATIONS=3000 cargo test --release --locked fuzz_ -- --ignored
 
 - 主机规则:加到 `triage.rs` 的 `RULES`,并同步 [检测文档](detection.md)。
 - Sigma、序列、内容规则:加到 `rules/` 下对应文件。`--check-rules` 和单元测试会校验。
+
+## 测试策略
+
+| 层 | 工具 |
+|---|---|
+| 单元 | 平台差异隔离在探头后;`/proc` 解析用 `tests/fixtures` 的固定样本 |
+| 属性 | proptest:报警状态机、决策、规则解析 |
+| 故障注入 | 模块 panic、卡死、持续返回错误,验证看门狗、退避、熔断 |
+| 模糊 | 所有解析不可信输入的代码,`src/fuzz.rs` |
+| 基准 | `cargo test --release bench_ -- --ignored`,有性能下限 |
+| 验收 | `tests/acceptance.sh` |
+| 真实内核 | CI 的 `ebpf` 作业 |
+| 供应链 | `cargo deny`,配置在 `deny.toml` |
+
+合并要求 Linux 和 Windows 的 build、clippy、test 全过。这需要在 GitHub 的分支保护里把这些作业设为必需,CI 文件本身做不到。
+
+## 约定
+
+最低 Rust 版本 1.95(`Cargo.toml` 的 `rust-version`,yara-x 要求)。许可证 MIT。
+
+内核禁止 `unwrap`、`expect`、`panic!` 和索引访问,由 `src/kernel/mod.rs` 的 clippy 规则强制。
+
+`unsafe` 只用于平台调用,集中在这些文件:
+
+| 文件 | 用途 |
+|---|---|
+| `src/defense/ebpf/loader.rs` | `bpf`、`perf_event_open`、`mmap` |
+| `src/defense/sniff.rs`、`src/network/pcap.rs` | 原始套接字 |
+| `src/response/enforce.rs` | fanotify、WFP |
+| `src/response/tamper.rs`、`src/response/agent.rs` | prctl、DACL、`chattr` |
+| `src/response/driver.rs` | 过滤器通信端口 |
+| `src/cli/service.rs` | 信号、服务控制 |
+| `src/common/etw.rs`、`src/files/symbols.rs` | ETW、ToolHelp |
+| `src/process/` 下的探头 | 平台进程 API |

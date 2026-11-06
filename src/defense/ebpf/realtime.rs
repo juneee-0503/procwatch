@@ -80,7 +80,7 @@ fn sensitive(path: &str) -> Option<(&'static str, Severity, Stage)> {
 }
 
 fn command_line(e: &Event) -> String {
-    e.args.join(" ")
+    crate::common::redact::command_line(&e.args.join(" "))
 }
 
 impl Detector {
@@ -130,7 +130,8 @@ impl Detector {
         if fd_path && self.procs.get(&e.pid).is_some_and(|p| p.memfd) && !CONTAINER_RUNTIMES.contains(&e.comm.as_str()) {
             out.push(Threat::new(now, "fileless-execution", Severity::Critical, Stage::Execution, format!("{} ran a program held only in memory", e.comm)).of_pid(e.pid).with_evidence(&line));
         }
-        let lower = line.to_lowercase();
+        // Judged on what ran; only what is kept is subject to privacy.
+        let lower = e.args.join(" ").to_lowercase();
         for (what, patterns) in COMMANDS {
             if patterns.iter().any(|p| lower.contains(p)) {
                 out.push(Threat::new(now, "suspicious-command", Severity::High, Stage::Execution, format!("{what}: {}", crate::common::text::truncate(&line, 80))).of_pid(e.pid).with_evidence(format!("started by {}", e.comm)));

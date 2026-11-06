@@ -1,0 +1,4 @@
+TcpExt: SyncookiesSent SyncookiesRecv SyncookiesFailed ListenOverflows ListenDrops TCPReqQFullDoCookies
+TcpExt: 482 0 3 77 91 12
+IpExt: InNoRoutes InTruncatedPkts InMcastPkts
+IpExt: 0 0 1204

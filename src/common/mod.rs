@@ -1,16 +1,23 @@
 //! Foundations every module may use, depending on nothing above them.
 
+pub mod audit;
 pub mod command;
 pub mod desktop;
 pub mod emit;
+pub mod environment;
 #[cfg(windows)]
 pub mod etw;
 pub mod filter;
+pub mod integrity;
+pub mod maintenance;
 pub mod model;
 pub mod pacing;
 pub mod paths;
 pub mod perf;
+pub mod redact;
+pub mod sound;
 pub mod text;
+pub mod versioned;
 
 /// Last panic message from a worker thread, shown in the status bar.
 pub static WORKER_PANIC: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);

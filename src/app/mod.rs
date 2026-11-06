@@ -40,6 +40,9 @@ const MAX_EVENTS: usize = 2000;
 const ORDER_HOLD: Duration = Duration::from_secs(4);
 
 mod alerts;
+pub mod board;
+pub mod boot;
+pub mod settings;
 pub mod columns;
 pub mod config;
 pub mod deep;
@@ -390,6 +393,10 @@ pub enum Mode {
     ActivityDetail,
     /// One finding, and the attack it belongs to.
     ThreatDetail,
+    /// Alarms now and lately.
+    Alarms { cursor: usize },
+    /// Everything that can be configured.
+    Settings { cursor: usize },
     /// Modules: what runs, what each supports here, turning them on and off.
     Modules { cursor: usize },
     /// Command palette (`:` or ctrl+k).
@@ -545,6 +552,13 @@ pub struct App {
     pub gpu: Option<GpuSnapshot>,
     /// The kernel, when modules are running (not in replay or tests).
     pub kernel: Option<crate::kernel::Kernel>,
+    /// Where the session has got to, before monitoring starts.
+    pub boot: boot::Boot,
+    pub board: board::Board,
+    /// When this session began, for anything that flashes.
+    pub started: std::time::Instant,
+    pub settings: crate::defense::config::DefenseConfig,
+    pub kernel_config: crate::kernel::KernelConfig,
     pub metrics: Option<Box<crate::performance::metrics::Metrics>>,
     pub metrics_at: Option<Instant>,
     pub services: Option<Result<Vec<crate::performance::services::Service>, String>>,
@@ -663,6 +677,7 @@ pub fn watch_paths(cfg: &Config) -> Vec<String> {
 
 impl App {
     pub fn new(tx: Sender<WorkerMsg>, ctl: Arc<SamplerCtl>, cfg: Config) -> Self {
+        let settings = crate::defense::config::DefenseConfig::load().unwrap_or_default();
         ctl.interval_ms.store(cfg.interval_ms, Ordering::Relaxed);
         Self {
             tree: ProcessTree::default(),
@@ -670,6 +685,11 @@ impl App {
             connections: HashMap::new(),
             gpu: None,
             kernel: None,
+            boot: boot::Boot::default(),
+            board: board::Board::from(&settings.alarm),
+            started: std::time::Instant::now(),
+            settings,
+            kernel_config: crate::engine::load_config(),
             metrics: None,
             metrics_at: None,
             services: None,
@@ -1163,7 +1183,7 @@ mod tests {
     fn every_page_and_overlay_draws_at_any_terminal_size() {
         use ratatui::{backend::TestBackend, Terminal};
         let mut a = app();
-        let modes = [Mode::Normal, Mode::Help, Mode::Graph, Mode::Clusters, Mode::Health, Mode::StateAt, Mode::Sweep, Mode::ActivitySummary, Mode::ActivityDetail, Mode::ThreatDetail, Mode::Modules { cursor: 0 }, Mode::FileReport, Mode::Workspace, Mode::Palette { input: "x".into(), cursor: 0 }];
+        let modes = [Mode::Normal, Mode::Help, Mode::Graph, Mode::Clusters, Mode::Health, Mode::StateAt, Mode::Sweep, Mode::ActivitySummary, Mode::ActivityDetail, Mode::ThreatDetail, Mode::Alarms { cursor: 0 }, Mode::Settings { cursor: 0 }, Mode::Modules { cursor: 0 }, Mode::FileReport, Mode::Workspace, Mode::Palette { input: "x".into(), cursor: 0 }];
         for (w, h) in [(1, 1), (2, 2), (5, 3), (10, 4), (20, 5), (33, 9), (40, 10), (80, 24), (200, 60)] {
             let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
             for tab in Tab::ALL {
@@ -1172,6 +1192,24 @@ mod tests {
                     a.mode = m.clone();
                     term.draw(|f| crate::ui::draw(f, &mut a)).unwrap();
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn every_start_up_screen_draws_at_any_size() {
+        use crate::app::boot::{BootPhase, Choice};
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut a = app();
+        a.boot.choices = vec![Choice { name: "process", description: "x", support: "supported".into(), chosen: true }];
+        a.boot.log.push((false, "Storage: FAILED: no".into()));
+        a.boot.done = 1;
+        a.boot.total = 3;
+        for (w, h) in [(1, 1), (5, 3), (20, 5), (40, 10), (80, 24), (200, 60)] {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            for phase in [BootPhase::SelfTest, BootPhase::Standby, BootPhase::Select, BootPhase::Loading, BootPhase::Verify, BootPhase::Halted] {
+                a.boot.phase = phase;
+                term.draw(|f| crate::ui::draw(f, &mut a)).unwrap();
             }
         }
     }

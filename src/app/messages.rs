@@ -17,11 +17,8 @@ impl App {
                 self.metrics_at = Some(Instant::now());
             }
             WorkerMsg::Services(s) => self.services = Some(s),
-            WorkerMsg::MetricAlert(a) if a.firing => {
-                let message = format!("{} = {:.1} {}", a.metric, a.value, a.labels);
-                self.add_alerts(vec![crate::detection::rules::Alert { at: Local::now(), rule: a.rule, pid: 0, name: "system".into(), message }]);
-            }
-            WorkerMsg::MetricAlert(a) => self.set_status(StatusLevel::Info, format!("Cleared: {}", a.rule)),
+            WorkerMsg::Alarm(e) => self.on_alarm(*e),
+            WorkerMsg::Boot(step) => self.on_boot_step(step),
             WorkerMsg::Threat(t) => self.on_threat(*t),
             WorkerMsg::Incident(i) => self.on_incident(*i),
             WorkerMsg::Inspected { pid, start_time, info } => {

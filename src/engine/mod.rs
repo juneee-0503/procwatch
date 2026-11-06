@@ -5,6 +5,7 @@ pub mod bridge;
 pub mod health;
 pub mod jobs;
 pub mod messages;
+pub mod selfcheck;
 
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
@@ -26,6 +27,7 @@ use messages::WorkerMsg;
 /// Adding a module is one line here.
 pub fn registry(ctl: Arc<SamplerCtl>, watch: Vec<String>) -> Registry {
     let mut r = Registry::default();
+    r.self_probe(self_probe());
     let c = ctl.clone();
     r.add("process", "process table and system totals", move || Box::new(ProcessModule::new(c.clone())));
     r.add("network", "connections and traffic per process", move || Box::new(NetworkModule::new(ctl.clone())));
@@ -41,11 +43,24 @@ pub fn registry(ctl: Arc<SamplerCtl>, watch: Vec<String>) -> Registry {
         }
         Err(e) => r.add("defense", "attacks on this machine: logins, web, floods, compromise", move || Box::new(crate::defense::module::DefenseModule::unusable(e.clone()))),
     }
-    r.add("history", "keeps a month of metrics on disk", || Box::new(HistoryModule::new(history::default_dir())));
+    let settings = crate::defense::config::DefenseConfig::load().unwrap_or_default();
+    crate::common::redact::configure(settings.privacy.redact, settings.privacy.command_lines);
+    let keep = settings.retention;
+    r.add("history", "keeps metrics on disk", move || Box::new(HistoryModule::new(history::default_dir(), keep.days, keep.max_mb.saturating_mul(1 << 19))));
     r.add("logs", "system logs, read on request", || Box::new(LogsModule));
     r.add("trace", "event-driven process lifecycle tracing", || Box::<TraceModule>::default());
     r.add("activity", "file, registry and network operations by process", || Box::<ActivityModule>::default());
     r
+}
+
+fn self_probe() -> crate::kernel::supervisor::SelfProbe {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+    let me = Pid::from_u32(std::process::id());
+    let mut sys = System::new();
+    Box::new(move || {
+        sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[me]), ProcessRefreshKind::everything());
+        sys.process(me).map_or((0.0, 0), |p| (p.cpu_usage(), p.memory()))
+    })
 }
 
 /// Where the kernel's settings are kept.
@@ -64,6 +79,20 @@ pub fn save_config(c: &KernelConfig) -> std::io::Result<()> {
         std::fs::create_dir_all(d)?;
     }
     crate::common::paths::write_atomic(&p, &c.serialize())
+}
+
+/// Start the kernel alone: modules wait to be chosen and activated.
+pub fn boot(tx: Sender<WorkerMsg>, ctl: Arc<SamplerCtl>, watch: Vec<String>) -> Kernel {
+    let bus = Bus::default();
+    let config = load_config();
+    let problems = config.problems.clone();
+    let bridge = bridge::subscribe(&bus);
+    let kernel = registry(ctl, watch).boot(bus, config);
+    bridge::spawn(bridge, kernel.clone(), tx.clone());
+    for p in problems {
+        let _ = tx.send(WorkerMsg::Error(format!("modules.conf {p}")));
+    }
+    kernel
 }
 
 /// Start the kernel and every enabled module.

@@ -11,6 +11,7 @@ pub mod chain;
 pub mod config;
 pub mod ebpf;
 pub mod filter;
+pub mod heartbeat;
 pub mod host;
 pub mod module;
 pub mod netattack;
@@ -52,6 +53,12 @@ impl Stage {
     }
 }
 
+/// The start time in a `/proc/PID/stat` line. The name before it can hold
+/// spaces and brackets, so fields are counted from the last `)`.
+pub fn start_time(stat: &str) -> Option<u64> {
+    stat.rsplit_once(')')?.1.split_whitespace().nth(19)?.parse().ok()
+}
+
 /// One sign of an attack.
 #[derive(Debug, Clone, Serialize)]
 pub struct Threat {
@@ -63,12 +70,15 @@ pub struct Threat {
     pub source: Option<IpAddr>,
     pub user: Option<String>,
     pub pid: Option<u32>,
+    /// With the pid, identifies the process: pids are reused.
+    pub started: Option<u64>,
+    pub host: std::sync::Arc<str>,
     pub evidence: String,
 }
 
 impl Threat {
     pub fn new(time: DateTime<Local>, rule: &'static str, severity: Severity, stage: Stage, title: String) -> Threat {
-        Threat { time, rule, title, severity, stage, source: None, user: None, pid: None, evidence: String::new() }
+        Threat { time, rule, title, severity, stage, source: None, user: None, pid: None, started: None, host: crate::kernel::model::identity().host.clone(), evidence: String::new() }
     }
     pub fn source_ip(mut self, ip: IpAddr) -> Threat {
         self.source = Some(ip);
@@ -82,8 +92,27 @@ impl Threat {
         self.pid = Some(pid);
         self
     }
+    /// Note when the process started, read while it still exists.
+    pub fn identify(&mut self, root: &std::path::Path) {
+        let Some(pid) = self.pid else { return };
+        let stat = std::fs::read_to_string(root.join("proc").join(pid.to_string()).join("stat")).unwrap_or_default();
+        self.started = start_time(&stat);
+    }
+
     pub fn with_evidence(mut self, evidence: impl AsRef<str>) -> Threat {
-        self.evidence = crate::common::text::truncate(&crate::common::text::printable(evidence.as_ref()), 400);
+        let safe = crate::common::redact::redact(&crate::common::text::printable(evidence.as_ref()));
+        self.evidence = crate::common::text::truncate(&safe, 400);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn start_times_survive_hostile_names() {
+        let tail = "S 1 1 1 0 -1 4194304 1 2 3 4 5 6 7 8 20 0 1 0 987654 1 2";
+        assert_eq!(super::start_time(&format!("42 (bash) {tail}")), Some(987654));
+        assert_eq!(super::start_time(&format!("42 (a) b) c) {tail}")), Some(987654));
+        assert_eq!(super::start_time("garbage"), None);
     }
 }

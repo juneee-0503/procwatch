@@ -21,14 +21,12 @@ static PFLT_FILTER gFilter;
 static PFLT_PORT gServerPort;
 static PFLT_PORT gClientPort;
 static LARGE_INTEGER gRegCookie;
-static PVOID gObHandle;
 static EX_PUSH_LOCK gLock;
 
 /* Guarded by gLock. */
 static PW_RULE *gRules;
 static ULONG gRuleCount;
 static ULONG gMode;
-static ULONG gProtectedPid;
 
 static BOOLEAN Matches(_In_ PCWSTR pattern, _In_ PCUNICODE_STRING text)
 {
@@ -140,29 +138,6 @@ static NTSTATUS RegistryCallback(_In_ PVOID context, _In_opt_ PVOID arg1, _In_op
     return result;
 }
 
-/* Tamper protection: strip the rights to end or alter the agent's process. */
-static OB_PREOP_CALLBACK_STATUS ProcessPreOperation(_In_ PVOID context, _Inout_ POB_PRE_OPERATION_INFORMATION info)
-{
-    #define PW_DENIED (PROCESS_TERMINATE | PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_SUSPEND_RESUME | PROCESS_CREATE_THREAD)
-    ULONG pid;
-
-    UNREFERENCED_PARAMETER(context);
-
-    pid = HandleToULong(PsGetProcessId((PEPROCESS)info->Object));
-    if (gProtectedPid == 0 || pid != gProtectedPid || info->KernelHandle) {
-        return OB_PREOP_SUCCESS;
-    }
-    if (HandleToULong(PsGetCurrentProcessId()) == pid) {
-        return OB_PREOP_SUCCESS;
-    }
-    if (info->Operation == OB_OPERATION_HANDLE_CREATE) {
-        info->Parameters->CreateHandleInformation.DesiredAccess &= ~PW_DENIED;
-    } else {
-        info->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PW_DENIED;
-    }
-    return OB_PREOP_SUCCESS;
-}
-
 static VOID ClearRules(VOID)
 {
     PW_RULE *old;
@@ -172,7 +147,6 @@ static VOID ClearRules(VOID)
     gRules = NULL;
     gRuleCount = 0;
     gMode = PW_MODE_AUDIT;
-    gProtectedPid = 0;
     FltReleasePushLock(&gLock);
     if (old != NULL) {
         ExFreePoolWithTag(old, PW_TAG);
@@ -229,7 +203,6 @@ PortMessage(_In_opt_ PVOID cookie, _In_reads_bytes_opt_(inLength) PVOID in, _In_
     gRules = rules;
     gRuleCount = header.Count;
     gMode = header.Mode;
-    gProtectedPid = header.ProtectedPid;
     FltReleasePushLock(&gLock);
     if (old != NULL) {
         ExFreePoolWithTag(old, PW_TAG);
@@ -274,30 +247,11 @@ static NTSTATUS OpenPort(VOID)
     return status;
 }
 
-static NTSTATUS RegisterObjectCallback(VOID)
-{
-    OB_OPERATION_REGISTRATION operation = { 0 };
-    OB_CALLBACK_REGISTRATION registration = { 0 };
-    UNICODE_STRING altitude = RTL_CONSTANT_STRING(L"370031");
-
-    operation.ObjectType = PsProcessType;
-    operation.Operations = OB_OPERATION_HANDLE_CREATE | OB_OPERATION_HANDLE_DUPLICATE;
-    operation.PreOperation = ProcessPreOperation;
-    registration.Version = OB_FLT_REGISTRATION_VERSION;
-    registration.OperationRegistrationCount = 1;
-    registration.Altitude = altitude;
-    registration.OperationRegistration = &operation;
-    return ObRegisterCallbacks(&registration, &gObHandle);
-}
-
 static NTSTATUS FLTAPI Unload(_In_ FLT_FILTER_UNLOAD_FLAGS flags)
 {
     /* Refuse a casual `fltmc unload` while a client depends on it. */
     if (!(flags & FLTFL_FILTER_UNLOAD_MANDATORY) && gClientPort != NULL) {
         return STATUS_FLT_DO_NOT_DETACH;
-    }
-    if (gObHandle != NULL) {
-        ObUnRegisterCallbacks(gObHandle);
     }
     CmUnRegisterCallback(gRegCookie);
     FltCloseCommunicationPort(gServerPort);
@@ -341,13 +295,8 @@ NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT driver, _In_ PUNICODE_STRING registryPa
         }
     }
     if (NT_SUCCESS(status)) {
-        /* Needs /INTEGRITYCHECK; without it the driver works, unprotecting only the agent. */
-        (VOID)RegisterObjectCallback();
         status = FltStartFiltering(gFilter);
         if (!NT_SUCCESS(status)) {
-            if (gObHandle != NULL) {
-                ObUnRegisterCallbacks(gObHandle);
-            }
             CmUnRegisterCallback(gRegCookie);
             FltCloseCommunicationPort(gServerPort);
         }

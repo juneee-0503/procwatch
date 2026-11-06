@@ -8,11 +8,6 @@ const MAX_INCIDENTS: usize = 200;
 
 impl App {
     pub(crate) fn on_threat(&mut self, t: crate::defense::Threat) {
-        use crate::common::model::Severity;
-        if t.severity >= Severity::High {
-            let alert = crate::detection::rules::Alert { at: t.time, rule: t.rule.to_string(), pid: t.pid.unwrap_or(0), name: t.source.map_or_else(|| "this host".to_string(), |s| s.to_string()), message: t.title.clone() };
-            self.add_alerts(vec![alert]);
-        }
         self.ir.threats.push_back(t);
         self.ir.threat_seq += 1;
         if self.ir.threats.len() > MAX_THREATS {

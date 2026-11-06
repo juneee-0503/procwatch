@@ -6,9 +6,10 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use crate::kernel::model::{Sample, SAMPLES};
+use crate::kernel::dictionary::Kind;
+use crate::kernel::model::{Sample, SeriesLimit, SAMPLES};
 use crate::kernel::{Capability, Context, Event, Module};
 
 const MAX_REQUEST: usize = 8192;
@@ -39,7 +40,9 @@ fn render(latest: &BTreeMap<String, f64>) -> String {
     for (series, value) in latest {
         let family = series.split('{').next().unwrap_or(series);
         if family != last {
-            out.push_str(&format!("# TYPE {family} gauge\n"));
+            let dotted = family.trim_start_matches("procwatch_");
+            let counter = crate::kernel::dictionary::METRICS.iter().any(|m| m.kind == Kind::Counter && m.name.replace(['.', '-'], "_") == dotted);
+            out.push_str(&format!("# TYPE {family} {}\n", if counter { "counter" } else { "gauge" }));
             last = family;
         }
         out.push_str(&format!("{series} {value}\n"));
@@ -98,11 +101,12 @@ pub struct ExporterModule {
     token: String,
     latest: Latest,
     stop: Arc<AtomicBool>,
+    limit: SeriesLimit,
 }
 
 impl ExporterModule {
     pub fn new(listen: String, token: String) -> ExporterModule {
-        ExporterModule { listen, token, latest: Latest::default(), stop: Arc::new(AtomicBool::new(false)) }
+        ExporterModule { listen, token, latest: Latest::default(), stop: Arc::new(AtomicBool::new(false)), limit: SeriesLimit::default() }
     }
 }
 
@@ -119,10 +123,18 @@ impl Module for ExporterModule {
         vec![SAMPLES]
     }
 
-    fn start(&mut self, _: &Context) -> Result<(), String> {
+    fn importance(&self) -> crate::kernel::module::Importance {
+        crate::kernel::module::Importance::Optional
+    }
+
+    fn self_test(&mut self) -> Result<String, String> {
         if self.listen.is_empty() {
             return Err("no exporter.listen in defense.yml".into());
         }
+        self.listen.parse::<SocketAddr>().map(|a| format!("will listen on {a}")).map_err(|_| format!("{}: not an address and port", self.listen))
+    }
+
+    fn start(&mut self, _: &Context) -> Result<(), String> {
         let addr: SocketAddr = self.listen.parse().map_err(|_| format!("{}: not an address and port", self.listen))?;
         if !addr.ip().is_loopback() && self.token.is_empty() {
             return Err(format!("{addr} isn't loopback: set exporter.token"));
@@ -152,6 +164,9 @@ impl Module for ExporterModule {
         let (Some(batch), Ok(mut latest)) = (e.get::<Vec<Sample>>(), self.latest.lock()) else { return };
         for s in batch {
             let key = line(s);
+            if let Some(gone) = self.limit.admit(s.metric, &key, Instant::now()) {
+                latest.remove(&gone);
+            }
             if latest.len() < MAX_SERIES || latest.contains_key(&key) {
                 latest.insert(key, s.value);
             }

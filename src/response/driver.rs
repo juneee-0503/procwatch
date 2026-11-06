@@ -3,19 +3,19 @@
 
 #![cfg_attr(not(windows), allow(dead_code))]
 
-const PROTOCOL_VERSION: u32 = 1;
+const PROTOCOL_VERSION: u32 = 2;
 const MAX_PATTERN: usize = 260;
 const MAX_RULES: usize = 128;
 pub const ON_FILE: u32 = 1;
 pub const ON_REGISTRY: u32 = 2;
 
 /// The message that replaces the driver's rules. Patterns are NT paths.
-pub fn encode(enforce: bool, protected_pid: u32, rules: &[(u32, &str)]) -> Result<Vec<u8>, String> {
+pub fn encode(enforce: bool, rules: &[(u32, &str)]) -> Result<Vec<u8>, String> {
     if rules.len() > MAX_RULES {
         return Err(format!("the driver takes at most {MAX_RULES} rules"));
     }
-    let mut m = Vec::with_capacity(16 + rules.len() * (4 + MAX_PATTERN * 2));
-    for v in [PROTOCOL_VERSION, u32::from(enforce), protected_pid, rules.len() as u32] {
+    let mut m = Vec::with_capacity(12 + rules.len() * (4 + MAX_PATTERN * 2));
+    for v in [PROTOCOL_VERSION, u32::from(enforce), rules.len() as u32] {
         m.extend_from_slice(&v.to_le_bytes());
     }
     for (on, pattern) in rules {
@@ -115,17 +115,16 @@ mod tests {
 
     #[test]
     fn matches_the_drivers_layout() {
-        let m = encode(true, 44, &[(ON_REGISTRY, "\\REGISTRY\\MACHINE\\X*")]).unwrap();
-        assert_eq!(m.len(), 16 + 4 + 520, "sizeof(PW_SET_RULES) header plus one PW_RULE");
-        assert_eq!(&m[..4], &1u32.to_le_bytes());
+        let m = encode(true, &[(ON_REGISTRY, "\\REGISTRY\\MACHINE\\X*")]).unwrap();
+        assert_eq!(m.len(), 12 + 4 + 520, "sizeof(PW_SET_RULES) header plus one PW_RULE");
+        assert_eq!(&m[..4], &2u32.to_le_bytes());
         assert_eq!(&m[4..8], &1u32.to_le_bytes(), "enforce");
-        assert_eq!(&m[8..12], &44u32.to_le_bytes());
-        assert_eq!(&m[12..16], &1u32.to_le_bytes());
-        assert_eq!(&m[16..20], &2u32.to_le_bytes());
-        assert_eq!(&m[20..22], &(b'\\' as u16).to_le_bytes());
-        assert!(encode(false, 0, &[(ON_FILE, "")]).is_err());
-        assert!(encode(false, 0, &[(ON_FILE, &"x".repeat(MAX_PATTERN))]).is_err());
-        assert!(encode(false, 0, &vec![(ON_FILE, "x"); MAX_RULES + 1]).is_err());
+        assert_eq!(&m[8..12], &1u32.to_le_bytes());
+        assert_eq!(&m[12..16], &2u32.to_le_bytes());
+        assert_eq!(&m[16..18], &(b'\\' as u16).to_le_bytes());
+        assert!(encode(false, &[(ON_FILE, "")]).is_err());
+        assert!(encode(false, &[(ON_FILE, &"x".repeat(MAX_PATTERN))]).is_err());
+        assert!(encode(false, &vec![(ON_FILE, "x"); MAX_RULES + 1]).is_err());
         assert_eq!(nt_patterns(true, &["HKLM\\SOFTWARE\\X*".to_string()]).unwrap(), ["\\REGISTRY\\MACHINE\\SOFTWARE\\X*"]);
         assert!(nt_patterns(true, &["HKCU\\X".to_string()]).is_err(), "per-user roots differ by user");
         assert!(nt_patterns(true, &["HKLM\\*\\Run".to_string()]).is_err());

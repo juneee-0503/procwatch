@@ -2,12 +2,14 @@
 //!
 //! Publishing never blocks. Each subscriber has a bounded queue, and a slow
 //! subscriber loses events (counted) rather than stalling everyone else.
+//! Samples may be lost under pressure. Alarms never travel here: they have
+//! their own channel, `alarm::Hub`.
 
 use std::any::Any;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 pub type Payload = Arc<dyn Any + Send + Sync>;
 
@@ -41,10 +43,52 @@ impl<T> Exclusive<T> {
     }
 }
 
+#[derive(Default)]
+struct Counters {
+    depth: AtomicUsize,
+    dropped: AtomicU64,
+}
+
 struct Subscriber {
     /// Empty means every topic.
     topics: Vec<&'static str>,
     tx: SyncSender<Event>,
+    counters: Arc<Counters>,
+}
+
+/// One subscriber's end of the bus.
+pub struct Subscription {
+    rx: Receiver<Event>,
+    counters: Arc<Counters>,
+}
+
+impl Subscription {
+    fn took(&self, e: Event) -> Event {
+        self.counters.depth.fetch_sub(1, Ordering::Relaxed);
+        e
+    }
+
+    pub fn recv_timeout(&self, wait: Duration) -> Result<Event, RecvTimeoutError> {
+        self.rx.recv_timeout(wait).map(|e| self.took(e))
+    }
+
+    pub fn try_recv(&self) -> Result<Event, TryRecvError> {
+        self.rx.try_recv().map(|e| self.took(e))
+    }
+
+    pub fn try_iter(&self) -> impl Iterator<Item = Event> + '_ {
+        std::iter::from_fn(|| self.try_recv().ok())
+    }
+
+    /// Events waiting to be read.
+    pub fn depth(&self) -> usize {
+        self.counters.depth.load(Ordering::Relaxed)
+    }
+
+    /// Events this subscriber lost.
+    pub fn dropped(&self) -> u64 {
+        self.counters.dropped.load(Ordering::Relaxed)
+    }
 }
 
 #[derive(Default)]
@@ -58,12 +102,13 @@ struct Inner {
 pub struct Bus(Arc<Inner>);
 
 impl Bus {
-    pub fn subscribe(&self, topics: &[&'static str], capacity: usize) -> Receiver<Event> {
+    pub fn subscribe(&self, topics: &[&'static str], capacity: usize) -> Subscription {
         let (tx, rx) = sync_channel(capacity.max(1));
+        let counters = Arc::new(Counters::default());
         if let Ok(mut s) = self.0.subscribers.write() {
-            s.push(Subscriber { topics: topics.to_vec(), tx });
+            s.push(Subscriber { topics: topics.to_vec(), tx, counters: counters.clone() });
         }
-        rx
+        Subscription { rx, counters }
     }
 
     pub fn publish(&self, topic: &'static str, source: &'static str, payload: Payload) {
@@ -73,8 +118,11 @@ impl Bus {
         if let Ok(subs) = self.0.subscribers.read() {
             for s in subs.iter().filter(|s| s.topics.is_empty() || s.topics.contains(&topic)) {
                 match s.tx.try_send(event.clone()) {
-                    Ok(()) => {}
+                    Ok(()) => {
+                        s.counters.depth.fetch_add(1, Ordering::Relaxed);
+                    }
                     Err(TrySendError::Full(_)) => {
+                        s.counters.dropped.fetch_add(1, Ordering::Relaxed);
                         self.0.dropped.fetch_add(1, Ordering::Relaxed);
                     }
                     Err(TrySendError::Disconnected(_)) => gone = true,
@@ -121,13 +169,16 @@ mod tests {
     #[test]
     fn a_stuck_subscriber_loses_events_but_blocks_nobody() {
         let bus = Bus::default();
-        let _slow = bus.subscribe(&["a"], 2);
+        let slow = bus.subscribe(&["a"], 2);
         let fine = bus.subscribe(&["a"], 100);
         for i in 0..50u32 {
             bus.publish("a", "t", Arc::new(i));
         }
         assert_eq!(bus.dropped(), 48);
+        assert_eq!((slow.depth(), slow.dropped()), (2, 48));
+        assert_eq!(fine.depth(), 50);
         assert_eq!(fine.try_iter().count(), 50);
+        assert_eq!(fine.depth(), 0);
     }
 
     #[test]
@@ -143,5 +194,29 @@ mod tests {
         let e = Exclusive::new(String::from("big"));
         assert_eq!(e.take().as_deref(), Some("big"));
         assert_eq!(e.take(), None);
+    }
+
+    /// Publishing rate with a keeping-up reader. `cargo test --release -- --ignored bench`
+    #[test]
+    #[ignore = "benchmark"]
+    fn bench_bus_throughput() {
+        let bus = Bus::default();
+        let rx = bus.subscribe(&["a"], 1 << 16);
+        let n = 2_000_000u32;
+        let reader = std::thread::spawn(move || {
+            let mut got = 0u32;
+            while let Ok(e) = rx.recv_timeout(Duration::from_millis(200)) {
+                got += u32::from(e.get::<u32>().is_some());
+            }
+            got
+        });
+        let t = std::time::Instant::now();
+        let payload: Payload = Arc::new(1u32);
+        for _ in 0..n {
+            bus.publish("a", "t", payload.clone());
+        }
+        let rate = f64::from(n) / t.elapsed().as_secs_f64();
+        println!("bus: {:.0} events a second, {} delivered", rate, reader.join().unwrap());
+        assert!(rate > 200_000.0, "{rate}");
     }
 }

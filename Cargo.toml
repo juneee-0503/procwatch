@@ -2,6 +2,7 @@
 name = "procwatch"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.95"
 description = "Cross-platform (Windows/macOS, Linux bonus) TUI process monitor"
 license = "MIT"
 
@@ -27,6 +28,7 @@ dns-lookup = "4.0.2"
 notify = { version = "8.2.1", default-features = false, features = ["macos_fsevent"] }
 evtx = { version = "0.15.1", default-features = false }
 serde_yaml = "0.9"
+serde_ignored = "0.1"
 memchr = "2"
 yara-x = { version = "1.23.0", default-features = false, features = ["constant-folding", "exact-atoms", "fast-regexp", "console-module", "dotnet-module", "elf-module", "hash-module", "lnk-module", "macho-module", "math-module", "pe-module", "string-module", "time-module"] }
 
@@ -38,6 +40,8 @@ ferrisetw = "1.2.0"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
+    "Win32_System_Console",
+    "Win32_System_Services",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Diagnostics_Etw",
     "Win32_System_Memory",
@@ -49,6 +53,9 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Rpc",
     "Win32_System_SystemInformation",
 ] }
+
+[dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }
 
 [profile.release]
 opt-level = 3

@@ -126,3 +126,17 @@ Linux 和 macOS 写 pcap,Windows 用内置的 pktmon 写 pcapng,并且不支持 
 | `--history [METRIC] [--hours N] [--json]` | 查看保存的指标,不给指标名时列出全部 |
 
 详见[服务器防御](defense.md)。
+
+## 服务与安全
+
+| 命令 | 说明 |
+|---|---|
+| `--heartbeat-receiver ADDR --key FILE [--period N] [--store DIR]` | 在另一台机器上接收心跳和日志 |
+| `--maintenance MINUTES [REASON]` | 暂停报警,`0` 立即结束 |
+| `--accept-program` | 升级后批准当前程序 |
+| `--config-accept FILE` | 批准手工编辑的配置 |
+| `--diagnose FILE` | 写诊断包,不含秘密 |
+| `--query health` | 询问运行中的代理 |
+| `--dictionary` | 列出全部指标、类型和平台差异 |
+
+详见[安全与自保护](security.md)和[部署](deployment.md)。

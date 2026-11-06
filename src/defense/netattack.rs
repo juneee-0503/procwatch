@@ -156,6 +156,19 @@ mod tests {
         assert_eq!(counter(t, "TcpExt:", "Missing"), None);
     }
 
+    /// Files captured from a real system, kept as they were.
+    #[test]
+    fn golden_proc_files() {
+        let s = parse_tcp(include_str!("../../tests/fixtures/proc/net_tcp"));
+        assert_eq!(s.len(), 4);
+        assert_eq!((s[0].local_port, s[0].state, s[0].inode), (22, 10, 18732));
+        assert_eq!((s[2].remote.to_string().as_str(), s[2].state), ("10.0.2.2", ESTABLISHED));
+        assert_eq!((s[3].local_port, s[3].state), (443, SYN_RECV));
+        let n = include_str!("../../tests/fixtures/proc/net_netstat");
+        assert_eq!((counter(n, "TcpExt:", "SyncookiesSent"), counter(n, "TcpExt:", "ListenDrops")), (Some(482), Some(91)));
+        assert_eq!(counter(n, "IpExt:", "InMcastPkts"), Some(1204));
+    }
+
     fn sock(ip: &str, state: u8) -> Sock {
         Sock { local_port: 80, remote: ip.parse().unwrap(), state, inode: 1 }
     }

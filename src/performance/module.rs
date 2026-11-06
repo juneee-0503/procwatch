@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 use super::gpu::{self, GpuSnapshot};
 use super::metrics::{samples, Collector, Metrics, INTERVAL};
 use super::services::Service;
+use crate::kernel::model::{CounterRate, Sample, Unit};
+use crate::kernel::module::Importance;
 use crate::kernel::{Capability, Context, Module};
 
 pub const METRICS: &str = "performance.metrics";
@@ -18,17 +20,55 @@ const GPU_EVERY: Duration = Duration::from_secs(3);
 pub struct PerformanceModule {
     collector: Collector,
     listed: Option<Instant>,
+    system: sysinfo::System,
+    disks: sysinfo::Disks,
+    opens: CounterRate,
 }
 
 impl PerformanceModule {
     pub fn new() -> Self {
-        PerformanceModule { collector: Collector::new(), listed: None }
+        PerformanceModule { collector: Collector::new(), listed: None, system: sysinfo::System::new(), disks: sysinfo::Disks::new_with_refreshed_list(), opens: CounterRate::default() }
+    }
+}
+
+impl PerformanceModule {
+    /// The percentages alarms are written against.
+    fn usage(&mut self) -> Vec<Sample> {
+        self.system.refresh_cpu_usage();
+        self.system.refresh_memory();
+        self.disks.refresh_list();
+        let mut out = vec![Sample::new("cpu.usage", f64::from(self.system.global_cpu_usage()), Unit::Percent)];
+        let total = self.system.total_memory();
+        if total > 0 {
+            out.push(Sample::new("memory.used_percent", self.system.used_memory() as f64 * 100.0 / total as f64, Unit::Percent));
+        }
+        for d in self.disks.list().iter().filter(|d| d.total_space() > 0) {
+            let used = 1.0 - d.available_space() as f64 / d.total_space() as f64;
+            out.push(Sample::new("disk.used_percent", used * 100.0, Unit::Percent).label("mount", d.mount_point().display().to_string()));
+        }
+        let snmp = std::fs::read_to_string("/proc/net/snmp").unwrap_or_default();
+        let mut lines = snmp.lines().filter(|l| l.starts_with("Tcp:"));
+        if let (Some(names), Some(values)) = (lines.next(), lines.next()) {
+            let value = |name: &str| names.split_whitespace().position(|n| n == name).and_then(|i| values.split_whitespace().nth(i)).and_then(|v| v.parse::<f64>().ok());
+            if let (Some(a), Some(p)) = (value("ActiveOpens"), value("PassiveOpens")) {
+                out.extend(self.opens.update("tcp", a + p, Instant::now()).map(|r| Sample::new("net.tcp_opens", r, Unit::PerSecond)));
+            }
+        }
+        out
     }
 }
 
 impl Module for PerformanceModule {
     fn capabilities(&self) -> Vec<Capability> {
         self.collector.capabilities()
+    }
+
+    fn importance(&self) -> Importance {
+        Importance::Core
+    }
+
+    fn provides(&self) -> Vec<&'static str> {
+        vec!["cpu.", "memory.", "disk.", "net.", "sensor."]
     }
 
     fn interval(&self) -> Option<Duration> {
@@ -41,7 +81,9 @@ impl Module for PerformanceModule {
 
     fn tick(&mut self, ctx: &Context) {
         let m: Metrics = self.collector.sample();
-        ctx.samples(samples(&m));
+        let mut out = samples(&m);
+        out.extend(self.usage());
+        ctx.samples(out);
         ctx.publish(METRICS, m);
         if self.listed.is_none_or(|t| t.elapsed() >= SERVICES_EVERY) {
             self.listed = Some(Instant::now());

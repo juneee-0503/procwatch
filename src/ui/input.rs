@@ -3,6 +3,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Position;
 
+use crate::app::boot::BootPhase;
 use crate::app::{self, palette, App, Cmd, Mode, OptionItem, StatusLevel, Tab, ViewMode};
 
 pub fn handle_key(app: &mut App, key: KeyEvent) {
@@ -11,7 +12,26 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         app.should_quit = true;
         return;
     }
+    if app.boot.phase != BootPhase::Monitoring && !matches!(app.mode, Mode::Settings { .. } | Mode::Input { .. }) {
+        return boot_key(app, key);
+    }
     match app.mode.clone() {
+        Mode::Alarms { cursor } => {
+            let list = app.alarm_list();
+            match key.code {
+                KeyCode::Down | KeyCode::Char('j') => app.mode = Mode::Alarms { cursor: (cursor + 1).min(list.len().saturating_sub(1)) },
+                KeyCode::Up | KeyCode::Char('k') => app.mode = Mode::Alarms { cursor: cursor.saturating_sub(1) },
+                KeyCode::Enter => {
+                    if let Some(e) = list.get(cursor) {
+                        app.acknowledge_alarm(&e.key);
+                    }
+                }
+                KeyCode::Char('!') => app.acknowledge_all(),
+                KeyCode::Char('@') => app.pause_audio(),
+                _ => app.mode = Mode::Normal,
+            }
+        }
+        Mode::Settings { cursor } => settings_key(app, key, cursor),
         Mode::Help => app.mode = Mode::Normal,
         Mode::Options { cursor } => options_key(app, key, cursor),
         Mode::Menu(stack) => menu_key(app, key, stack),
@@ -173,6 +193,64 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
     }
 }
 
+/// Keys before monitoring starts.
+fn boot_key(app: &mut App, key: KeyEvent) {
+    match app.boot.phase {
+        BootPhase::Standby => match key.code {
+            KeyCode::Enter | KeyCode::Char(' ') => app.boot.phase = BootPhase::Select,
+            KeyCode::Char(',') => app.mode = Mode::Settings { cursor: 0 },
+            KeyCode::Char('q') => app.should_quit = true,
+            _ => {}
+        },
+        BootPhase::Select => {
+            let len = app.boot.choices.len();
+            match key.code {
+                KeyCode::Down | KeyCode::Char('j') => app.boot.cursor = (app.boot.cursor + 1).min(len.saturating_sub(1)),
+                KeyCode::Up | KeyCode::Char('k') => app.boot.cursor = app.boot.cursor.saturating_sub(1),
+                KeyCode::Char(' ') => {
+                    let at = app.boot.cursor;
+                    if let Some(c) = app.boot.choices.get_mut(at) {
+                        c.chosen = !c.chosen;
+                    }
+                }
+                KeyCode::Char('a') => app.boot.choices.iter_mut().for_each(|c| c.chosen = true),
+                KeyCode::Char('n') => app.boot.choices.iter_mut().for_each(|c| c.chosen = false),
+                KeyCode::Enter => app.confirm_modules(),
+                KeyCode::Esc => app.boot.phase = BootPhase::Standby,
+                _ => {}
+            }
+        }
+        _ => {
+            if key.code == KeyCode::Char('q') {
+                app.should_quit = true;
+            }
+        }
+    }
+}
+
+fn settings_key(app: &mut App, key: KeyEvent, cursor: usize) {
+    let items = app.settings_items();
+    let last = items.len().saturating_sub(1);
+    match key.code {
+        KeyCode::Down | KeyCode::Char('j') => app.mode = Mode::Settings { cursor: (cursor + 1).min(last) },
+        KeyCode::Up | KeyCode::Char('k') => app.mode = Mode::Settings { cursor: cursor.saturating_sub(1) },
+        KeyCode::PageDown => app.mode = Mode::Settings { cursor: (cursor + 15).min(last) },
+        KeyCode::PageUp => app.mode = Mode::Settings { cursor: cursor.saturating_sub(15) },
+        KeyCode::Char(' ') | KeyCode::Enter => {
+            let Some(item) = items.get(cursor).cloned() else { return };
+            match item.kind {
+                app::settings::Kind::Toggle if item.key == "none" => {}
+                app::settings::Kind::Toggle | app::settings::Kind::Module(_) => app.settings_toggle(&item),
+                _ if item.key == "none" => {}
+                app::settings::Kind::AddRule => app.mode = Mode::Input { purpose: app::InputPurpose::Setting(cursor), input: String::new(), error: None },
+                _ => app.mode = Mode::Input { purpose: app::InputPurpose::Setting(cursor), input: item.value, error: None },
+            }
+        }
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char(',') => app.mode = Mode::Normal,
+        _ => {}
+    }
+}
+
 fn page(app: &App) -> isize {
     app.hit.list_rows.height.max(1) as isize
 }
@@ -217,6 +295,16 @@ fn normal_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('M') => {
             app.mode = Mode::Modules { cursor: 0 };
+            return;
+        }
+        KeyCode::Char('!') => return app.acknowledge_all(),
+        KeyCode::Char('@') => return app.pause_audio(),
+        KeyCode::Char('#') => {
+            app.mode = Mode::Alarms { cursor: 0 };
+            return;
+        }
+        KeyCode::Char(',') => {
+            app.mode = Mode::Settings { cursor: 0 };
             return;
         }
         KeyCode::Char(c @ ('0'..='9' | '`' | '~')) if !app.detail_full => {
@@ -1065,6 +1153,27 @@ pub fn handle_mouse(app: &mut App, m: MouseEvent) {
 #[cfg(test)]
 mod key_tests {
     use super::*;
+
+    #[test]
+    fn standby_leads_to_choosing_and_keys_do_nothing_else_until_then() {
+        use crate::app::boot::Choice;
+        let mut app = app::tests_support::app();
+        app.boot.choices = vec![Choice { name: "process", description: "x", support: "supported".into(), chosen: true }, Choice { name: "gpu", description: "y", support: "supported".into(), chosen: true }];
+        app.boot.phase = BootPhase::Standby;
+        let press = |app: &mut App, k| handle_key(app, KeyEvent::new(k, KeyModifiers::NONE));
+        press(&mut app, KeyCode::Char('1'));
+        press(&mut app, KeyCode::Char('!'));
+        assert_eq!(app.boot.phase, BootPhase::Standby, "monitoring keys aren't live yet");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.boot.phase, BootPhase::Select);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char(' '));
+        assert!(app.boot.choices[0].chosen && !app.boot.choices[1].chosen);
+        press(&mut app, KeyCode::Char('n'));
+        assert!(app.boot.choices.iter().all(|c| !c.chosen));
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.boot.phase, BootPhase::Standby);
+    }
 
     /// docs/keys.md lists every key: one added here must be added there.
     #[test]

@@ -74,31 +74,6 @@ impl Watched {
     }
 }
 
-/// Restarts `run` when it fails, ever more slowly. Returns when it succeeds
-/// or `give_up` says so, for a process that fails the same way each time.
-pub fn guard(mut run: impl FnMut() -> Option<i32>, mut note: impl FnMut(String), mut sleep: impl FnMut(std::time::Duration)) -> i32 {
-    const MAX_WAIT_SECS: u64 = 30;
-    const MAX_FAST_FAILURES: u32 = 8;
-    let (mut wait, mut fast) = (1, 0);
-    loop {
-        let began = std::time::Instant::now();
-        match run() {
-            Some(0) => return 0,
-            status => {
-                let lived = began.elapsed().as_secs();
-                fast = if lived >= 60 { 0 } else { fast + 1 };
-                wait = if lived >= 60 { 1 } else { (wait * 2).min(MAX_WAIT_SECS) };
-                if fast >= MAX_FAST_FAILURES {
-                    note(format!("agent failed {fast} times in a row; giving up"));
-                    return status.unwrap_or(1);
-                }
-                note(format!("agent ended unexpectedly ({status:?}); restarting in {wait} s"));
-                sleep(std::time::Duration::from_secs(wait));
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,22 +89,5 @@ mod tests {
         assert!(w.changed().unwrap().contains("changed"));
         assert_eq!(w.changed(), None);
         std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn the_guard_restarts_then_gives_up() {
-        let (mut calls, mut waits) = (0, Vec::new());
-        let code = guard(
-            || {
-                calls += 1;
-                Some(if calls < 3 { 1 } else { 0 })
-            },
-            |_| {},
-            |d| waits.push(d.as_secs()),
-        );
-        assert_eq!((code, calls, waits), (0, 3, vec![2, 4]));
-        let mut notes = 0;
-        assert_eq!(guard(|| Some(5), |_| notes += 1, |_| {}), 5);
-        assert_eq!(notes, 8);
     }
 }

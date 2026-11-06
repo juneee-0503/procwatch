@@ -173,6 +173,8 @@ pub enum InputPurpose {
     Bookmark { event: String, time: String, summary: String },
     /// Title for a finding; source and detail are fixed.
     Finding { source: String, detail: String },
+    /// A new value for a line of the settings screen.
+    Setting(usize),
 }
 
 impl InputPurpose {
@@ -187,6 +189,7 @@ impl InputPurpose {
             InputPurpose::ArtifactDir => "Import artifacts",
             InputPurpose::Bookmark { .. } => "Bookmark event",
             InputPurpose::Finding { .. } => "Record finding",
+            InputPurpose::Setting(_) => "Change setting",
         }
     }
     pub fn hint(&self) -> &'static str {
@@ -203,6 +206,7 @@ impl InputPurpose {
             InputPurpose::IsolationAllow => {
                 "Optional management IP to keep reachable (empty = loopback only). Scripts are written, not run."
             }
+            InputPurpose::Setting(_) => "Enter saves; a rule left empty is removed.",
             InputPurpose::Finding { .. } => "Start with high: or low: to set severity (default medium).",
         }
     }

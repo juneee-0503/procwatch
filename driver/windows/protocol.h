@@ -5,7 +5,7 @@
 #pragma once
 
 #define PW_PORT_NAME        L"\\ProcwatchPort"
-#define PW_PROTOCOL_VERSION 1
+#define PW_PROTOCOL_VERSION 2
 #define PW_MAX_PATTERN      260
 #define PW_MAX_RULES        128
 
@@ -28,7 +28,6 @@ typedef struct _PW_RULE {
 typedef struct _PW_SET_RULES {
     unsigned long Version;
     unsigned long Mode;
-    unsigned long ProtectedPid; /* refuse to terminate this process; 0 = none */
     unsigned long Count;
     PW_RULE Rules[1];
 } PW_SET_RULES;

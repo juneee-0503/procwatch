@@ -1,6 +1,6 @@
 # EDR 代理
 
-`--agent` 把检测、响应、拦截和日志放进一个长期运行的进程:发现检测后按剧本处置,全部动作写入防篡改日志,进程死亡后自动重启。
+`--agent` 把检测、响应、拦截和日志放进一个长期运行的进程:发现检测后按剧本处置,全部动作写入防篡改日志。
 
 它不是商业 EDR 的替代品。下面的[局限](#局限)写明了差距,部署前请先读。
 
@@ -83,7 +83,7 @@ sudo procwatch --agent agent.yml --output /var/log/procwatch/agent.jsonl
 procwatch --agent-verify /var/log/procwatch/agent.jsonl
 ```
 
-退出码 0 表示完整,并打印条目数和最新哈希;退出码 1 表示已被改动,并指出第一个错误的行。代理启动时也会校验,日志已损坏时拒绝追加,需要把它移走。
+退出码 0 表示完整,并打印条目数和最新哈希;退出码 1 表示已被改动,并指出第一个错误的行。代理启动时也会校验。日志已损坏时,旧文件另存,不丢弃,开新链并记录原因。
 
 `event` 是字符串,内容是下面这些 JSON:
 
@@ -116,36 +116,15 @@ procwatch --agent-verify /var/log/procwatch/agent.jsonl
 | 禁止 dump 和 ptrace(`PR_SET_DUMPABLE`) | Linux | 同用户进程调试、注入 | root 可以用内核模块绕过 |
 | 拒绝调试器附加(`PT_DENY_ATTACH`) | macOS | 普通调试器 | root、禁用 SIP 的系统 |
 | 进程 DACL 只给 SYSTEM 完全权限 | Windows | 普通用户,以及未启用 SeDebugPrivilege 的管理员 | 启用 SeDebugPrivilege 的管理员 |
-| 驱动去掉终止权限(`ObRegisterCallbacks`) | Windows,需加载驱动 | 管理员结束进程 | 能加载驱动或卸载本驱动的人。[驱动从未运行过](../driver/windows/README.md) |
 | 每 30 秒校验程序和策略的 SHA-256 | 全部 | 发现文件被替换,写入 `tamper` | 文件已替换但进程先被结束 |
-| 代理进程死亡后重启 | 全部 | 进程崩溃或被结束 | 守护进程本身被结束 |
+| 服务管理器重启 | 全部 | 进程崩溃或被结束 | `systemctl stop`,由外部心跳发现 |
 | 日志哈希链 | 全部 | 发现行被修改、删除 | 整个文件重写 |
 
 策略文件变化后,代理继续使用内存里的旧策略,并记录 `tamper`。
 
 Windows 上真正的保护需要 Protected Process Light,这要求微软签发的反恶意软件证书,自己无法做到。
 
-### 让服务管理器负责重启
-
-`--agent` 的守护进程只负责重启工作进程。如果守护进程本身被结束,需要由操作系统把它拉起来。
-
-Linux 的 systemd:
-
-```ini
-[Unit]
-Description=procwatch agent
-After=network.target
-
-[Service]
-ExecStart=/usr/local/bin/procwatch --agent /etc/procwatch/agent.yml --output /var/log/procwatch/agent.jsonl
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-macOS 用 LaunchDaemon 的 `KeepAlive`,Windows 用任务计划或服务包装器。
+代理不自己重启,这是服务管理器的职责,见[部署](deployment.md)和[安全与自保护](security.md)。
 
 ## 局限
 

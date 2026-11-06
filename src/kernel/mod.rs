@@ -5,14 +5,18 @@
 //! program, because it is the part that must never fail. See
 //! `docs/architecture.md`.
 
-pub mod alerts;
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
+
+pub mod alarm;
 pub mod bus;
 pub mod config;
+pub mod decide;
+pub mod dictionary;
 pub mod model;
 pub mod module;
 pub mod supervisor;
 
-pub use bus::{Bus, Event, Exclusive};
+pub use bus::{Bus, Event, Exclusive, Subscription};
 pub use config::KernelConfig;
 pub use model::{Sample, Unit};
 pub use module::{Capability, Context, Module, Support};

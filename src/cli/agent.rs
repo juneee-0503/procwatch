@@ -21,30 +21,99 @@ use crate::response::enforce::{self, Mode, Policy};
 use crate::response::tamper::{self, Watched};
 
 const TAMPER_CHECK_EVERY: Duration = Duration::from_secs(30);
+/// No progress from the core for this long means the service is broken.
+const WATCHDOG: Duration = Duration::from_secs(45);
+
+/// Beats to the receiving end, sent from the main loop so that a dead loop
+/// falls silent. Sending happens on a thread: the network can hang.
+struct Heart {
+    url: String,
+    key: Option<Vec<u8>>,
+    every: Duration,
+    seq: std::sync::atomic::AtomicU64,
+}
+
+impl Heart {
+    fn new(c: &DefenseConfig) -> Heart {
+        let key = (!c.heartbeat.url.is_empty()).then(|| crate::defense::heartbeat::read_key(&c.heartbeat.key_file)).and_then(|k| k.map_err(|e| eprintln!("agent: heartbeat off: {e}")).ok());
+        Heart { url: c.heartbeat.url.clone(), key, every: Duration::from_secs(c.heartbeat.interval_seconds.max(1)), seq: Default::default() }
+    }
+
+    /// Copies the log off this machine as it grows. What can't be sent stays
+    /// in the file: the place reached is saved, so nothing is lost or sent
+    /// twice however long the outage.
+    fn keep_in_sync(&self, log: &Path, url: &str) {
+        use std::io::{BufRead, Seek, SeekFrom};
+        let (Some(key), false) = (self.key.clone(), url.is_empty()) else { return };
+        let (log, url) = (log.to_path_buf(), url.to_string());
+        let mark = {
+            let mut p = log.clone().into_os_string();
+            p.push(".synced");
+            PathBuf::from(p)
+        };
+        let _ = std::thread::Builder::new().name("log-sync".into()).spawn(move || {
+            let mut sent: u64 = std::fs::read_to_string(&mark).ok().and_then(|t| t.trim().parse().ok()).unwrap_or(0);
+            loop {
+                std::thread::sleep(Duration::from_secs(3));
+                let Ok(mut f) = std::fs::File::open(&log) else { continue };
+                // A new segment starts again from its beginning.
+                if f.metadata().is_ok_and(|m| m.len() < sent) {
+                    sent = 0;
+                }
+                if f.seek(SeekFrom::Start(sent)).is_err() {
+                    continue;
+                }
+                let lines: Vec<String> = std::io::BufReader::new(f).lines().map_while(Result::ok).take(200).collect();
+                if lines.is_empty() {
+                    continue;
+                }
+                let id = crate::kernel::model::identity();
+                let beat = crate::defense::heartbeat::Lines { v: 1, host: id.host.to_string(), lines };
+                let Ok(body) = crate::defense::heartbeat::seal(&beat, &key) else { continue };
+                if crate::defense::heartbeat::post(&url, &body).is_ok() {
+                    sent += beat.lines.iter().map(|l| l.len() as u64 + 1).sum::<u64>();
+                    let _ = crate::common::paths::write_atomic(&mark, &sent.to_string());
+                }
+            }
+        });
+    }
+
+    fn send(&self, chain: &ChainLog, last_words: Option<String>, first: bool) {
+        use crate::common::integrity as i;
+        use crate::defense::heartbeat::{post, seal, Beat, PROTOCOL};
+        let Some(key) = &self.key else { return };
+        let id = crate::kernel::model::identity();
+        let (chain_seq, head) = chain.head();
+        let beat = Beat {
+            v: PROTOCOL,
+            host: id.host.to_string(),
+            instance: id.instance.to_string(),
+            seq: self.seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1,
+            time: chrono::Local::now().to_rfc3339(),
+            health: "ok".to_string(),
+            program: i::program_hash().unwrap_or_default(),
+            config: i::config_digest(),
+            chain_seq,
+            chain_head: head.to_string(),
+            anchors: if first { chain.anchors() } else { Vec::new() },
+            maintenance: crate::common::maintenance::remaining().map(|d| d.as_secs()),
+            last_words: last_words.clone(),
+        };
+        let Ok(body) = seal(&beat, key) else { return };
+        let url = self.url.clone();
+        // A goodbye must get out before the process does.
+        if last_words.is_some() {
+            let _ = post(&url, &body);
+        } else {
+            let _ = std::thread::Builder::new().name("heartbeat".into()).spawn(move || {
+                let _ = post(&url, &body);
+            });
+        }
+    }
+}
 
 fn default_log() -> Option<PathBuf> {
     crate::common::paths::data_dir().map(|d| d.join("agent.jsonl"))
-}
-
-/// The parent: keeps a worker running. A real deployment also has the
-/// service manager restart this one; see docs/edr.md.
-pub fn run(policy: &Path, log: Option<&Path>, minutes: Option<u64>) -> i32 {
-    if let Err(e) = AgentPolicy::load(policy) {
-        eprintln!("{}:\n{e}", policy.display());
-        return 1;
-    }
-    let Ok(me) = std::env::current_exe() else {
-        eprintln!("agent: can't find my own program file");
-        return 2;
-    };
-    let mut args = vec!["--agent-worker".to_string(), policy.display().to_string()];
-    if let Some(l) = log {
-        args.extend(["--output".to_string(), l.display().to_string()]);
-    }
-    if let Some(m) = minutes {
-        args.extend(["--minutes".to_string(), m.to_string()]);
-    }
-    tamper::guard(|| std::process::Command::new(&me).args(&args).status().ok().and_then(|s| s.code()), |n| eprintln!("agent: {n}"), std::thread::sleep)
 }
 
 /// What the log records of a process, and what a kill would lose.
@@ -122,7 +191,9 @@ fn record(chain: &mut ChainLog, event: serde_json::Value) {
     }
 }
 
-pub fn worker(policy_path: &Path, log: Option<&Path>, minutes: Option<u64>) -> i32 {
+/// Runs as a service: restarting after a failure is the service manager's
+/// job, because it is the one thing an attacker here can't reach as easily.
+pub fn run(policy_path: &Path, log: Option<&Path>, minutes: Option<u64>) -> i32 {
     let policy = match AgentPolicy::load(policy_path) {
         Ok(p) => p,
         Err(e) => {
@@ -141,12 +212,29 @@ pub fn worker(policy_path: &Path, log: Option<&Path>, minutes: Option<u64>) -> i
             return 2;
         }
     };
+    if let Some(d) = chain.damage.clone() {
+        eprintln!("agent: TAMPER: the log was damaged: {d}");
+        record(&mut chain, json!({ "kind": "tamper", "detail": format!("previous log damaged: {d}") }));
+    }
     let hardened = tamper::harden();
-    // With the driver loaded, it refuses handles that could end this process.
-    #[cfg(windows)]
-    let _driver = crate::response::driver::Client::connect().ok().filter(|c| {
-        crate::response::driver::encode(false, std::process::id(), &[]).and_then(|m| c.send(&m)).is_ok()
-    });
+    super::service::catch_signals();
+    let config = DefenseConfig::load().unwrap_or_default();
+    let beats = Heart::new(&config);
+    if let crate::common::integrity::Check::Changed { was, now } = crate::common::integrity::check_program() {
+        if !cfg!(debug_assertions) {
+            let text = format!("the program changed: approved {was}, running {now}; refusing to run. After an upgrade, run --accept-program");
+            eprintln!("agent: {text}");
+            record(&mut chain, json!({ "kind": "tamper", "detail": text }));
+            crate::common::audit::record("start refused", &text);
+            beats.send(&chain, Some(text), true);
+            return 3;
+        }
+    }
+    for w in crate::common::integrity::take_warnings() {
+        eprintln!("agent: TAMPER: {w}");
+        record(&mut chain, json!({ "kind": "tamper", "detail": w }));
+    }
+    beats.keep_in_sync(&log_path, &config.sync.url);
     let mut watched: Vec<Watched> = Vec::new();
     let exe = std::env::current_exe().ok();
     for (what, path) in [("program", exe.as_deref()), ("policy", Some(policy_path))] {
@@ -193,6 +281,7 @@ pub fn worker(policy_path: &Path, log: Option<&Path>, minutes: Option<u64>) -> i
         snapshots_queued: Default::default(),
     });
     let kernel = crate::engine::start(tx.clone(), ctl.clone(), crate::app::watch_paths(&cfg));
+    let alarms = kernel.alarms().subscribe();
     let mut app = App::new(tx, ctl, cfg);
     app.kernel = Some(kernel);
     let mode = if policy.mode == Mode::Enforce { "enforce" } else { "audit" };
@@ -210,6 +299,16 @@ pub fn worker(policy_path: &Path, log: Option<&Path>, minutes: Option<u64>) -> i
             record(&mut chain, json!({ "kind": "activity capture unavailable", "reason": app.ir.capture_error }));
         }
     }
+    #[cfg(unix)]
+    if let Some(k) = app.kernel.clone() {
+        super::service::serve_queries(k);
+    }
+    super::service::sd_notify("READY=1");
+    let feed_every = super::service::watchdog_period();
+    let internal = cfg!(windows).then(|| super::service::Watchdog::start(WATCHDOG));
+    let (mut last_feed, mut progress) = (Instant::now(), HashMap::new());
+    beats.send(&chain, None, true);
+    let mut last_beat = Instant::now();
     let spared: HashSet<u32> = enforce::own_line();
     let allow = DefenseConfig::load().and_then(|c| c.allowed()).unwrap_or_default();
     let mut responder = Responder { policy: &policy, spared: &spared, allow: &allow, bans: Vec::new(), banned: false };
@@ -219,7 +318,28 @@ pub fn worker(policy_path: &Path, log: Option<&Path>, minutes: Option<u64>) -> i
     let mut logged: HashMap<(String, u32), Instant> = HashMap::new();
     let end = minutes.map(|m| Instant::now() + Duration::from_secs(m.saturating_mul(60)));
     let (mut last_tick, mut last_scan, mut last_check) = (Instant::now(), Instant::now(), Instant::now());
+    let mut leaving = "time limit".to_string();
     while end.is_none_or(|e| Instant::now() < e) {
+        if let Some(why) = super::service::stop_requested() {
+            leaving = why;
+            break;
+        }
+        // Only the main loop feeds the watchdogs, and only for real progress.
+        if let Some(every) = feed_every.or(internal.as_ref().map(|_| WATCHDOG / 3)) {
+            if last_feed.elapsed() >= every {
+                last_feed = Instant::now();
+                if super::service::core_alive(&app.kernel.as_ref().map(|k| k.status()).unwrap_or_default(), &mut progress, Instant::now(), WATCHDOG) {
+                    super::service::sd_notify("WATCHDOG=1");
+                    if let Some(w) = &internal {
+                        w.feed();
+                    }
+                }
+            }
+        }
+        if last_beat.elapsed() >= beats.every {
+            last_beat = Instant::now();
+            beats.send(&chain, None, false);
+        }
         if sampler::drain_for(&rx, Duration::from_millis(100), |m| app.on_worker_msg(m)).disconnected {
             record(&mut chain, json!({ "kind": "agent stopped", "reason": "sampler ended" }));
             return 1;
@@ -241,7 +361,11 @@ pub fn worker(policy_path: &Path, log: Option<&Path>, minutes: Option<u64>) -> i
             }
             if !chain.intact() {
                 eprintln!("agent: TAMPER: the log file shrank or disappeared");
+                if let Some(k) = &app.kernel {
+                    k.alarms().send(crate::kernel::alarm::Input::Raise { event: crate::kernel::alarm::AlarmEvent::new("log-tampered", "log-tampered", "The agent's log shrank or disappeared", crate::kernel::alarm::Priority::High, "agent"), lasts: None });
+                }
             }
+            let _ = crate::response::agent::prune(&log_path, config.retention.days, config.retention.max_mb.saturating_mul(1 << 19));
         }
         if last_scan.elapsed() < Duration::from_secs(1) {
             continue;
@@ -256,6 +380,9 @@ pub fn worker(policy_path: &Path, log: Option<&Path>, minutes: Option<u64>) -> i
             if incident_stages.insert(i.id, i.stages.len()) != Some(i.stages.len()) {
                 record(&mut chain, json!({ "kind": "incident", "incident": i }));
             }
+        }
+        for e in alarms.try_iter() {
+            record(&mut chain, json!({ "kind": "alarm", "alarm": e }));
         }
         let fresh = (app.ir.threat_seq - threats_seen).min(app.ir.threats.len() as u64) as usize;
         threats_seen = app.ir.threat_seq;
@@ -306,14 +433,19 @@ pub fn worker(policy_path: &Path, log: Option<&Path>, minutes: Option<u64>) -> i
             }
         }
     }
+    super::service::sd_notify("STOPPING=1");
+    record(&mut chain, json!({ "kind": "last words", "reason": leaving }));
+    beats.send(&chain, Some(leaving.clone()), false);
     drop(blocking);
     if responder.banned {
         if let Err(e) = ban::clear() {
             eprintln!("agent: {e}: lift bans with procwatch --unban-all");
         }
     }
-    record(&mut chain, json!({ "kind": "agent stopped", "reason": "time limit" }));
-    0
+    record(&mut chain, json!({ "kind": "agent stopped", "reason": leaving }));
+    // Stopped from outside: the exit status tells the service manager this
+    // wasn't a clean end of work, so it applies its restart policy.
+    i32::from(leaving != "time limit")
 }
 
 /// `--agent-check`: what a policy would do.

@@ -3,7 +3,7 @@
 //! depend on how modules are arranged.
 
 use std::collections::HashMap;
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -13,9 +13,8 @@ use crate::defense::module as defense;
 use crate::files::module as files;
 use crate::files::watch::FsEvent;
 use crate::host::logs::{self, Entry};
-use crate::kernel::alerts::{Alert, ALERTS};
 use crate::kernel::supervisor::MODULE_STATE;
-use crate::kernel::{Bus, Event, Kernel, ModuleState, ModuleStatus};
+use crate::kernel::{Bus, Event, Kernel, ModuleState, ModuleStatus, Subscription};
 use crate::network::module as net;
 use crate::network::traffic::Totals;
 use crate::performance::gpu::GpuSnapshot;
@@ -29,7 +28,7 @@ use crate::process::trace_module as trace;
 /// A snapshot waits this long for the first socket table.
 const FIRST_SOCKETS: Duration = Duration::from_secs(2);
 
-pub fn subscribe(bus: &Bus) -> Receiver<Event> {
+pub fn subscribe(bus: &Bus) -> Subscription {
     use activity::module as a;
     bus.subscribe(
         &[
@@ -48,7 +47,6 @@ pub fn subscribe(bus: &Bus) -> Receiver<Event> {
             trace::ERRORS,
             a::BATCH,
             a::STATE,
-            ALERTS,
             MODULE_STATE,
             defense::THREATS,
             defense::INCIDENTS,
@@ -96,7 +94,6 @@ fn convert(e: &Event) -> Option<WorkerMsg> {
         trace::ERRORS => WorkerMsg::Error(e.get::<String>()?.clone()),
         a::BATCH => WorkerMsg::Activity(e.get::<Vec<Activity>>()?.clone()),
         a::STATE => WorkerMsg::CaptureState(e.get::<a::State>()?.clone()),
-        ALERTS => WorkerMsg::MetricAlert(e.get::<Alert>()?.clone()),
         defense::THREATS => WorkerMsg::Threat(Box::new(e.get::<crate::defense::Threat>()?.clone())),
         defense::INCIDENTS => WorkerMsg::Incident(Box::new(e.get::<crate::defense::chain::Incident>()?.clone())),
         crate::defense::alarm::PROBLEM => WorkerMsg::Error(e.get::<String>()?.clone()),
@@ -111,7 +108,18 @@ fn convert(e: &Event) -> Option<WorkerMsg> {
     })
 }
 
-pub fn spawn(rx: Receiver<Event>, kernel: Kernel, tx: Sender<WorkerMsg>) {
+pub fn spawn(rx: Subscription, kernel: Kernel, tx: Sender<WorkerMsg>) {
+    // Alarms have their own path here too: a backlog of samples can't
+    // delay them, and nothing on it can drop them.
+    let alarms = kernel.alarms().subscribe();
+    let forward = tx.clone();
+    let _ = std::thread::Builder::new().name("bridge-alarm".into()).spawn(move || {
+        for e in alarms {
+            if forward.send(WorkerMsg::Alarm(Box::new(e))).is_err() {
+                return;
+            }
+        }
+    });
     let _ = std::thread::Builder::new().name("bridge".into()).spawn(move || {
         let mut join = Joiner::default();
         loop {

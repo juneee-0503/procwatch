@@ -5,7 +5,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use super::alerts::Rule;
+use super::alarm::Rule;
 
 #[derive(Debug, Clone, Default)]
 pub struct KernelConfig {
@@ -13,6 +13,8 @@ pub struct KernelConfig {
     pub alerts: Vec<Rule>,
     /// Lines that couldn't be used, for the user to see.
     pub problems: Vec<String>,
+    /// Leave out the rules procwatch ships with.
+    pub no_default_rules: bool,
 }
 
 impl KernelConfig {
@@ -33,10 +35,17 @@ impl KernelConfig {
                     Ok(r) => c.alerts.push(r),
                     Err(e) => c.problems.push(format!("line {}: {e}", n + 1)),
                 },
+                "default_rules" => c.no_default_rules = value.trim() == "off",
                 other => c.problems.push(format!("line {}: unknown setting {other}", n + 1)),
             }
         }
         c
+    }
+
+    /// The rules to run: the shipped ones, then the user's.
+    pub fn rules(&self) -> Vec<Rule> {
+        let shipped = super::alarm::DEFAULT_RULES.iter().filter(|_| !self.no_default_rules).filter_map(|r| Rule::parse(r).ok());
+        shipped.chain(self.alerts.iter().cloned()).collect()
     }
 
     pub fn load(path: Option<&Path>) -> KernelConfig {
@@ -46,6 +55,9 @@ impl KernelConfig {
     pub fn serialize(&self) -> String {
         let mut out = String::from("# procwatch modules. See docs/modules.md.\n");
         out.push_str(&format!("disabled = {}\n", self.disabled.iter().cloned().collect::<Vec<_>>().join(", ")));
+        if self.no_default_rules {
+            out.push_str("default_rules = off\n");
+        }
         for r in &self.alerts {
             out.push_str(&format!("alert = {}\n", r.text));
         }

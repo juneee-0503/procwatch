@@ -86,9 +86,16 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::Resu
         .iter()
         .position(|a| a == "--replay")
         .map(|i| args.get(i + 1).filter(|a| !a.starts_with("--")).map(std::path::PathBuf::from).or_else(crate::common::paths::data_dir));
-    let kernel = replay.is_none().then(|| crate::engine::start(tx.clone(), ctl.clone(), crate::app::watch_paths(&cfg)));
+    // A session someone asked for by name starts at once; a plain start goes
+    // through self-check and standby, with nothing running until chosen.
+    let direct = ["--run", "--case"].iter().any(|f| args.iter().any(|a| a == f));
+    let staged = replay.is_none() && !direct;
+    let kernel = replay.is_none().then(|| if staged { crate::engine::boot(tx.clone(), ctl.clone(), crate::app::watch_paths(&cfg)) } else { crate::engine::start(tx.clone(), ctl.clone(), crate::app::watch_paths(&cfg)) });
     let mut app = App::new(tx, ctl, Config { history: cfg.history && replay.is_none(), ..cfg.clone() });
     app.kernel = kernel;
+    if staged {
+        app.begin_boot();
+    }
     if let Some(path) = replay {
         let when = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).and_then(|s| parse_when(s));
         match path {

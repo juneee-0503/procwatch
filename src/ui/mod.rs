@@ -3,6 +3,8 @@
 //! sense right now.
 
 mod analysis;
+pub mod boot;
+mod settings;
 mod investigate;
 mod details;
 mod overlays;
@@ -40,9 +42,24 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         return;
     }
 
-    let [title, body, hints] =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(5), Constraint::Length(1)]).areas(size);
-    draw_title(frame, app, title);
+    if app.boot.phase != crate::app::boot::BootPhase::Monitoring {
+        boot::draw(frame, app);
+        if let Mode::Settings { cursor } = app.mode {
+            settings::draw(frame, app, size, cursor);
+        }
+        if matches!(app.mode, Mode::Input { .. }) {
+            investigate::input(frame, app, size);
+        }
+        return;
+    }
+    // Room for the alarm lamp and its messages when the screen allows.
+    let tall = size.height >= 20 && size.width >= 70;
+    let [title, messages, body, hints] = Layout::vertical([Constraint::Length(1), Constraint::Length(if tall { 2 } else { 0 }), Constraint::Min(5), Constraint::Length(1)]).areas(size);
+    draw_title(frame, app, if tall { Rect { width: title.width.saturating_sub(19), ..title } } else { title });
+    if tall {
+        const LAMP: u16 = 18;
+        boot::banner(frame, app, Rect { width: messages.width.saturating_sub(LAMP + 1), ..messages });
+    }
 
     app.hit.menus.clear();
     app.hit.pane_tabs.clear();
@@ -68,6 +85,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Tab::Case => investigate::case(frame, app, body),
     }
     draw_hints(frame, app, hints);
+    if tall {
+        const LAMP: u16 = 18;
+        boot::lamp(frame, app, Rect { x: size.width - LAMP, y: 0, width: LAMP, height: 3 });
+    }
 
     if app.find.is_some() {
         overlays::find_results(frame, app, body);
@@ -88,6 +109,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Mode::ActivitySummary => investigate::activity_summary(frame, app, size),
         Mode::ActivityDetail => investigate::activity_detail(frame, app, size),
         Mode::ThreatDetail => investigate::threat_detail(frame, app, size),
+        Mode::Alarms { cursor } => boot::alarms(frame, app, size, *cursor),
+        Mode::Settings { cursor } => settings::draw(frame, app, size, *cursor),
         Mode::Modules { cursor } => pivot::modules(frame, app, size, *cursor),
         Mode::StateAt => pivot::state_at(frame, app, size),
         Mode::Workspace => workspace::draw(frame, app, size),
@@ -202,6 +225,8 @@ fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
         Mode::Clusters => vec![h("↑↓", "select"), h("enter", "show cluster in timeline"), h("esc", "close")],
         Mode::Health | Mode::ActivitySummary => vec![h("any key", "close")],
         Mode::ActivityDetail | Mode::ThreatDetail => vec![h("↑↓", "scroll"), h("any key", "close")],
+        Mode::Alarms { .. } => vec![h("enter", "acknowledge"), h("!", "all"), h("@", "pause sound"), h("any key", "close")],
+        Mode::Settings { .. } => vec![h("↑↓", "select"), h("enter", "change"), h("esc", "close")],
         Mode::Modules { .. } => vec![h("↑↓", "select"), h("space", "enable / disable"), h("esc", "close")],
         Mode::LaunchConfirm(_) => vec![h("y", "run it under trace"), h("esc", "cancel")],
         Mode::Palette { .. } => vec![h("type", "filter"), h("↑↓", "choose"), h("enter", "run"), h("esc", "close")],

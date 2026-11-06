@@ -174,32 +174,98 @@ struct Entry {
     hash: String,
 }
 
+/// Most entries' bytes in the current segment before it is sealed.
+const SEGMENT: u64 = 64 << 20;
+
+/// Ask the kernel to make a file append-only, so not even its owner can
+/// change what is there. Needs CAP_LINUX_IMMUTABLE; without it this does
+/// nothing and the hash chain still shows any change.
+#[cfg(target_os = "linux")]
+fn append_only(file: &std::fs::File, on: bool) -> bool {
+    use std::os::fd::AsRawFd;
+    const GETFLAGS: libc::c_ulong = 0x8008_6601;
+    const SETFLAGS: libc::c_ulong = 0x4008_6602;
+    const APPEND: libc::c_long = 0x20;
+    let mut flags: libc::c_long = 0;
+    unsafe {
+        if libc::ioctl(file.as_raw_fd(), GETFLAGS, &mut flags) != 0 {
+            return false;
+        }
+        let next = if on { flags | APPEND } else { flags & !APPEND };
+        libc::ioctl(file.as_raw_fd(), SETFLAGS, &next) == 0
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn append_only(_: &std::fs::File, _: bool) -> bool {
+    false
+}
+
 /// An append-only log where each line carries a hash of everything before
 /// it, so editing or removing a line shows. Someone with write access can
-/// rebuild a whole chain, which is why the head should also leave the
-/// machine (`--agent-verify` prints it; a log shipper can carry the file).
+/// rebuild a whole chain, which is why the head leaves the machine in the
+/// heartbeat. Full segments are sealed; a damaged one is set aside, never
+/// discarded, and the chain carries on in a new file.
 pub struct ChainLog {
     path: PathBuf,
     file: std::fs::File,
     seq: u64,
     head: String,
     written: u64,
+    /// What was found wrong on opening.
+    pub damage: Option<String>,
+    pub append_only: bool,
+}
+
+fn sealed_name(path: &Path, seq: u64) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(format!(".{seq:012}"));
+    PathBuf::from(name)
 }
 
 impl ChainLog {
     pub fn open(path: &Path) -> Result<ChainLog, String> {
-        let (mut seq, mut head) = (0, GENESIS.to_string());
+        let (mut seq, mut head, mut damage) = (0, GENESIS.to_string(), None);
         if path.exists() {
-            let verified = verify(path).map_err(|e| format!("{}: {e}: refusing to extend a damaged log; move it aside", path.display()))?;
-            seq = verified.lines;
-            head = verified.head;
+            match verify(path) {
+                Ok(v) => {
+                    seq = v.lines;
+                    head = v.head;
+                }
+                Err(e) => {
+                    let mut aside = path.as_os_str().to_os_string();
+                    aside.push(format!(".damaged-{}", chrono::Local::now().format("%Y%m%d%H%M%S")));
+                    let _ = std::fs::OpenOptions::new().read(true).open(path).map(|f| append_only(&f, false));
+                    std::fs::rename(path, &aside).map_err(|e| format!("{}: {e}", path.display()))?;
+                    damage = Some(format!("{e}; kept as {}", PathBuf::from(aside).display()));
+                }
+            }
         }
         let file = crate::common::paths::private_file().create(true).append(true).open(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let written = file.metadata().map_or(0, |m| m.len());
-        Ok(ChainLog { path: path.to_path_buf(), file, seq, head, written })
+        let append = append_only(&file, true);
+        Ok(ChainLog { path: path.to_path_buf(), file, seq, head, written, damage, append_only: append })
+    }
+
+    fn rotate(&mut self) -> std::io::Result<()> {
+        append_only(&self.file, false);
+        let sealed = sealed_name(&self.path, self.seq);
+        std::fs::rename(&self.path, &sealed)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o400))?;
+        }
+        self.file = crate::common::paths::private_file().create(true).append(true).open(&self.path)?;
+        self.written = 0;
+        self.append_only = append_only(&self.file, true);
+        Ok(())
     }
 
     pub fn append(&mut self, event: &serde_json::Value) -> std::io::Result<()> {
+        if self.written >= SEGMENT {
+            self.rotate()?;
+        }
         self.seq += 1;
         let time = chrono::Local::now().to_rfc3339();
         let event = event.to_string();
@@ -218,6 +284,57 @@ impl ChainLog {
     pub fn intact(&self) -> bool {
         std::fs::metadata(&self.path).is_ok_and(|m| m.len() >= self.written)
     }
+
+    pub fn head(&self) -> (u64, &str) {
+        (self.seq, &self.head)
+    }
+
+    /// Points along the chain, for checking elsewhere that history wasn't
+    /// rewritten.
+    pub fn anchors(&self) -> Vec<(u64, String)> {
+        let Ok(file) = std::fs::File::open(&self.path) else { return Vec::new() };
+        let all: Vec<(u64, String)> = std::io::BufReader::new(file).lines().map_while(Result::ok).filter_map(|l| serde_json::from_str::<Entry>(&l).ok()).map(|e| (e.seq, e.hash)).collect();
+        let step = (all.len() / 32).max(1);
+        all.into_iter().step_by(step).collect()
+    }
+}
+
+/// Delete sealed segments past the limits, oldest first, keeping a record of
+/// each one's end: that proves it existed and what its last hash was.
+pub fn prune(path: &Path, max_age_days: u64, max_bytes: u64) -> std::io::Result<usize> {
+    let (Some(dir), Some(stem)) = (path.parent(), path.file_name().map(|n| n.to_string_lossy().into_owned())) else { return Ok(0) };
+    let prefix = format!("{stem}.");
+    let mut sealed: Vec<(PathBuf, u64, std::time::SystemTime)> = std::fs::read_dir(dir)?
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().strip_prefix(&prefix).is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit())))
+        .filter_map(|e| {
+            let m = e.metadata().ok()?;
+            Some((e.path(), m.len(), m.modified().ok()?))
+        })
+        .collect();
+    sealed.sort_by_key(|s| s.2);
+    let mut total: u64 = sealed.iter().map(|s| s.1).sum();
+    let mut removed = 0;
+    for (file, size, modified) in sealed {
+        let old = modified.elapsed().is_ok_and(|a| a.as_secs() > max_age_days.saturating_mul(86_400));
+        if !old && total <= max_bytes {
+            continue;
+        }
+        let last = std::fs::read_to_string(&file).ok().and_then(|t| t.lines().next_back().map(str::to_string)).and_then(|l| serde_json::from_str::<Entry>(&l).ok());
+        if let Some(e) = last {
+            let mut anchors = crate::common::paths::private_file().create(true).append(true).open(dir.join(format!("{stem}.anchors")))?;
+            writeln!(anchors, "{}", serde_json::json!({ "v": 1, "seq": e.seq, "hash": e.hash, "time": e.time }))?;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))?;
+        }
+        std::fs::remove_file(&file)?;
+        total -= size;
+        removed += 1;
+    }
+    Ok(removed)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -226,21 +343,27 @@ pub struct Verified {
     pub head: String,
 }
 
-/// Check every link; the error names the first bad line.
+/// Check every link. The error names the first bad entry: everything before
+/// it can still be trusted. A file may continue a sealed segment, so its
+/// first entry's place in the chain is taken from the entry itself.
 pub fn verify(path: &Path) -> Result<Verified, String> {
     let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
-    let (mut prev, mut seq) = (GENESIS.to_string(), 0u64);
+    let mut last: Option<(u64, String)> = None;
     for (i, line) in std::io::BufReader::new(file).lines().enumerate() {
         let n = i + 1;
         let line = line.map_err(|e| format!("line {n}: {e}"))?;
-        let e: Entry = serde_json::from_str(&line).map_err(|e| format!("line {n}: not a log entry ({e})"))?;
-        seq += 1;
-        if e.seq != seq || e.prev != prev || link(&prev, e.seq, &e.time, &e.event) != e.hash {
-            return Err(format!("line {n}: chain broken: the log was edited or a line removed"));
+        let e: Entry = serde_json::from_str(&line).map_err(|e| format!("line {n}: not a log entry ({e}): untrusted from here on"))?;
+        let (want_seq, want_prev) = last.as_ref().map_or((e.seq, e.prev.as_str()), |(s, h)| (s + 1, h.as_str()));
+        if e.seq != want_seq || e.prev != want_prev || link(&e.prev, e.seq, &e.time, &e.event) != e.hash {
+            return Err(format!("line {n}: chain broken: the log was edited or a line removed; untrusted from entry {want_seq} on"));
         }
-        prev = e.hash;
+        if last.is_none() && e.seq == 1 && e.prev != GENESIS {
+            return Err(format!("line {n}: the chain doesn't start where it should"));
+        }
+        last = Some((e.seq, e.hash));
     }
-    Ok(Verified { lines: seq, head: prev })
+    let (lines, head) = last.unwrap_or_else(|| (0, GENESIS.to_string()));
+    Ok(Verified { lines, head })
 }
 
 #[cfg(test)]
@@ -311,10 +434,30 @@ playbooks:
         let good = std::fs::read_to_string(&path).unwrap();
         std::fs::write(&path, good.replacen("\\\"n\\\":1", "\\\"n\\\":9", 1)).unwrap();
         assert!(verify(&path).unwrap_err().starts_with("line 2"));
-        assert!(ChainLog::open(&path).is_err(), "won't extend a damaged log");
+        let reopened = ChainLog::open(&path).unwrap();
+        assert!(reopened.damage.as_deref().is_some_and(|d| d.contains("line 2")), "the damage is reported and the file kept");
+        assert_eq!(reopened.head().0, 0, "a new chain starts");
+        drop(reopened);
         let lines: Vec<&str> = good.lines().collect();
         std::fs::write(&path, format!("{}\n{}\n", lines[0], lines[2])).unwrap();
-        assert!(verify(&path).unwrap_err().starts_with("line 2"));
+        assert!(verify(&path).unwrap_err().contains("untrusted from entry 2"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn segments_continue_the_chain_and_pruning_keeps_proof() {
+        let dir = crate::common::paths::private_temp_dir("chain").unwrap();
+        let path = dir.join("agent.jsonl");
+        let mut log = ChainLog::open(&path).unwrap();
+        log.append(&serde_json::json!({ "n": 1 })).unwrap();
+        log.rotate().unwrap();
+        log.append(&serde_json::json!({ "n": 2 })).unwrap();
+        assert_eq!(verify(&path).unwrap().lines, 2, "the new file continues numbering");
+        assert_eq!(verify(&sealed_name(&path, 1)).unwrap().lines, 1);
+        assert_eq!(prune(&path, 3650, 1 << 30).unwrap(), 0, "within limits");
+        assert_eq!(prune(&path, 3650, 0).unwrap(), 1);
+        assert!(!sealed_name(&path, 1).exists());
+        assert!(std::fs::read_to_string(dir.join("agent.jsonl.anchors")).unwrap().contains("\"seq\":1"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

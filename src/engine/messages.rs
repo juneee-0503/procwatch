@@ -29,8 +29,10 @@ pub enum WorkerMsg {
     Threat(Box<crate::defense::Threat>),
     /// An attack that moved to a new stage.
     Incident(Box<crate::defense::chain::Incident>),
-    /// A metric alert rule fired or cleared.
-    MetricAlert(crate::kernel::alerts::Alert),
+    /// An alarm changed state.
+    Alarm(Box<crate::kernel::alarm::AlarmEvent>),
+    /// One step of the start-up checks.
+    Boot(crate::engine::selfcheck::Step),
     /// Scheduling, paging, disks, network errors, sensors.
     Metrics(Box<Metrics>),
     /// System services, or why they couldn't be listed.

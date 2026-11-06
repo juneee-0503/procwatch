@@ -1,7 +1,7 @@
 # The Windows driver
 
 Source for `procwatch.sys`, a minifilter that lets `--enforce` block file
-writes and registry changes on Windows, and protects the agent's process.
+writes and registry changes on Windows.
 
 **This driver has never been loaded.** It has only been compiled, and only if
 the CI step `Compile the Windows driver` says so. No operation it claims to
@@ -54,7 +54,6 @@ If the VM stops booting, restore the snapshot.
 |---|---|---|
 | Writing or deleting files | minifilter `IRP_MJ_CREATE` | allows |
 | Changing registry keys and values | `CmRegisterCallbackEx` | allows |
-| Terminating the agent | `ObRegisterCallbacks` strips rights from new handles | allows |
 
 - Failures allow the operation. A filter that fails closed can stop a machine
   from booting.

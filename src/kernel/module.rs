@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 
+use super::alarm::{AlarmEvent, Hub, Input};
 use super::bus::{Bus, Event};
 use super::model::{Sample, SAMPLES};
 
@@ -61,6 +62,17 @@ pub struct Context {
     pub(super) bus: Bus,
     pub(super) generation: u64,
     pub(super) current: Arc<AtomicU64>,
+    pub(super) hub: Hub,
+    pub(super) health: Arc<RunHealth>,
+}
+
+/// What a run has told the kernel about itself.
+#[derive(Default)]
+pub struct RunHealth {
+    /// Errors in a row; a success resets it.
+    pub(super) errors: AtomicU64,
+    pub(super) total_errors: AtomicU64,
+    pub(super) degraded: std::sync::Mutex<Option<String>>,
 }
 
 impl Context {
@@ -75,6 +87,37 @@ impl Context {
         }
     }
 
+    /// Raise an alarm. These never go by the bus, where they could be lost.
+    pub fn raise(&self, event: AlarmEvent, lasts: Option<Duration>) {
+        if self.current() {
+            self.hub.send(Input::Raise { event, lasts });
+        }
+    }
+
+    pub fn alarms(&self) -> &Hub {
+        &self.hub
+    }
+
+    /// A collection failed. A few are normal; many in a row and the kernel
+    /// treats the module as broken.
+    pub fn error(&self) {
+        self.health.errors.fetch_add(1, Ordering::Relaxed);
+        self.health.total_errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A collection worked.
+    pub fn ok(&self) {
+        self.health.errors.store(0, Ordering::Relaxed);
+    }
+
+    /// Running, but with less than it could offer, such as without the
+    /// privileges for part of its work. None when back to full strength.
+    pub fn degraded(&self, reason: Option<String>) {
+        if let Ok(mut d) = self.health.degraded.lock() {
+            *d = reason;
+        }
+    }
+
     pub fn samples(&self, samples: Vec<Sample>) {
         if !samples.is_empty() {
             self.publish(SAMPLES, samples);
@@ -82,9 +125,37 @@ impl Context {
     }
 }
 
+/// What to give up first when the machine is busiest. Monitoring must not
+/// add to the load at the moment it matters most.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Importance {
+    /// Paused first.
+    Optional,
+    /// Slowed down.
+    Normal,
+    /// Keeps its pace.
+    Core,
+}
+
 pub trait Module: Send {
     /// What works here, and what doesn't and why.
     fn capabilities(&self) -> Vec<Capability>;
+
+    fn importance(&self) -> Importance {
+        Importance::Normal
+    }
+
+    /// Metric prefixes this module provides. If it stops, alarms about them
+    /// say nothing true, and are silenced.
+    fn provides(&self) -> Vec<&'static str> {
+        Vec::new()
+    }
+
+    /// Run when loaded, before the module starts: can it work here?
+    fn self_test(&mut self) -> Result<String, String> {
+        Ok("ok".to_string())
+    }
 
     /// Topics to receive in `on_event`.
     fn subscribes(&self) -> Vec<&'static str> {

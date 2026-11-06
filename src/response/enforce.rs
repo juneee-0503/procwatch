@@ -304,7 +304,7 @@ fn start_driver(policy: &Policy) -> Result<Option<super::driver::Client>, String
     }
     let client = Client::connect()?;
     let borrowed: Vec<(u32, &str)> = rules.iter().map(|(o, p)| (*o, p.as_str())).collect();
-    client.send(&encode(policy.mode == Mode::Enforce, std::process::id(), &borrowed)?)?;
+    client.send(&encode(policy.mode == Mode::Enforce, &borrowed)?)?;
     Ok(Some(client))
 }
 

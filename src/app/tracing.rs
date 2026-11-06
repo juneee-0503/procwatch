@@ -87,7 +87,7 @@ impl App {
     /// visible changed and a redraw is needed.
     pub fn on_tick(&mut self) -> bool {
         self.tick = self.tick.wrapping_add(1);
-        let mut dirty = self.is_busy();
+        let mut dirty = self.is_busy() | self.boot_tick() | self.board_tick();
         if self.status.as_ref().is_some_and(|s| s.at.elapsed() > STATUS_TTL) {
             self.status = None;
             dirty = true;
@@ -151,6 +151,8 @@ impl App {
             || self.find.as_ref().is_some_and(|f| f.pending)
             || self.detail_pid().is_some_and(|p| self.deep_pending.contains(&p))
             || self.ir_busy()
+            || self.board.worst().is_some()
+            || !matches!(self.boot.phase, crate::app::boot::BootPhase::Monitoring | crate::app::boot::BootPhase::Standby)
     }
 
     pub fn is_stale(&self) -> bool {
