@@ -36,7 +36,9 @@ mkdir -p /etc/systemd/system/procwatch.service.d
 printf '[Service]\nWatchdogSec=12\n[Unit]\nStartLimitBurst=100\n' >/etc/systemd/system/procwatch.service.d/test.conf
 systemctl daemon-reload
 
-XDG_DATA_HOME=$run/rx XDG_CONFIG_HOME=$run/rx /usr/local/bin/procwatch --heartbeat-receiver 127.0.0.1:19190 --key "$key" --period 2 --store "$run/store" >"$run/receiver.log" 2>&1 &
+# A copy: the running receiver mustn't hold the file T-07 replaces.
+cp /usr/local/bin/procwatch "$run/receiver"
+XDG_DATA_HOME=$run/rx XDG_CONFIG_HOME=$run/rx "$run/receiver" --heartbeat-receiver 127.0.0.1:19190 --key "$key" --period 2 --store "$run/store" >"$run/receiver.log" 2>&1 &
 receiver=$!
 trap 'kill $receiver 2>/dev/null; systemctl stop procwatch; rm -rf /etc/systemd/system/procwatch.service.d; systemctl daemon-reload' EXIT
 systemctl start procwatch
@@ -72,9 +74,9 @@ cp "$run/good.yml" /etc/procwatch/defense.yml
 
 systemctl stop procwatch
 cp /usr/local/bin/procwatch "$run/procwatch.good"
-cat "$run/procwatch.good" - >/usr/local/bin/procwatch </dev/null
-printf 'x' >>/usr/local/bin/procwatch
-: >"$run/receiver.mark"
+cp "$run/procwatch.good" "$run/tampered"
+printf 'x' >>"$run/tampered"
+install -m 0755 "$run/tampered" /usr/local/bin/procwatch
 systemctl start procwatch
 wait_for 20 heard 'program changed'; result T-07 $? "a replaced program refuses to run, and the receiver sees the hash change"
 systemctl stop procwatch
@@ -114,7 +116,7 @@ wait_for 15 heard 'log rewritten'; rewritten=$?
 
 kill $receiver; wait $receiver 2>/dev/null
 sleep 6
-XDG_DATA_HOME=$run/rx XDG_CONFIG_HOME=$run/rx /usr/local/bin/procwatch --heartbeat-receiver 127.0.0.1:19190 --key "$key" --period 2 --store "$run/store" >>"$run/receiver.log" 2>&1 &
+XDG_DATA_HOME=$run/rx XDG_CONFIG_HOME=$run/rx "$run/receiver" --heartbeat-receiver 127.0.0.1:19190 --key "$key" --period 2 --store "$run/store" >>"$run/receiver.log" 2>&1 &
 receiver=$!
 stored=$(cat "$run"/store/*.jsonl 2>/dev/null | wc -l)
 wait_for 30 sh -c "[ \$(cat $run/store/*.jsonl 2>/dev/null | wc -l) -gt $stored ]"; result T-10 $? "log lines held during an outage arrive afterwards"

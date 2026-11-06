@@ -24,6 +24,28 @@ pub fn check() -> i32 {
     2
 }
 
+/// Run a program pinned to each CPU in turn: on some kernels probes only
+/// fire on some of them, and this shows which.
+#[cfg(target_os = "linux")]
+fn per_cpu(sensor: &Sensor) {
+    use std::time::Duration;
+    let cpus = std::thread::available_parallelism().map_or(1, usize::from).min(64);
+    for cpu in 0..cpus {
+        let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::CPU_SET(cpu, &mut set);
+            libc::sched_setaffinity(0, std::mem::size_of_val(&set), &set);
+        }
+        let _ = sensor.rx.try_iter().count();
+        for _ in 0..5 {
+            let _ = std::process::Command::new("/bin/true").status();
+        }
+        std::thread::sleep(Duration::from_millis(400));
+        let seen = sensor.rx.try_iter().filter(|e| e.kind == program::Kind::Exec && e.path == "/bin/true").count();
+        println!("  cpu {cpu}: saw {seen} of 5");
+    }
+}
+
 /// `--ebpf-check`: load everything, watch a real process start, and report.
 #[cfg(target_os = "linux")]
 pub fn check() -> i32 {
@@ -60,5 +82,6 @@ pub fn check() -> i32 {
     }
     println!("saw {seen} of 3 test programs start; {} records read, {execs} execs, {} lost", sensor.seen.load(std::sync::atomic::Ordering::Relaxed), sensor.lost());
     samples.iter().for_each(|s| println!("  {s}"));
+    per_cpu(&sensor);
     i32::from(seen != 3)
 }
