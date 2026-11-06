@@ -59,6 +59,56 @@ pub struct Destination {
 }
 
 impl Destination {
+    /// From a line typed in Settings:
+    /// `webhook URL [FORMAT] [min LEVEL]`, `syslog [min LEVEL]`,
+    /// `file PATH [min LEVEL]`, `command PROGRAM [ARGS…]`.
+    pub fn parse(text: &str) -> Result<Destination, String> {
+        let words: Vec<&str> = text.split_whitespace().collect();
+        let (kind, rest) = words.split_first().ok_or("expected webhook, syslog, file or command")?;
+        if *kind == "command" {
+            let d = Destination { kind: Kind::Command { argv: rest.iter().map(ToString::to_string).collect() }, min_severity: None };
+            d.validate()?;
+            return Ok(d);
+        }
+        let (mut rest, mut min_severity) = (rest.to_vec(), None);
+        if let Some(at) = rest.iter().position(|w| *w == "min") {
+            let level = rest.get(at + 1).ok_or("min needs high, medium or low")?;
+            min_severity = Some(Priority::parse(level).ok_or_else(|| format!("unknown level {level}"))?.label().to_string());
+            rest.truncate(at);
+        }
+        let kind = match (*kind, rest.as_slice()) {
+            ("syslog", []) => Kind::Syslog,
+            ("file", [path]) => Kind::File { path: path.into() },
+            ("webhook", [url]) => Kind::Webhook { url: (*url).to_string(), format: Format::Json },
+            ("webhook", [url, format]) => {
+                let format = match *format {
+                    "json" => Format::Json,
+                    "slack" => Format::Slack,
+                    "dingtalk" => Format::Dingtalk,
+                    "feishu" => Format::Feishu,
+                    "wecom" => Format::Wecom,
+                    other => return Err(format!("unknown format {other}: json, slack, dingtalk, feishu or wecom")),
+                };
+                Kind::Webhook { url: (*url).to_string(), format }
+            }
+            _ => return Err("expected: webhook URL [format] [min level], syslog, file PATH or command PROGRAM ARGS".into()),
+        };
+        let d = Destination { kind, min_severity };
+        d.validate()?;
+        Ok(d)
+    }
+
+    /// The line `parse` reads back.
+    pub fn to_text(&self) -> String {
+        let main = match &self.kind {
+            Kind::Webhook { url, format } => format!("webhook {url} {}", format!("{format:?}").to_lowercase()),
+            Kind::Syslog => "syslog".to_string(),
+            Kind::File { path } => format!("file {}", path.display()),
+            Kind::Command { argv } => format!("command {}", argv.join(" ")),
+        };
+        self.min_severity.as_ref().map_or(main.clone(), |m| format!("{main} min {m}"))
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         match &self.kind {
             Kind::Webhook { url, .. } if !url.starts_with("https://") && !url.starts_with("http://") => Err("a webhook needs an http or https address".into()),
@@ -274,19 +324,36 @@ fn deliver(destinations: Vec<Destination>, rx: Receiver<Notice>, hub: Hub, probl
 
 pub const PROBLEM: &str = "alarm.problem";
 
-/// The last stage of the alarm path: decides, then hands to a thread of its
-/// own, because sending is the part most likely to hang.
+/// Largest local record before an older generation replaces it.
+const MAX_RECORD: u64 = 16 << 20;
+
+/// Every alarm is written here, destinations or not: the record of what
+/// happened must not depend on anyone having set up notifications.
+fn write_record(path: &std::path::Path, e: &AlarmEvent) -> std::io::Result<()> {
+    if std::fs::metadata(path).is_ok_and(|m| m.len() > MAX_RECORD) {
+        std::fs::rename(path, path.with_extension("1.jsonl"))?;
+    }
+    let line = serde_json::to_string(e).map_err(std::io::Error::other)?;
+    let mut f = crate::common::paths::private_file().create(true).append(true).open(path)?;
+    writeln!(f, "{line}")
+}
+
+/// The last stage of the alarm path: records every alarm, decides who to
+/// tell, and hands that to a thread of its own, because sending is the part
+/// most likely to hang.
 pub struct AlarmModule {
     destinations: Vec<Destination>,
     decider: Decider,
     events: Option<Receiver<AlarmEvent>>,
     tx: Option<Sender<Notice>>,
     problems: Option<Receiver<String>>,
+    record: Option<std::path::PathBuf>,
 }
 
 impl AlarmModule {
     pub fn new(destinations: Vec<Destination>) -> AlarmModule {
-        AlarmModule { destinations, decider: Decider::default(), events: None, tx: None, problems: None }
+        let record = crate::common::paths::data_dir().map(|d| d.join("alarms.jsonl"));
+        AlarmModule { destinations, decider: Decider::default(), events: None, tx: None, problems: None, record }
     }
 
     /// A module's signal is gone: what it provided can't be trusted.
@@ -306,11 +373,20 @@ impl AlarmModule {
 
 impl Module for AlarmModule {
     fn capabilities(&self) -> Vec<Capability> {
-        vec![if self.destinations.is_empty() {
-            Capability::no("alarm delivery", "no destinations in defense.yml: alarms stay on this screen")
+        vec![Capability::yes("alarm record on this machine"), if self.destinations.is_empty() {
+            Capability::partly("notifications", "no destinations yet: add one in Settings")
         } else {
-            Capability::yes("alarm delivery")
+            Capability::yes("notifications")
         }]
+    }
+
+    fn self_test(&mut self) -> Result<String, String> {
+        let path = self.record.as_ref().ok_or("no data folder")?;
+        if let Some(d) = path.parent() {
+            crate::common::paths::ensure_private_dir(d).map_err(|e| e.to_string())?;
+        }
+        crate::common::paths::private_file().create(true).append(true).open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(format!("recording to {}, {} destinations", path.display(), self.destinations.len()))
     }
 
     fn importance(&self) -> Importance {
@@ -322,9 +398,6 @@ impl Module for AlarmModule {
     }
 
     fn start(&mut self, ctx: &Context) -> Result<(), String> {
-        if self.destinations.is_empty() {
-            return Err("no alarm destinations configured".into());
-        }
         let (tx, rx) = channel();
         let (ptx, prx) = sync_channel(64);
         let list = self.destinations.clone();
@@ -339,9 +412,17 @@ impl Module for AlarmModule {
     fn tick(&mut self, ctx: &Context) {
         let now = Instant::now();
         self.decider.maintenance(crate::common::maintenance::remaining().map(|left| now + left));
-        let events: Vec<AlarmEvent> = self.events.as_ref().map(|rx| rx.try_iter().collect()).unwrap_or_default();
+        // The start-up check's probe proves the channel works; it isn't an alarm.
+        let events: Vec<AlarmEvent> = self.events.as_ref().map(|rx| rx.try_iter().filter(|e| e.rule != "selfcheck").collect()).unwrap_or_default();
         let mut notices = Vec::new();
         for e in &events {
+            if let Some(path) = &self.record {
+                if write_record(path, e).is_ok() {
+                    ctx.ok();
+                } else {
+                    ctx.error();
+                }
+            }
             self.track_signal(e);
             notices.extend(self.decider.on_event(e, now));
         }
@@ -383,6 +464,26 @@ mod tests {
         let c = curl_config("https://x.example/hook", "a\"\nurl = \"https://evil.example\\");
         assert_eq!(c.lines().filter(|l| l.starts_with("url")).count(), 1);
         assert!(c.contains("max-redirs = 0"));
+    }
+
+    #[test]
+    fn typed_destinations_read_and_read_back() {
+        for line in ["webhook https://oapi.dingtalk.com/robot/send?access_token=x dingtalk min high", "syslog min medium", "syslog", "file /var/log/a.jsonl", "command /usr/bin/page -x"] {
+            assert_eq!(Destination::parse(line).unwrap().to_text(), line);
+        }
+        assert_eq!(Destination::parse("webhook https://x.example").unwrap().to_text(), "webhook https://x.example json");
+        for bad in ["", "pager", "webhook ftp://x", "webhook https://x fax", "file", "command", "syslog min urgent", "syslog min"] {
+            assert!(Destination::parse(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn every_alarm_is_recorded_with_no_destinations() {
+        let dir = crate::common::paths::private_temp_dir("record").unwrap();
+        let path = dir.join("alarms.jsonl");
+        write_record(&path, &AlarmEvent::new("k", "r", "disk full", Priority::Low, "s")).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("disk full"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

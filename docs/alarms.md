@@ -113,8 +113,15 @@ alert = disk.queue_depth{device=sda} >= 32 priority medium
 
 ## 通知去向
 
-在 `defense.yml` 配置,详见[服务器防御](defense.md#报警)。
+不配置也能用:灯、声音照常工作,每条报警都写入数据目录的 `alarms.jsonl`。
 
-```bash
-procwatch --alarm-test
-```
+要发到别处,在设置(`F2`)的 Notifications 里选 Add a destination,输入一行:
+
+| 写法 | 含义 |
+|---|---|
+| `webhook URL dingtalk min high` | 格式可以是 `json`、`slack`、`dingtalk`、`feishu`、`wecom` |
+| `syslog min medium` | 系统日志 |
+| `file /var/log/alarms.jsonl` | 文件 |
+| `command /usr/local/bin/page-oncall` | 运行命令,不经过 shell |
+
+`min` 默认 `high`。保存后立即生效,选 Send a test alarm 试发一条。详见[服务器防御](defense.md#报警)。

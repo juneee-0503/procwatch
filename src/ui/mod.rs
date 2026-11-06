@@ -74,6 +74,16 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_page(frame, app, body);
     }
     draw_hints(frame, app, hints);
+    // Always in sight, and clickable: nobody should need to know a key.
+    const BUTTON: &str = " ⚙ Settings F2 ";
+    let width = BUTTON.width() as u16;
+    if hints.width > width * 3 && matches!(app.mode, Mode::Normal) {
+        let rect = Rect { x: hints.right() - width, width, ..hints };
+        frame.render_widget(Paragraph::new(Span::styled(BUTTON, Style::new().fg(Color::Black).bg(Color::Gray))), rect);
+        app.hit.settings = rect;
+    } else {
+        app.hit.settings = Rect::default();
+    }
     if tall {
         const LAMP: u16 = 18;
         boot::lamp(frame, app, Rect { x: size.width - LAMP, y: 0, width: LAMP, height: 3 });

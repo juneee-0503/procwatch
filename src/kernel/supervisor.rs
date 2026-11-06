@@ -284,6 +284,22 @@ impl Kernel {
         }
     }
 
+    /// Start a running module again, so new settings take effect.
+    pub fn reload(&self, name: &str) {
+        let Some((i, s)) = self.0.slots.iter().enumerate().find(|(_, s)| s.name == name) else { return };
+        if !self.wanted(name) {
+            return;
+        }
+        s.run.fetch_add(1, Ordering::Relaxed);
+        s.beat.store(0, Ordering::Relaxed);
+        if let Ok(mut g) = s.state.lock() {
+            g.retry_at = None;
+            g.status.failures_in_a_row = 0;
+            g.status.last_error = None;
+        }
+        self.set_state(i, ModuleState::Disabled, None);
+    }
+
     /// Whether a module is meant to be running now.
     pub fn wanted(&self, name: &str) -> bool {
         self.0.slots.iter().find(|s| s.name == name).is_some_and(|s| s.state.lock().is_ok_and(|g| g.wants_run))
@@ -920,6 +936,25 @@ mod tests {
         k.activate(&[]);
         wait_for("unloading", || state(&k) == ModuleState::Disabled);
         assert!(k.health().modules[0].ticks > 0);
+        k.shutdown();
+    }
+
+    #[test]
+    fn a_module_can_be_reloaded_and_comes_back_new() {
+        let builds = Arc::new(AtomicU32::new(0));
+        let count = builds.clone();
+        let mut r = Registry::default();
+        r.add("failing", "x", move || {
+            count.fetch_add(1, Ordering::SeqCst);
+            Box::new(Partial)
+        });
+        let k = r.start(Bus::default(), KernelConfig::default());
+        wait_for("running", || state(&k) == ModuleState::Degraded);
+        let before = builds.load(Ordering::SeqCst);
+        k.reload("failing");
+        wait_for("a new instance", || builds.load(Ordering::SeqCst) > before);
+        wait_for("running again", || state(&k) == ModuleState::Degraded);
+        k.reload("nothing such");
         k.shutdown();
     }
 

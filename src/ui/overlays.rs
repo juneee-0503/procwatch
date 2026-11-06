@@ -176,6 +176,8 @@ pub fn help(frame: &mut Frame, screen: Rect) {
             ("right-click", "same, with the mouse"),
             ("double-click  i", "open full details"),
             ("1–9, 0", "pages: Procs Perf Net Files Persist Timeline Logs Trace Alerts Case"),
+            ("F2  ,", "settings"),
+            ("!  @  #", "acknowledge alarms, pause sound, alarm list"),
         ]),
         ("Finding things", &[
             ("/", "search by name, PID, path, user"),

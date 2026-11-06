@@ -113,7 +113,7 @@ impl ExporterModule {
 impl Module for ExporterModule {
     fn capabilities(&self) -> Vec<Capability> {
         vec![if self.listen.is_empty() {
-            Capability::no("Prometheus endpoint", "no exporter.listen in defense.yml")
+            Capability::no("Prometheus endpoint", "turned off in Settings")
         } else {
             Capability::yes("Prometheus endpoint")
         }]
@@ -129,7 +129,7 @@ impl Module for ExporterModule {
 
     fn self_test(&mut self) -> Result<String, String> {
         if self.listen.is_empty() {
-            return Err("no exporter.listen in defense.yml".into());
+            return Err("turned off: set an address in Settings".into());
         }
         self.listen.parse::<SocketAddr>().map(|a| format!("will listen on {a}")).map_err(|_| format!("{}: not an address and port", self.listen))
     }
@@ -139,7 +139,16 @@ impl Module for ExporterModule {
         if !addr.ip().is_loopback() && self.token.is_empty() {
             return Err(format!("{addr} isn't loopback: set exporter.token"));
         }
-        let listener = TcpListener::bind(addr).map_err(|e| format!("{addr}: {e}"))?;
+        // On a reload the old instance may still hold the port for a moment.
+        let mut bound = TcpListener::bind(addr);
+        for _ in 0..10 {
+            if bound.is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            bound = TcpListener::bind(addr);
+        }
+        let listener = bound.map_err(|e| format!("{addr}: {e}"))?;
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
         self.stop.store(false, Ordering::Relaxed);
         let (token, latest, stop) = (self.token.clone(), self.latest.clone(), self.stop.clone());

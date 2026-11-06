@@ -2,7 +2,7 @@
 
 防御模块监视针对本机的攻击:登录爆破、Web 攻击、网络洪水和扫描、主机失陷迹象。它把分散的发现串成攻击链,再按配置报警。
 
-默认随 procwatch 运行,不需要配置。不配置时发现只留在本机,不发送到任何地方,也不打开端口。
+不需要配置就能用。不配置时报警只记录在本机,不发送到任何地方;`exporter` 模块只监听回环地址 `127.0.0.1:9187`。下面的设置都可以在设置界面(`F2`)修改,保存后立即生效。
 
 ## 能发现什么
 
@@ -153,7 +153,7 @@ alarms:
   - { type: command, argv: [/usr/local/bin/page-oncall] }
 
 exporter:
-  listen: "127.0.0.1:9187"
+  listen: "127.0.0.1:9187"         # 默认值,留空关闭
   token: ""                        # 非回环地址必须设置
 ```
 
@@ -218,7 +218,7 @@ procwatch --history
 procwatch --history net.rx --hours 6
 ```
 
-配置 `exporter.listen` 后,`/metrics` 输出 Prometheus 格式,`/health` 用于存活检查。监听非回环地址时必须设置 `token`,请求带 `Authorization: Bearer <token>`。Grafana 接上就能看图。
+加载 `exporter` 模块后,`http://127.0.0.1:9187/metrics` 输出 Prometheus 格式,`/health` 用于存活检查。地址可在设置界面修改,留空关闭。监听非回环地址时必须设置 `token`,请求带 `Authorization: Bearer <token>`。Grafana 接上就能看图。
 
 ## 平台支持
 

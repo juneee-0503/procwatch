@@ -1,6 +1,6 @@
 //! `defense.yml`, beside the settings file. Everything has a default, so
-//! detection works with no file; alarms and the metrics port stay off until
-//! configured, because they send data somewhere.
+//! every module works with no file. Nothing leaves the machine until a
+//! destination is set: alarms stay local, and the metrics port is loopback.
 
 use std::path::{Path, PathBuf};
 
@@ -49,13 +49,19 @@ impl Default for Thresholds {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Exporter {
     /// Address for the Prometheus endpoint; empty leaves it off.
     pub listen: String,
     /// Required on anything but loopback.
     pub token: String,
+}
+
+impl Default for Exporter {
+    fn default() -> Exporter {
+        Exporter { listen: "127.0.0.1:9187".to_string(), token: String::new() }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

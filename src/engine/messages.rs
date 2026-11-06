@@ -31,6 +31,8 @@ pub enum WorkerMsg {
     Incident(Box<crate::defense::chain::Incident>),
     /// An alarm changed state.
     Alarm(Box<crate::kernel::alarm::AlarmEvent>),
+    /// The result of something the operator asked for.
+    Report(Result<String, String>),
     /// One step of the start-up checks.
     Boot(crate::engine::selfcheck::Step),
     /// Scheduling, paging, disks, network errors, sensors.

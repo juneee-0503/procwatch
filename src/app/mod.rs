@@ -469,6 +469,8 @@ pub struct Status {
 /// Screen regions from the last frame, for mouse hit-testing.
 #[derive(Default)]
 pub struct HitAreas {
+    /// The settings button.
+    pub settings: Rect,
     pub tabs: Vec<(Rect, Tab)>,
     pub search: Rect,
     pub view_toggle: Rect,

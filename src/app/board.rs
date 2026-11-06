@@ -86,6 +86,9 @@ impl Board {
 
 impl App {
     pub(crate) fn on_alarm(&mut self, e: AlarmEvent) {
+        if e.rule == "selfcheck" {
+            return;
+        }
         if e.phase == Phase::Firing && e.priority >= Priority::Medium {
             self.add_alerts(vec![crate::detection::rules::Alert { at: Local::now(), rule: e.rule.clone(), pid: 0, name: e.source.clone(), message: e.title.clone() }]);
         }

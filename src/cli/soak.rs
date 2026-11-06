@@ -145,6 +145,7 @@ fn msg_name(m: &crate::engine::messages::WorkerMsg) -> &'static str {
         CaptureState(_) => "msg: CaptureState",
         Alarm(_) => "msg: Alarm",
         Boot(_) => "msg: Boot",
+        Report(_) => "msg: Report",
         Services(_) => "msg: Services",
         Activity(_) => "msg: Activity",
         Traffic(_) => "msg: Traffic",

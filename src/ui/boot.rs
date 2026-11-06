@@ -70,7 +70,7 @@ fn standby(frame: &mut Frame, screen: Rect) {
     let mut lines: Vec<Line> = word.into_iter().map(|l| Line::from(Span::styled(l, Style::new().fg(WARN).add_modifier(Modifier::BOLD)))).collect();
     lines.push(Line::default());
     lines.push(Line::from(muted("Self-check passed. Nothing is being monitored.")));
-    lines.push(Line::from(muted("enter choose modules  ,  settings  q  quit")));
+    lines.push(Line::from(muted("enter choose modules  F2 settings  q quit")));
     let height = (lines.len() as u16).min(screen.height);
     let area = Rect { y: screen.y + (screen.height - height) / 2, height, ..screen };
     frame.render_widget(Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center), area);

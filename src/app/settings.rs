@@ -4,6 +4,7 @@
 //! version.
 
 use super::*;
+use crate::defense::alarm::Destination;
 use crate::defense::config::DefenseConfig;
 use crate::kernel::alarm::{Input, Rule};
 
@@ -15,6 +16,14 @@ pub enum Kind {
     /// An alarm rule, by its place in the list.
     Rule(usize),
     AddRule,
+    /// A notification destination, by its place in the list.
+    Destination(usize),
+    AddDestination,
+    /// Hidden when shown, and typed afresh.
+    Secret,
+    TestAlarm,
+    /// Information only.
+    Note,
     Module(&'static str),
 }
 
@@ -83,12 +92,19 @@ impl App {
             v.push(item("Attack detection", key, label, threshold(c, key), Kind::Number));
         }
         v.push(item("Attack detection", "allow", "Never report or ban (comma separated)", c.allow.join(", "), Kind::Text));
-        if c.alarms.is_empty() {
-            v.push(item("Notifications", "none", "Destinations", "none: alarms stay on this screen".to_string(), Kind::Text));
+        let record = crate::common::paths::data_dir().map_or_else(String::new, |d| d.join("alarms.jsonl").display().to_string());
+        v.push(item("Notifications", "record", "Every alarm is recorded in", record, Kind::Note));
+        for (i, a) in c.alarms.iter().enumerate() {
+            v.push(item("Notifications", "destination", &format!("Destination {}", i + 1), a.to_text(), Kind::Destination(i)));
         }
-        for a in &c.alarms {
-            v.push(item("Notifications", "none", "Destination", a.describe(), Kind::Text));
-        }
+        v.push(item("Notifications", "add_destination", "Add a destination", "webhook URL dingtalk min high".to_string(), Kind::AddDestination));
+        v.push(item("Notifications", "test_alarm", "Send a test alarm", if c.alarms.is_empty() { "add a destination first".to_string() } else { format!("to {} destinations", c.alarms.len()) }, Kind::TestAlarm));
+        v.push(item("Metrics endpoint", "exporter_listen", "Listen address (empty turns it off)", c.exporter.listen.clone(), Kind::Text));
+        v.push(item("Metrics endpoint", "exporter_token", "Access token", if c.exporter.token.is_empty() { "not set".to_string() } else { "set".to_string() }, Kind::Secret));
+        v.push(item("Off-machine monitoring", "heartbeat_url", "Heartbeat address", c.heartbeat.url.clone(), Kind::Text));
+        v.push(item("Off-machine monitoring", "heartbeat_key", "Heartbeat key file", c.heartbeat.key_file.clone(), Kind::Text));
+        v.push(item("Off-machine monitoring", "heartbeat_interval", "Heartbeat every, seconds", c.heartbeat.interval_seconds.to_string(), Kind::Number));
+        v.push(item("Off-machine monitoring", "sync_url", "Log copy address", c.sync.url.clone(), Kind::Text));
         v.push(item("Privacy", "redact", "Hide secrets in logs and alarms", on(c.privacy.redact), Kind::Toggle));
         v.push(item("Privacy", "command_lines", "Keep whole command lines", on(c.privacy.command_lines), Kind::Toggle));
         v.push(item("Storage", "keep_days", "Keep metrics and logs, days", c.retention.days.to_string(), Kind::Number));
@@ -131,7 +147,26 @@ impl App {
             }
             _ => return,
         }
-        self.save_settings();
+        self.save_settings(&[]);
+    }
+
+    /// Try every destination, off this thread: sending can take seconds.
+    pub fn test_alarm(&mut self) {
+        use crate::defense::alarm::{send, Notice};
+        use crate::kernel::alarm::Priority;
+        let list = self.settings.alarms.clone();
+        if list.is_empty() {
+            self.set_status(StatusLevel::Info, "Add a destination first.".into());
+            return;
+        }
+        self.set_status(StatusLevel::Info, format!("Sending to {} destinations…", list.len()));
+        let tx = self.tx.clone();
+        let _ = std::thread::Builder::new().name("alarm-test".into()).spawn(move || {
+            let notice = Notice { priority: Priority::High, rule: "alarm-test".into(), title: "Test alarm from procwatch: nothing is wrong".into(), source: "test".into(), detail: String::new() };
+            let failed: Vec<String> = list.iter().filter_map(|d| send(d, &notice).err().map(|e| format!("{}: {e}", d.describe()))).collect();
+            let report = if failed.is_empty() { Ok(format!("Test alarm sent to {} destinations", list.len())) } else { Err(format!("Test alarm failed: {}", failed.join("; "))) };
+            let _ = tx.send(WorkerMsg::Report(report));
+        });
     }
 
     /// A new value for `item`, typed by the operator.
@@ -156,8 +191,23 @@ impl App {
                 self.apply_rules();
                 return Ok(());
             }
+            Kind::Destination(i) => {
+                if text.is_empty() {
+                    self.settings.alarms.remove(i);
+                } else if let Some(d) = self.settings.alarms.get_mut(i) {
+                    *d = Destination::parse(text)?;
+                }
+                self.save_settings(&["alarm"]);
+                return Ok(());
+            }
+            Kind::AddDestination => {
+                self.settings.alarms.push(Destination::parse(text)?);
+                self.save_settings(&["alarm"]);
+                return Ok(());
+            }
             _ => {}
         }
+        let mut reload: &[&str] = &[];
         match item.key {
             "interval_ms" => {
                 let n = number()?;
@@ -176,7 +226,45 @@ impl App {
                 self.settings.alarm.pause_seconds = number()?;
                 self.board.pause_seconds = self.settings.alarm.pause_seconds;
             }
-            "quiet" => self.settings.quiet_seconds = number()?,
+            "quiet" => {
+                self.settings.quiet_seconds = number()?;
+                reload = &["defense"];
+            }
+            "exporter_listen" => {
+                if !text.is_empty() {
+                    let addr: std::net::SocketAddr = text.parse().map_err(|_| format!("'{text}' isn't an address and port, such as 127.0.0.1:9187"))?;
+                    if !addr.ip().is_loopback() && self.settings.exporter.token.is_empty() {
+                        return Err("set an access token first: anywhere but loopback needs one".into());
+                    }
+                }
+                self.settings.exporter.listen = text.to_string();
+                reload = &["exporter"];
+            }
+            "exporter_token" => {
+                let on_network = self.settings.exporter.listen.parse::<std::net::SocketAddr>().is_ok_and(|a| !a.ip().is_loopback());
+                if text.is_empty() && on_network {
+                    return Err("this address isn't loopback, so it needs a token".into());
+                }
+                self.settings.exporter.token = text.to_string();
+                reload = &["exporter"];
+            }
+            "heartbeat_url" | "sync_url" => {
+                if !text.is_empty() && !text.starts_with("http://") && !text.starts_with("https://") {
+                    return Err("an http or https address".into());
+                }
+                if item.key == "sync_url" {
+                    self.settings.sync.url = text.to_string();
+                } else {
+                    self.settings.heartbeat.url = text.to_string();
+                }
+            }
+            "heartbeat_key" => {
+                if !text.is_empty() {
+                    crate::defense::heartbeat::read_key(text)?;
+                }
+                self.settings.heartbeat.key_file = text.to_string();
+            }
+            "heartbeat_interval" => self.settings.heartbeat.interval_seconds = number()?.max(1),
             "maintenance" => {
                 let n = number()?;
                 if n == 0 {
@@ -190,13 +278,23 @@ impl App {
                 let list: Vec<String> = text.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect();
                 list.iter().try_for_each(|a| crate::defense::filter::Cidr::parse(a).map(|_| ()))?;
                 self.settings.allow = list;
+                reload = &["defense"];
             }
-            "keep_days" => self.settings.retention.days = number()?.max(1),
-            "max_mb" => self.settings.retention.max_mb = number()?.max(16),
-            key if THRESHOLDS.iter().any(|(k, _)| *k == key) => set_threshold(&mut self.settings, key, number()?)?,
+            "keep_days" => {
+                self.settings.retention.days = number()?.max(1);
+                reload = &["history"];
+            }
+            "max_mb" => {
+                self.settings.retention.max_mb = number()?.max(16);
+                reload = &["history"];
+            }
+            key if THRESHOLDS.iter().any(|(k, _)| *k == key) => {
+                set_threshold(&mut self.settings, key, number()?)?;
+                reload = &["defense"];
+            }
             _ => return Err("this one can't be changed here".into()),
         }
-        self.save_settings();
+        self.save_settings(reload);
         Ok(())
     }
 
@@ -215,10 +313,17 @@ impl App {
         }
     }
 
-    fn save_settings(&mut self) {
+    /// Save, and start again the modules the change belongs to, so it takes
+    /// effect now.
+    fn save_settings(&mut self, reload: &[&str]) {
         let Some(path) = DefenseConfig::path() else { return };
         match self.settings.save(&path) {
-            Ok(()) => self.set_status(StatusLevel::Success, "Saved. Detection settings apply at the next start.".into()),
+            Ok(()) => {
+                if let Some(k) = &self.kernel {
+                    reload.iter().for_each(|m| k.reload(m));
+                }
+                self.set_status(StatusLevel::Success, "Saved and applied.".into());
+            }
             Err(e) => self.set_status(StatusLevel::Error, format!("Couldn't save: {e}")),
         }
     }

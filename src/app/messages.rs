@@ -19,6 +19,8 @@ impl App {
             WorkerMsg::Services(s) => self.services = Some(s),
             WorkerMsg::Alarm(e) => self.on_alarm(*e),
             WorkerMsg::Boot(step) => self.on_boot_step(step),
+            WorkerMsg::Report(Ok(text)) => self.set_status(StatusLevel::Success, text),
+            WorkerMsg::Report(Err(text)) => self.set_status(StatusLevel::Error, text),
             WorkerMsg::Threat(t) => self.on_threat(*t),
             WorkerMsg::Incident(i) => self.on_incident(*i),
             WorkerMsg::Inspected { pid, start_time, info } => {

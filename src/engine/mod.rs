@@ -34,19 +34,25 @@ pub fn registry(ctl: Arc<SamplerCtl>, watch: Vec<String>) -> Registry {
     r.add("performance", "scheduling, memory, disks, sensors, services", || Box::new(PerformanceModule::new()));
     r.add("gpu", "system GPU load", || Box::<GpuModule>::default());
     r.add("files", "file changes in watched folders", move || Box::new(FilesModule::new(watch.clone())));
-    match crate::defense::config::DefenseConfig::load() {
-        Ok(c) => {
-            let (alarms, exporter, watch) = (c.alarms.clone(), c.exporter.clone(), c);
-            r.add("defense", "attacks on this machine: logins, web, floods, compromise", move || Box::new(crate::defense::module::DefenseModule::new(watch.clone())));
-            r.add("alarm", "delivers alarms to configured destinations", move || Box::new(crate::defense::alarm::AlarmModule::new(alarms.clone())));
-            r.add("exporter", "Prometheus metrics endpoint", move || Box::new(ExporterModule::new(exporter.listen.clone(), exporter.token.clone())));
-        }
-        Err(e) => r.add("defense", "attacks on this machine: logins, web, floods, compromise", move || Box::new(crate::defense::module::DefenseModule::unusable(e.clone()))),
-    }
+    // Read when each starts, not once: a reload is how new settings apply.
+    use crate::defense::config::DefenseConfig;
+    r.add("defense", "attacks on this machine: logins, web, floods, compromise", || {
+        Box::new(match DefenseConfig::load() {
+            Ok(c) => crate::defense::module::DefenseModule::new(c),
+            Err(e) => crate::defense::module::DefenseModule::unusable(e),
+        })
+    });
+    r.add("alarm", "alarm record and notifications", || Box::new(crate::defense::alarm::AlarmModule::new(DefenseConfig::load().unwrap_or_default().alarms)));
+    r.add("exporter", "Prometheus metrics endpoint", || {
+        let e = DefenseConfig::load().unwrap_or_default().exporter;
+        Box::new(ExporterModule::new(e.listen, e.token))
+    });
     let settings = crate::defense::config::DefenseConfig::load().unwrap_or_default();
     crate::common::redact::configure(settings.privacy.redact, settings.privacy.command_lines);
-    let keep = settings.retention;
-    r.add("history", "keeps metrics on disk", move || Box::new(HistoryModule::new(history::default_dir(), keep.days, keep.max_mb.saturating_mul(1 << 19))));
+    r.add("history", "keeps metrics on disk", || {
+        let keep = DefenseConfig::load().unwrap_or_default().retention;
+        Box::new(HistoryModule::new(history::default_dir(), keep.days, keep.max_mb.saturating_mul(1 << 19)))
+    });
     r.add("persistence", "autostart entries, and changes to them", || Box::new(Feature("autostart scanning")));
     r.add("timeline", "every source merged into one timeline", || Box::new(Feature("timeline")));
     r.add("detection", "host, Sigma and content rules", || Box::new(Feature("detection rules")));
