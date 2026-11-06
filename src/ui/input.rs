@@ -4,7 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::layout::Position;
 
 use crate::app::boot::BootPhase;
-use crate::app::{self, palette, App, Cmd, Mode, OptionItem, StatusLevel, Tab, ViewMode};
+use crate::app::{self, App, Cmd, Mode, OptionItem, StatusLevel, Tab, ViewMode};
 
 /// Whether keys here are text being typed, to be kept exactly as they are.
 fn typing(mode: &Mode) -> bool {
@@ -171,7 +171,7 @@ pub fn handle_key(app: &mut App, mut key: KeyEvent) {
         }
         Mode::Workspace => workspace_key(app, key),
         Mode::Palette { input, cursor } => {
-            let list = palette::matches(&input);
+            let list = app.palette_entries(&input);
             match key.code {
                 KeyCode::Esc => app.mode = Mode::Normal,
                 KeyCode::Down => app.mode = Mode::Palette { cursor: (cursor + 1).min(list.len().saturating_sub(1)), input },
@@ -297,6 +297,15 @@ fn menu_anchor(app: &App) -> (u16, u16) {
 fn normal_key(app: &mut App, key: KeyEvent) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+
+    // Keys that belong to a module that isn't loaded do nothing but say so.
+    if let (KeyCode::Char(c), false) = (key.code, ctrl) {
+        if let Some(module) = app::modules::key_needs(app.tab, c.encode_utf8(&mut [0; 4])) {
+            if !app.require(module) {
+                return;
+            }
+        }
+    }
 
     // The Performance page scrolls instead of selecting.
     if app.tab == Tab::Performance && matches!(key.code, KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End | KeyCode::Char('j' | 'k' | 'g' | 'G')) {
@@ -1223,6 +1232,36 @@ mod key_tests {
         assert!(matches!(app.mode, Mode::Search));
         press(&mut app, KeyCode::Char('，'));
         assert_eq!(app.query, "，", "in a text field it stays what was typed");
+    }
+
+    #[test]
+    fn keys_of_a_module_that_is_not_loaded_do_nothing() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let ctl = std::sync::Arc::new(crate::common::pacing::SamplerCtl { interval_ms: 1500.into(), paused: false.into(), refresh_now: false.into(), snapshots_queued: Default::default() });
+        let kernel = crate::engine::boot(tx, ctl, Vec::new());
+        kernel.activate(&["process".to_string(), "network".to_string(), "activity".to_string()]);
+        let mut app = app::tests_support::app();
+        app.kernel = Some(kernel.clone());
+        let press = |app: &mut App, c| handle_key(app, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        app.tab = Tab::Processes;
+        for c in ['m', 'l', 'T'] {
+            press(&mut app, c);
+            assert!(matches!(app.mode, Mode::Normal), "{c}");
+            assert_eq!(app.tab, Tab::Processes, "{c}");
+            assert!(app.status.as_ref().is_some_and(|s| s.text.contains("isn't loaded")), "{c}");
+        }
+        assert!(!app.key_on("m") && !app.key_on("l") && app.key_on("f"));
+        app.tab = Tab::Activity;
+        assert!(!app.key_on("e") && app.key_on("c"));
+        app.tab = Tab::Performance;
+        assert!(app.key_on("m"), "here it switches view and needs no case");
+        app.tab = Tab::Processes;
+        let names: Vec<&str> = app.palette_entries("").iter().map(|e| e.label).collect();
+        assert!(names.iter().any(|n| n.starts_with("Go to Network")));
+        for gone in ["Go to Case", "Go to Trace", "Go to Timeline", "New case", "Investigation graph of the selected item", "Deep trace the selected process (event-driven)", "Trace behavior of the selected process (sampled)", "Save captured activity to the case", "Rescan autostart entries"] {
+            assert!(!names.contains(&gone), "{gone} is still offered");
+        }
+        kernel.shutdown();
     }
 
     /// docs/keys.md lists every key: one added here must be added there.

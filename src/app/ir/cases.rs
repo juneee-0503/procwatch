@@ -7,8 +7,7 @@ impl App {
 
     /// The open case, creating one in the working directory if needed.
     pub(crate) fn ensure_case(&mut self) -> Option<&mut Case> {
-        if !self.tab_on(Tab::Case) {
-            self.set_status(StatusLevel::Info, "The case module isn't loaded. Press M to load it.".into());
+        if !self.require("case") {
             return None;
         }
         if self.ir.case.is_none() {
@@ -410,6 +409,9 @@ impl App {
 
     /// Open the finding dialog for whatever is selected on this page.
     pub fn mark_finding(&mut self) {
+        if !self.require("case") {
+            return;
+        }
         let (source, title, detail): (&str, String, String) = match self.tab {
             Tab::Processes => {
                 let Some(pid) = self.selected_pid() else { return };
@@ -452,6 +454,9 @@ impl App {
     }
 
     pub fn finding_from_report(&mut self) {
+        if !self.require("case") {
+            return;
+        }
         let Some(Ok(r)) = self.ir.file_report.as_ref().map(|f| &f.result) else { return };
         let detail = format!(
             "{} · {} · sha256 {} · {}",
@@ -564,6 +569,9 @@ impl App {
     // ── quarantine ─────────────────────────────────────────────────────
 
     pub fn request_quarantine(&mut self, path: String) {
+        if !self.require("case") {
+            return;
+        }
         if self.replaying() {
             self.set_status(StatusLevel::Info, "Not available while replaying a recording — this would act on the live system".into());
             return;

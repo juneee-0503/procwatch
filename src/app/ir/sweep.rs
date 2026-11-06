@@ -137,6 +137,9 @@ impl App {
 
     /// Record every sweep hit as a high-severity finding.
     pub fn sweep_to_findings(&mut self) {
+        if !self.require("case") {
+            return;
+        }
         let Some(hits) = self.ir.sweep.as_ref().map(|s| s.hits.clone()) else { return };
         if hits.is_empty() {
             return;

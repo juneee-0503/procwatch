@@ -507,6 +507,9 @@ impl App {
 
     /// Open the workspace for the selected process (any page).
     pub fn open_workspace(&mut self) {
+        if !self.require("process") {
+            return;
+        }
         let key = match self.selected_entity() {
             Some(Entity::Process(k)) => Some(k),
             _ => self.detail_pid().map(|p| self.proc_key(p)),

@@ -219,6 +219,9 @@ impl App {
 
     /// The captured operations, as evidence in the case.
     pub fn save_activity(&mut self) {
+        if !self.require("case") {
+            return;
+        }
         if self.ir.activity.is_empty() {
             self.set_status(StatusLevel::Info, "Nothing captured to save".into());
             return;

@@ -395,6 +395,9 @@ impl App {
 
     /// Bookmark the selected timeline event (asks for the phase).
     pub fn request_bookmark(&mut self) {
+        if !self.require("case") {
+            return;
+        }
         let Some(e) = self.visible_timeline().get(self.ir.tl_selected).map(|i| &self.ir.timeline[*i]) else { return };
         let summary = format!("{} {} {} {}", e.source, e.kind, e.name, e.detail).chars().take(160).collect();
         let purpose = InputPurpose::Bookmark { event: short_id(e.id), time: e.time.to_rfc3339(), summary };

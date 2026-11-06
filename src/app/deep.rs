@@ -233,6 +233,9 @@ impl App {
     }
 
     pub fn toggle_deep(&mut self, pid: u32) {
+        if !self.require("trace") {
+            return;
+        }
         if self.deep_enrolled(pid) {
             self.deep_stop(pid);
         } else {

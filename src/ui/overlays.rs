@@ -367,7 +367,7 @@ pub fn launch_confirm(frame: &mut Frame, app: &mut App, screen: Rect) {
 /// Command palette.
 pub fn palette(frame: &mut Frame, app: &mut App, screen: Rect) {
     let crate::app::Mode::Palette { input, cursor } = &app.mode else { return };
-    let list = crate::app::palette::matches(input);
+    let list = app.palette_entries(input);
     let h = (list.len() as u16 + 4).clamp(6, screen.height.saturating_sub(6));
     let rect = Rect { y: screen.y + 3, ..centered(screen, 80, h) };
     frame.render_widget(Clear, rect);

@@ -299,6 +299,9 @@ impl App {
 
     /// Jump to `pid` on the Processes page, clearing filters that hide it.
     pub fn focus_pid(&mut self, pid: u32) {
+        if !self.require("process") {
+            return;
+        }
         if !self.tree.nodes.contains_key(&pid) {
             self.set_status(StatusLevel::Error, format!("Process {pid} is no longer running"));
             return;

@@ -328,6 +328,9 @@ impl App {
     }
 
     pub fn open_graph(&mut self) {
+        if !self.require("timeline") {
+            return;
+        }
         if self.ir.timeline_dirty {
             self.rebuild_timeline();
         }

@@ -355,6 +355,9 @@ impl App {
     /// Scan the executables of every running process with the content
     /// rules (files on disk only).
     pub fn scan_executables(&mut self) {
+        if !self.require("detection") {
+            return;
+        }
         if self.replaying() {
             self.set_status(StatusLevel::Info, "Not available while replaying a recording — this would act on the live system".into());
             return;
@@ -540,6 +543,9 @@ impl App {
     }
 
     pub fn detection_to_finding(&mut self) {
+        if !self.require("case") {
+            return;
+        }
         let Some(d) = self.selected_detection().cloned() else { return };
         let sev = match d.severity {
             Severity::Critical | Severity::High => "high",

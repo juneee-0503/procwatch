@@ -352,7 +352,8 @@ fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let mut spans: Vec<Span> = lead.into_iter().collect();
-    for (k, d) in items {
+    // A hint is a promise: nothing is offered that wouldn't work.
+    for (k, d) in items.into_iter().filter(|(k, _)| app.key_on(k)) {
         spans.push(Span::styled(format!(" {k}"), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)));
         spans.push(Span::styled(format!(" {d} "), Style::new().fg(TEXT_DIM)));
     }

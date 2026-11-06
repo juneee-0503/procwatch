@@ -47,9 +47,10 @@ impl App {
         ];
         let is_tagged = single && self.tagged.contains(&targets[0]);
 
+        let (trace_on, case_on) = (self.module_on("trace"), self.module_on("case"));
         let mut items = vec![
             MenuItem::new("Show details", "i", Cmd::Details).enabled(single),
-            MenuItem::new("Trace behavior", "T", Cmd::Trace).enabled(single),
+            MenuItem::new("Trace behavior", "T", Cmd::Trace).enabled(single && trace_on),
             MenuItem::separator(),
             MenuItem::new("End process", "del", Cmd::End),
             MenuItem::new("Force quit", "X", Cmd::ForceQuit),
@@ -72,13 +73,13 @@ impl App {
                 "▸",
                 Cmd::Sub(vec![
                     MenuItem::new("Investigation workspace", "W", Cmd::Workspace),
-                    MenuItem::new(if info.as_ref().is_some_and(|i| self.deep_enrolled(i.pid)) { "Stop deep trace" } else { "Deep trace (event-driven)" }, "D", Cmd::DeepTrace),
+                    MenuItem::new(if info.as_ref().is_some_and(|i| self.deep_enrolled(i.pid)) { "Stop deep trace" } else { "Deep trace (event-driven)" }, "D", Cmd::DeepTrace).enabled(trace_on),
                     MenuItem::new("Analyze executable", "", Cmd::AnalyzeExe).enabled(info.as_ref().is_some_and(|i| i.exe_path.is_some())),
-                    MenuItem::new("Collect evidence", "", Cmd::CollectEvidence),
+                    MenuItem::new("Collect evidence", "", Cmd::CollectEvidence).enabled(case_on),
                     MenuItem::new("Collect evidence + copy executable", "", Cmd::CollectEvidenceWithExe)
-                        .enabled(info.as_ref().is_some_and(|i| i.exe_path.is_some())),
-                    MenuItem::new("Record as finding", "m", Cmd::MarkFinding),
-                    MenuItem::new("Quarantine executable…", "", Cmd::QuarantineExe).enabled(info.as_ref().is_some_and(|i| i.exe_path.is_some())),
+                        .enabled(case_on && info.as_ref().is_some_and(|i| i.exe_path.is_some())),
+                    MenuItem::new("Record as finding", "m", Cmd::MarkFinding).enabled(case_on),
+                    MenuItem::new("Quarantine executable…", "", Cmd::QuarantineExe).enabled(case_on && info.as_ref().is_some_and(|i| i.exe_path.is_some())),
                 ]),
             )
             .enabled(single),

@@ -6,8 +6,7 @@ impl App {
     // ── behavior trace ─────────────────────────────────────────────────
 
     pub fn start_trace(&mut self, pid: u32) {
-        if !self.tab_on(Tab::Trace) {
-            self.set_status(StatusLevel::Info, "The trace module isn't loaded. Press M to load it.".into());
+        if !self.require("trace") {
             return;
         }
         if self.replaying() {

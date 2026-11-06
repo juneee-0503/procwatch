@@ -42,6 +42,7 @@ const ORDER_HOLD: Duration = Duration::from_secs(4);
 mod alerts;
 pub mod board;
 pub mod boot;
+pub mod modules;
 pub mod settings;
 pub mod columns;
 pub mod config;
@@ -902,6 +903,9 @@ impl App {
     // ── find (file / port) ─────────────────────────────────────────────
 
     pub fn start_find(&mut self, input: &str) {
+        if !self.require("process") {
+            return;
+        }
         let q = input.trim().trim_start_matches(':').to_string();
         if q.is_empty() {
             return;
