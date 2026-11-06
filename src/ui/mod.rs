@@ -32,7 +32,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Mode, StatusLevel, Tab};
 use crate::process::human_bytes;
-use widgets::{muted, ratio, ACCENT, BAD, OK, TEXT_DIM, WARN};
+use widgets::{muted, ACCENT, BAD, OK, TEXT_DIM, WARN};
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let size = frame.area();
@@ -55,10 +55,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // Room for the alarm lamp and its messages when the screen allows.
     let tall = size.height >= 20 && size.width >= 70;
     let [title, messages, body, hints] = Layout::vertical([Constraint::Length(1), Constraint::Length(if tall { 2 } else { 0 }), Constraint::Min(5), Constraint::Length(1)]).areas(size);
-    draw_title(frame, app, if tall { Rect { width: title.width.saturating_sub(19), ..title } } else { title });
+    let host_shown = draw_title(frame, app, if tall { Rect { width: title.width.saturating_sub(19), ..title } } else { title });
     if tall {
         const LAMP: u16 = 18;
-        boot::banner(frame, app, Rect { width: messages.width.saturating_sub(LAMP + 1), ..messages });
+        let mut room = messages.width.saturating_sub(LAMP + 1);
+        // The tabs took the row above: it goes beside the lamp instead.
+        if !host_shown {
+            let host = host_span();
+            let width = (host.width() as u16 + 1).min(room);
+            room -= width;
+            frame.render_widget(Paragraph::new(host), Rect { x: messages.x + room, y: messages.y, width, height: 1 });
+        }
+        boot::banner(frame, app, Rect { width: room, ..messages });
     }
 
     app.hit.menus.clear();
@@ -142,7 +150,8 @@ fn draw_overlays(frame: &mut Frame, app: &mut App, size: Rect, body: Rect) {
     }
 }
 
-fn draw_title(frame: &mut Frame, app: &mut App, area: Rect) {
+/// True if the host name fitted on this row.
+fn draw_title(frame: &mut Frame, app: &mut App, area: Rect) -> bool {
     let mut spans = vec![if app.ir.replay.is_some() {
         Span::styled(" REPLAY ", Style::new().fg(Color::Black).bg(WARN).add_modifier(Modifier::BOLD))
     } else {
@@ -183,45 +192,41 @@ fn draw_title(frame: &mut Frame, app: &mut App, area: Rect) {
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 
-    // Live summary on the right (a replay has no live numbers).
+    // On the right: which machine this is, and anything wrong with the view.
     if app.ir.replay.is_some() {
         let line = Line::from(vec![Span::styled("recorded session · live system not sampled ", Style::new().fg(WARN))]);
         let w = line.width() as u16;
         if w + 1 < area.width.saturating_sub(x - area.x) {
             frame.render_widget(Paragraph::new(line), Rect { x: area.right() - w, width: w, ..area });
         }
-        return;
+        return true;
     }
-    // Without the process module these figures don't exist; zeros would lie.
-    if !app.module_on("process") {
-        return;
-    }
-    let s = &app.stats;
-    let level = |r: f64| if r >= 0.85 { BAD } else if r >= 0.6 { WARN } else { OK };
-    let mem = ratio(s.mem_used, s.mem_total);
-    let mut right = vec![
-        muted("CPU "),
-        Span::styled(format!("{:>3.0}%", s.cpu_pct), Style::new().fg(level(s.cpu_pct as f64 / 100.0))),
-        muted("   Memory "),
-        Span::styled(format!("{} / {}", human_bytes(s.mem_used), human_bytes(s.mem_total)), Style::new().fg(level(mem))),
-        Span::raw("   "),
-    ];
+    let mut right = Vec::new();
     if app.ctl.paused.load(Ordering::Relaxed) {
         right.push(Span::styled(" PAUSED ", Style::new().fg(Color::Black).bg(WARN)));
-    } else if app.is_stale() {
+        right.push(Span::raw("  "));
+    } else if app.module_on("process") && app.is_stale() {
         right.push(Span::styled("● not updating", Style::new().fg(BAD)));
-    } else if !app.loaded {
-        right.push(muted("○ starting"));
-    } else {
-        right.push(Span::styled("●", Style::new().fg(OK)));
-        right.push(muted(format!(" {:.1}s", app.ctl.interval().as_secs_f64())));
+        right.push(Span::raw("  "));
     }
-    right.push(Span::raw(" "));
+    let host = host_span();
+    let free = area.width.saturating_sub(x - area.x);
+    let wanted = right.iter().map(Span::width).sum::<usize>() + host.width() + 2;
+    let on_this_row = wanted < free as usize;
+    if on_this_row {
+        right.push(host);
+        right.push(Span::raw(" "));
+    }
     let line = Line::from(right);
     let w = line.width() as u16;
-    if w + 1 < area.width.saturating_sub(x - area.x) {
+    if w > 0 && w + 1 < free {
         frame.render_widget(Paragraph::new(line), Rect { x: area.right() - w, width: w, ..area });
     }
+    on_this_row
+}
+
+fn host_span() -> Span<'static> {
+    Span::styled(crate::kernel::model::identity().host.to_string(), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))
 }
 
 /// Context hints on the left, latest status message on the right.
