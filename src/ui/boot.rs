@@ -116,8 +116,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 }
 
-/// Flash rates of IEC 60601-1-8: high about 2 Hz, medium about 0.6 Hz, low
-/// steady. Colours likewise: red, yellow and cyan.
+/// Mindray's lamp: red at 1.4 to 2.8 Hz, yellow at 0.4 to 0.8 Hz, both on for
+/// 20 to 60% of the time, and steady cyan. (Some older models use yellow for
+/// low priority.)
 fn lamp_on(p: Priority, ms: u128) -> bool {
     match p {
         Priority::High => ms % 500 < 250,
@@ -163,8 +164,15 @@ pub fn banner(frame: &mut Frame, app: &App, rect: Rect) {
         .iter()
         .take(rect.height as usize)
         .map(|e| {
-            let style = if e.phase == Phase::Firing { Style::new().fg(color(e.priority)) } else { Style::new().fg(MUTED) };
-            Line::from(Span::styled(truncate(&format!(" {} {}", e.priority.label().to_uppercase(), e.title), rect.width as usize), style))
+            // As on the monitor: asterisks for the priority, then a message
+            // box in the priority's colour, white on red, black on the rest.
+            let (stars, text) = match e.priority {
+                Priority::High => ("***", Color::White),
+                Priority::Medium => ("**", Color::Black),
+                Priority::Low => ("*", Color::Black),
+            };
+            let style = if e.phase == Phase::Firing { Style::new().fg(text).bg(color(e.priority)) } else { Style::new().fg(MUTED) };
+            Line::from(Span::styled(truncate(&format!(" {stars} {} ", e.title), rect.width as usize), style))
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), rect);
@@ -206,6 +214,14 @@ mod tests {
         assert!((1.4..=2.8).contains(&transitions(Priority::High)));
         assert!((0.4..=0.8).contains(&transitions(Priority::Medium)));
         assert_eq!(transitions(Priority::Low), 0.0, "steady");
+    }
+
+    #[test]
+    fn the_lamp_stays_on_for_the_specified_share_of_each_flash() {
+        let duty = |p| (0..10_000u128).filter(|ms| lamp_on(p, *ms)).count() as f64 / 10_000.0;
+        assert!((0.2..=0.6).contains(&duty(Priority::High)));
+        assert!((0.2..=0.6).contains(&duty(Priority::Medium)));
+        assert_eq!(duty(Priority::Low), 1.0);
     }
 
     #[test]

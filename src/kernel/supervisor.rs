@@ -896,8 +896,9 @@ mod tests {
         let mut r = Registry::default();
         r.add("failing", "x", || Box::new(Failing));
         let k = r.start(Bus::default(), KernelConfig::default());
-        wait_for("failure", || k.status()[0].restarts >= 1);
-        assert!(k.status()[0].last_error.as_deref().is_some_and(|e| e.contains("in a row")));
+        // The count rises just before the reason is written.
+        wait_for("failure", || k.status()[0].last_error.as_deref().is_some_and(|e| e.contains("in a row")));
+        assert!(k.status()[0].restarts >= 1);
         k.shutdown();
     }
 

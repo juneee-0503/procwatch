@@ -74,7 +74,7 @@ impl Board {
         }
         let tone = tone_for(worst);
         let due = match self.last_tone {
-            Some((t, at)) if t == tone => tone.repeat().is_some_and(|every| now.duration_since(at) >= every),
+            Some((t, at)) if t == tone => now.duration_since(at) >= tone.period(),
             _ => true,
         };
         due.then(|| {
@@ -170,21 +170,23 @@ mod tests {
         b.apply(ev("a", Priority::High, Phase::Firing));
         assert_eq!(b.due_tone(t), Some(Tone::High));
         assert_eq!(b.due_tone(t + Duration::from_secs(9)), None);
-        assert_eq!(b.due_tone(t + Duration::from_secs(10)), Some(Tone::High));
+        let next = t + Tone::High.period();
+        assert_eq!(b.due_tone(next), Some(Tone::High));
         b.paused_until = Some(Instant::now() + Duration::from_secs(600));
-        assert_eq!(b.due_tone(t + Duration::from_secs(30)), None);
+        assert_eq!(b.due_tone(next + Duration::from_secs(30)), None);
         b.paused_until = None;
         b.apply(ev("a", Priority::High, Phase::Acknowledged));
-        assert_eq!(b.due_tone(t + Duration::from_secs(60)), None, "acknowledged is quiet");
+        assert_eq!(b.due_tone(next + Duration::from_secs(60)), None, "acknowledged is quiet");
     }
 
     #[test]
-    fn a_low_alarm_sounds_once() {
+    fn a_low_alarm_repeats_slowly() {
         let mut b = Board::default();
         let t = Instant::now();
         b.apply(ev("a", Priority::Low, Phase::Firing));
         assert_eq!(b.due_tone(t), Some(Tone::Low));
-        assert_eq!(b.due_tone(t + Duration::from_secs(3600)), None);
+        assert_eq!(b.due_tone(t + Duration::from_secs(19)), None);
+        assert_eq!(b.due_tone(t + Tone::Low.period()), Some(Tone::Low));
     }
 
     #[test]
