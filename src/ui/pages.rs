@@ -11,11 +11,16 @@ use ratatui::{
 use super::details::conn_state_style;
 use super::widgets::*;
 use crate::app::{App, Mode};
-use crate::filter::split_endpoint;
+use crate::common::filter::split_endpoint;
 use crate::network::ConnState;
 use crate::process::{human_bytes, human_duration, human_rate};
 
 pub fn performance(frame: &mut Frame, app: &mut App, area: Rect) {
+    match app.perf_view {
+        1 => return system_metrics(frame, app, area),
+        2 => return services_view(frame, app, area),
+        _ => {}
+    }
     let h = &app.sys_hist;
     let s = &app.stats;
     let [top, bottom] = Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)]).areas(area);
@@ -97,6 +102,155 @@ pub fn performance(frame: &mut Frame, app: &mut App, area: Rect) {
         1024.0,
         human_rate,
     );
+}
+
+/// Something measured, with a colour for how worrying it is.
+fn stat(label: &str, value: Option<String>, level: Style) -> Line<'static> {
+    let shown = match value {
+        Some(v) => Span::styled(v, level),
+        None => muted("n/a"),
+    };
+    Line::from(vec![muted(format!("  {label:<26}")), shown])
+}
+
+fn per_sec(v: Option<f64>) -> Option<String> {
+    v.map(|v| if v >= 10_000.0 { format!("{:.1}k/s", v / 1000.0) } else { format!("{v:.0}/s") })
+}
+
+fn over(v: Option<f64>, warn: f64, bad: f64) -> Style {
+    match v {
+        Some(v) if v >= bad => Style::new().fg(BAD),
+        Some(v) if v >= warn => Style::new().fg(WARN),
+        _ => Style::new(),
+    }
+}
+
+/// Scheduling, memory, disks, network, sensors: as much as this system tells.
+fn system_metrics(frame: &mut Frame, app: &mut App, area: Rect) {
+    let Some(m) = app.metrics.as_ref() else {
+        frame.render_widget(Paragraph::new(muted(" Collecting… (a few seconds on the first sample)")), area);
+        return;
+    };
+    let s = &app.stats;
+    let cores = s.per_core.len().max(1) as f64;
+    let head = |t: &str| Line::from(Span::styled(format!(" {t}"), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)));
+    let plain = Style::new();
+    let mem_low = m.available_memory.zip(m.total_memory).map(|(a, t)| 100.0 - a as f64 * 100.0 / t.max(1) as f64);
+    let swap_pct = m.swap_used.zip(m.swap_total).filter(|(_, t)| *t > 0).map(|(u, t)| u as f64 * 100.0 / t as f64);
+    let conns = app.connections.values().flatten().count();
+    let established = app.connections.values().flatten().filter(|c| c.state == ConnState::Established).count();
+    let listening = app.connections.values().flatten().filter(|c| c.state == ConnState::Listen).count();
+    let closing = app.connections.values().flatten().filter(|c| c.state == ConnState::Closing).count();
+    let pressure = |v: Option<f32>| v.map(|p| format!("{p:.1}%"));
+    let mut left = vec![
+        head("CPU and scheduling"),
+        stat("Load (1 / 5 / 15 min)", Some(format!("{:.2}  {:.2}  {:.2}", s.load_avg[0], s.load_avg[1], s.load_avg[2])), over(Some(s.load_avg[0]), cores, cores * 2.0)),
+        stat("Load per core", Some(format!("{:.2}", s.load_avg[0] / cores)), over(Some(s.load_avg[0] / cores), 1.0, 2.0)),
+        stat("Run queue", m.run_queue.map(|v| format!("{v:.0}")), over(m.run_queue, cores, cores * 2.0)),
+        stat("Blocked on I/O", m.blocked.map(|v| format!("{v:.0}")), over(m.blocked, 1.0, cores)),
+        stat("Context switches", per_sec(m.context_switches_per_sec), plain),
+        stat("Interrupts", per_sec(m.interrupts_per_sec), plain),
+        stat("CPU pressure (10 s)", pressure(m.cpu_pressure), over(m.cpu_pressure.map(f64::from), 10.0, 40.0)),
+        Line::from(""),
+        head("Memory"),
+        stat("Available", m.available_memory.zip(m.total_memory).map(|(a, t)| format!("{} of {}", human_bytes(a), human_bytes(t))), over(mem_low, 85.0, 95.0)),
+        stat("Swap used", m.swap_used.zip(m.swap_total).map(|(u, t)| format!("{} of {}", human_bytes(u), human_bytes(t))), over(swap_pct, 50.0, 90.0)),
+        stat("Swap in / out (pages)", m.swap_in_pages_per_sec.zip(m.swap_out_pages_per_sec).map(|(i, o)| format!("{i:.0}/s  {o:.0}/s")), over(m.swap_out_pages_per_sec, 1.0, 100.0)),
+        stat("Page faults", per_sec(m.page_faults_per_sec), plain),
+        stat("Major faults", per_sec(m.major_faults_per_sec), over(m.major_faults_per_sec, 10.0, 100.0)),
+        stat("Memory pressure (10 s)", pressure(m.memory_pressure), over(m.memory_pressure.map(f64::from), 5.0, 20.0)),
+        Line::from(""),
+        head("Connections"),
+        stat("Total", Some(conns.to_string()), plain),
+        stat("Established", Some(established.to_string()), plain),
+        stat("Listening", Some(listening.to_string()), plain),
+        stat("Closing", Some(closing.to_string()), over(Some(closing as f64), 500.0, 5000.0)),
+        stat("TCP retransmits", per_sec(m.retransmits_per_sec), over(m.retransmits_per_sec, 10.0, 100.0)),
+    ];
+    let mut right = vec![head("Disks"), Line::from(muted(format!("  {:<14}{:>10}{:>10}{:>7}{:>7}{:>6}{:>8}", "", "read", "write", "IOPS", "queue", "busy", "await")))];
+    let opt = |v: Option<f64>, d: usize| v.map(|v| format!("{v:.d$}")).unwrap_or_else(|| "n/a".into());
+    for d in &m.disks {
+        let style = over(d.busy_pct, 70.0, 95.0).patch(over(d.queue_depth, 4.0, 32.0));
+        right.push(Line::from(Span::styled(
+            format!("  {:<14}{:>10}{:>10}{:>7.0}{:>7}{:>6}{:>8}", truncate(&d.name, 13), human_rate(d.read_rate), human_rate(d.write_rate), d.iops, opt(d.queue_depth, 1), opt(d.busy_pct, 0), opt(d.await_ms, 1)),
+            style,
+        )));
+    }
+    right.push(stat("I/O pressure (10 s)", pressure(m.io_pressure), over(m.io_pressure.map(f64::from), 10.0, 40.0)));
+    right.push(Line::from(""));
+    right.push(head("Network"));
+    right.push(Line::from(muted(format!("  {:<14}{:>10}{:>10}{:>9}{:>9}", "", "in", "out", "errors", "drops"))));
+    for n in m.nics.iter().filter(|n| n.rx_rate + n.tx_rate > 0.0 || n.errors_total + n.drops_total > 0) {
+        let style = if n.errors_per_sec + n.drops_per_sec > 0.0 { Style::new().fg(BAD) } else { plain };
+        right.push(Line::from(Span::styled(format!("  {:<14}{:>10}{:>10}{:>9}{:>9}", truncate(&n.name, 13), human_rate(n.rx_rate), human_rate(n.tx_rate), n.errors_total, n.drops_total), style)));
+    }
+    right.push(Line::from(""));
+    right.push(head("Temperature and power"));
+    for t in m.temperatures.iter().take(10) {
+        right.push(stat(&t.label, Some(format!("{:.0} °C", t.value)), over(Some(t.value), 80.0, 95.0)));
+    }
+    for p in &m.power {
+        right.push(stat(&p.label, Some(format!("{:.1} W", p.value)), plain));
+    }
+    if m.temperatures.is_empty() && m.power.is_empty() {
+        right.push(Line::from(muted("  n/a")));
+    }
+    if !m.notes.is_empty() {
+        left.push(Line::from(""));
+        left.push(head("Not available here"));
+        left.extend(m.notes.iter().map(|n| Line::from(muted(format!("  {n}")))));
+    }
+    let (rows, scroll) = (left.len().max(right.len()), app.perf_scroll);
+    app.perf_scroll = scroll.min(rows.saturating_sub(1));
+    let y = app.perf_scroll as u16;
+    if area.width >= 110 {
+        let [l, r] = Layout::horizontal([Constraint::Percentage(42), Constraint::Percentage(58)]).areas(area);
+        frame.render_widget(Paragraph::new(left).scroll((y, 0)), l);
+        frame.render_widget(Paragraph::new(right).scroll((y, 0)), r);
+    } else {
+        left.push(Line::from(""));
+        left.extend(right);
+        frame.render_widget(Paragraph::new(left).scroll((y, 0)), area);
+    }
+}
+
+/// Critical processes and system services.
+fn services_view(frame: &mut Frame, app: &mut App, area: Rect) {
+    use crate::performance::services::{ServiceState, CRITICAL};
+    let head = |t: String| Line::from(Span::styled(format!(" {t}"), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)));
+    let mut lines = vec![head("Critical processes".into()), Line::from(muted(format!("  {:<22}{:>7}{:>8}{:>10}  state", "name", "count", "CPU", "memory")))];
+    for name in CRITICAL {
+        let found: Vec<&crate::process::ProcessInfo> = app.tree.nodes.values().map(|n| &n.info).filter(|i| i.name.eq_ignore_ascii_case(name)).collect();
+        // Not every system runs every one of these; absent isn't failure.
+        let (cpu, mem): (f32, u64) = found.iter().fold((0.0, 0), |(c, m), i| (c + i.cpu_usage_pct, m + i.mem()));
+        let state = if found.is_empty() { muted("not running") } else { Span::styled("running", Style::new().fg(OK)) };
+        lines.push(Line::from(vec![Span::raw(format!("  {:<22}{:>7}{:>7.1}%{:>10}  ", name, found.len(), cpu, human_bytes(mem))), state]));
+    }
+    lines.push(Line::from(""));
+    match &app.services {
+        None => lines.push(muted("  Reading services…").into()),
+        Some(Err(e)) => lines.push(muted(format!("  Services unavailable: {e}")).into()),
+        Some(Ok(list)) => {
+            let count = |s: ServiceState| list.iter().filter(|x| x.state == s).count();
+            lines.push(head(format!("Services: {} running, {} failed, {} stopped", count(ServiceState::Running), count(ServiceState::Failed), count(ServiceState::Stopped))));
+            let f = crate::common::filter::Filter::parse(&app.query);
+            for s in list.iter().filter(|s| f.matches(*s)) {
+                let style = match s.state {
+                    ServiceState::Failed => Style::new().fg(BAD),
+                    ServiceState::Running => Style::new().fg(OK),
+                    _ => Style::new().fg(TEXT_DIM),
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  {:<9}", s.state.label()), style),
+                    Span::raw(format!("{:<8}", s.pid.map(|p| p.to_string()).unwrap_or_default())),
+                    Span::raw(truncate(&s.name, 44)),
+                    muted(format!("  {}", s.detail)),
+                ]));
+            }
+        }
+    }
+    app.perf_scroll = app.perf_scroll.min(lines.len().saturating_sub(1));
+    frame.render_widget(Paragraph::new(lines).scroll((app.perf_scroll as u16, 0)), area);
 }
 
 fn search_line(app: &App, what: &str, count: usize) -> Line<'static> {
@@ -369,9 +523,9 @@ fn dns_view(frame: &mut Frame, app: &mut App, area: Rect) {
         Some(Err(why)) => (format!("Reverse names of connected peers — {why}"), app.ir.resolver.known()),
         None => ("Loading…".into(), Vec::new()),
     };
-    let f = crate::filter::Filter::parse(&app.query);
+    let f = crate::common::filter::Filter::parse(&app.query);
     struct Pair<'a>(&'a str, &'a str);
-    impl crate::filter::Filterable for Pair<'_> {
+    impl crate::common::filter::Filterable for Pair<'_> {
         fn field(&self, name: &str) -> Option<Vec<String>> {
             match name {
                 "ip" => Some(vec![self.0.to_string()]),

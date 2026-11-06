@@ -4,7 +4,17 @@
 //! fields it lacks.
 
 pub mod actions;
+pub mod deeptrace;
+#[cfg(windows)]
+pub mod handles;
+pub mod inspect;
+pub mod launch;
+pub mod memory;
+pub mod module;
 pub mod native;
+pub mod open_files;
+pub mod trace;
+pub mod trace_module;
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -35,6 +45,8 @@ pub struct ProcessInfo {
     pub cpu_time_secs: Option<f64>,
     /// Bytes per second over the last sampling interval.
     pub disk_read_rate: f64,
+    /// Network bytes per second, in and out; 0 when unknown.
+    pub net_rate: f64,
     pub disk_write_rate: f64,
     pub disk_read_total: u64,
     pub disk_write_total: u64,
@@ -71,6 +83,7 @@ impl ProcessInfo {
             cpu_time_secs: None,
             disk_read_rate: 0.0,
             disk_write_rate: 0.0,
+            net_rate: 0.0,
             disk_read_total: 0,
             disk_write_total: 0,
             footprint: None,
@@ -206,7 +219,12 @@ pub struct ProcessMonitor {
     networks: Networks,
     user_names: HashMap<Uid, String>,
     last_refresh: Instant,
+    /// Per pid: its start time and how often its details were requested.
+    detail_tries: HashMap<u32, (u64, u8)>,
 }
+
+/// Fields of protected processes never become readable, so stop asking.
+const DETAIL_TRIES: u8 = 3;
 
 impl ProcessMonitor {
     pub fn new() -> Self {
@@ -220,6 +238,69 @@ impl ProcessMonitor {
             networks: Networks::new_with_refreshed_list(),
             user_names: HashMap::new(),
             last_refresh: Instant::now(),
+            detail_tries: HashMap::new(),
+        }
+    }
+
+    /// How long refreshing each kind of process data takes here, to explain
+    /// a slow sampler.
+    pub fn refresh_costs() -> Vec<String> {
+        let mut sys = System::new();
+        sys.refresh_processes_specifics(ProcessesToUpdate::All, Self::light_kind());
+        [("cpu", ProcessRefreshKind::new().with_cpu()), ("memory", ProcessRefreshKind::new().with_memory()), ("disk", ProcessRefreshKind::new().with_disk_usage()), ("nothing", ProcessRefreshKind::new())]
+            .into_iter()
+            .map(|(name, kind)| {
+                let t = Instant::now();
+                for _ in 0..3 {
+                    sys.refresh_processes_specifics(ProcessesToUpdate::All, kind);
+                }
+                format!("process refresh, {name}: {} ms each over {} processes", t.elapsed().as_millis() / 3, sys.processes().len())
+            })
+            .collect()
+    }
+
+    /// Parent of each process.
+    pub fn parents(&self) -> HashMap<u32, u32> {
+        self.sys.processes().iter().filter_map(|(pid, p)| p.parent().map(|q| (pid.as_u32(), q.as_u32()))).collect()
+    }
+
+    /// Process names by pid.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn names(&self) -> HashMap<u32, String> {
+        self.sys.processes().iter().map(|(pid, p)| (pid.as_u32(), p.name().to_string_lossy().into_owned())).collect()
+    }
+
+    /// Changes between samples.
+    fn light_kind() -> ProcessRefreshKind {
+        ProcessRefreshKind::new().with_cpu().with_memory().with_disk_usage()
+    }
+
+    /// Static fields of processes that lack them. Refreshing these for every
+    /// process retries every unreadable one on every sample, which on
+    /// Windows costs an open, a token query and a memory read each time.
+    fn fill_details(&mut self) {
+        let mut need: Vec<Pid> = Vec::new();
+        let mut alive: HashSet<u32> = HashSet::with_capacity(self.detail_tries.len());
+        for (pid, p) in self.sys.processes() {
+            if p.thread_kind().is_some() {
+                continue;
+            }
+            let id = pid.as_u32();
+            alive.insert(id);
+            let t = self.detail_tries.entry(id).or_insert((p.start_time(), 0));
+            if t.0 != p.start_time() {
+                *t = (p.start_time(), 0);
+            }
+            let complete = p.exe().is_some() && !p.cmd().is_empty() && p.user_id().is_some();
+            if !complete && t.1 < DETAIL_TRIES {
+                t.1 += 1;
+                need.push(*pid);
+            }
+        }
+        self.detail_tries.retain(|pid, _| alive.contains(pid));
+        if !need.is_empty() {
+            let kind = ProcessRefreshKind::new().with_exe(UpdateKind::OnlyIfNotSet).with_cmd(UpdateKind::OnlyIfNotSet).with_cwd(UpdateKind::OnlyIfNotSet).with_user(UpdateKind::OnlyIfNotSet);
+            self.sys.refresh_processes_specifics(ProcessesToUpdate::Some(&need), kind);
         }
     }
 
@@ -252,10 +333,16 @@ impl ProcessMonitor {
 
     /// Re-scan all processes and rebuild the parent/child tree.
     pub fn snapshot(&mut self) -> (ProcessTree, SystemStats) {
+        let mut lap = crate::common::perf::Lap::new();
         self.sys.refresh_cpu_usage();
         self.sys.refresh_memory();
-        self.sys.refresh_processes_specifics(ProcessesToUpdate::All, Self::refresh_kind());
+        lap.mark("sampler: cpu and memory");
+        self.sys.refresh_processes_specifics(ProcessesToUpdate::All, Self::light_kind());
+        lap.mark("sampler: process list");
+        self.fill_details();
+        lap.mark("sampler: process details");
         self.networks.refresh();
+        lap.mark("sampler: network stats");
         let elapsed = self.last_refresh.elapsed().as_secs_f64().max(0.001);
         self.last_refresh = Instant::now();
 
@@ -269,6 +356,7 @@ impl ProcessMonitor {
             .map(|(pid, _)| pid.as_u32())
             .collect();
         let native = native::collect(&pids);
+        lap.mark("sampler: native details");
 
         let mut nodes: HashMap<u32, TreeNode> = HashMap::with_capacity(pids.len());
         let (mut disk_r, mut disk_w, mut threads, mut running) = (0f64, 0f64, 0u64, 0usize);
@@ -304,6 +392,7 @@ impl ProcessMonitor {
                 cpu_time_secs: n.cpu_time,
                 disk_read_rate: du.read_bytes as f64 / elapsed,
                 disk_write_rate: du.written_bytes as f64 / elapsed,
+                net_rate: 0.0,
                 disk_read_total: du.total_read_bytes,
                 disk_write_total: du.total_written_bytes,
                 footprint: n.footprint,
@@ -543,6 +632,33 @@ pub fn cpu_time(secs: f64) -> String {
 pub mod tests {
     use super::*;
 
+    #[test]
+    fn a_process_started_between_samples_gets_its_details() {
+        let mut m = ProcessMonitor::new();
+        let _ = m.snapshot();
+        #[cfg(unix)]
+        let spawned = std::process::Command::new("/bin/sleep").arg("20").spawn();
+        #[cfg(windows)]
+        let spawned = crate::common::command::tool("ping").args(["-n", "20", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn();
+        let mut child = spawned.unwrap();
+        let pid = child.id();
+        // A sample can land before it has exec'd, which is why details are
+        // retried; they must arrive within those retries.
+        let mut found = None;
+        for _ in 0..DETAIL_TRIES {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let (tree, _) = m.snapshot();
+            found = tree.get(pid).map(|n| (n.info.exe_path.clone(), n.info.cmd.clone()));
+            if found.as_ref().is_some_and(|(e, c)| e.is_some() && !c.is_empty()) {
+                break;
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        let (exe, cmd) = found.expect("child seen");
+        assert!(exe.is_some() && !cmd.is_empty(), "{exe:?} {cmd:?}");
+    }
+
     pub fn info(pid: u32, ppid: Option<u32>) -> ProcessInfo {
         ProcessInfo {
             pid,
@@ -564,6 +680,7 @@ pub mod tests {
             cpu_time_secs: None,
             disk_read_rate: 0.0,
             disk_write_rate: 0.0,
+            net_rate: 0.0,
             disk_read_total: 0,
             disk_write_total: 0,
             footprint: None,

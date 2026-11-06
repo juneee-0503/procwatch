@@ -107,8 +107,10 @@ pub fn apply_checked(pid: u32, expected_start: u64, action: Action) -> Outcome {
     if expected_start > 0 {
         match super::native::start_time(pid) {
             None if !process_exists(pid) => return Outcome::AlreadyExited,
+            // Can't tell who holds this PID now, so don't touch it.
+            None => return Outcome::Failed("can't confirm this is still the same process".into()),
             Some(now) if now.abs_diff(expected_start) > 2 => return Outcome::PidReused { now_started: now },
-            _ => {}
+            Some(_) => {}
         }
     }
     match apply(pid, action) {
@@ -128,10 +130,19 @@ pub fn process_exists(pid: u32) -> bool {
         let r = unsafe { libc::kill(pid as libc::pid_t, 0) };
         r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        super::native::exists(pid)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         super::native::start_time(pid).is_some()
     }
+}
+
+/// The process the OS can't run without: init, or the Windows kernel.
+fn is_system_root(pid: u32) -> bool {
+    if cfg!(windows) { pid == 4 } else { pid == 1 }
 }
 
 /// Apply `action` to `pid`. Returns Err with a human-readable reason on
@@ -143,6 +154,9 @@ pub fn apply(pid: u32, action: Action) -> Result<()> {
     }
     if pid == std::process::id() && matches!(action, Action::Signal(_)) {
         return Err(anyhow!("refusing to signal procwatch itself"));
+    }
+    if is_system_root(pid) && matches!(action, Action::Signal(_)) {
+        return Err(anyhow!("refusing to signal the system's root process"));
     }
     match action {
         Action::SetNice(n) => super::native::set_nice(pid, n),
@@ -163,8 +177,7 @@ fn send(pid: u32, sig: Sig) -> Result<()> {
 
 #[cfg(windows)]
 fn send(pid: u32, sig: Sig) -> Result<()> {
-    use crate::inspect::run_command;
-    use std::process::Command;
+    use crate::common::command::run_command;
     use std::time::Duration;
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
@@ -177,7 +190,7 @@ fn send(pid: u32, sig: Sig) -> Result<()> {
         Sig::Term => {
             // Without /F taskkill posts WM_CLOSE, like Task Manager's
             // "End task": the app may save state or ask the user.
-            let out = run_command(Command::new("taskkill").args(["/PID", &pid.to_string()]), Duration::from_secs(10))?;
+            let out = run_command(crate::common::command::tool("taskkill").args(["/PID", &pid.to_string()]), Duration::from_secs(10))?;
             if !out.status.success() {
                 let msg = first_line(&out.stderr);
                 return Err(anyhow!(if msg.is_empty() { format!("taskkill exited with {}", out.status) } else { msg }));
@@ -212,7 +225,7 @@ if ($rc -ne 0) {{ [Console]::Error.WriteLine("NTSTATUS 0x{{0:X8}}" -f $rc); exit
 "#
             );
             let out = run_command(
-                Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &script]),
+                crate::common::command::tool("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &script]),
                 Duration::from_secs(15),
             )?;
             if !out.status.success() {

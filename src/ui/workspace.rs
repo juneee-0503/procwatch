@@ -168,7 +168,7 @@ fn replay(frame: &mut Frame, app: &mut App, d: &crate::app::workspace::Dossier, 
         .map(|i| {
             let e = &tl[*i];
             vec![
-                vec![muted(format!("{}{}", e.time.format("%H:%M:%S%.3f"), if e.basis == crate::model::Basis::Observed { "~" } else { "" }))],
+                vec![muted(format!("{}{}", e.time.format("%H:%M:%S%.3f"), if e.basis == crate::common::model::Basis::Observed { "~" } else { "" }))],
                 vec![Span::styled(e.source, Style::new().fg(ACCENT))],
                 vec![Span::raw(e.kind.clone())],
                 vec![Span::raw(e.name.clone())],
@@ -181,7 +181,7 @@ fn replay(frame: &mut Frame, app: &mut App, d: &crate::app::workspace::Dossier, 
     let e = &tl[d.events[cur]];
     let mut lines = vec![
         Line::from(Span::styled(format!(" Event {}/{n}", cur + 1), Style::new().add_modifier(Modifier::BOLD))),
-        Line::from(muted(format!(" {} · {}", crate::model::short_id(e.id), e.basis.label()))),
+        Line::from(muted(format!(" {} · {}", crate::common::model::short_id(e.id), e.basis.label()))),
         Line::from(format!(" {} {} {}", e.time.format("%Y-%m-%d %H:%M:%S%.3f"), e.source, e.kind)),
         Line::from(format!(" {}", e.name)),
     ];

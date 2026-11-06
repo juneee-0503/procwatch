@@ -3,6 +3,8 @@
 //! sense right now.
 
 mod analysis;
+pub mod boot;
+mod settings;
 mod investigate;
 mod details;
 mod overlays;
@@ -13,6 +15,9 @@ mod processes;
 mod widgets;
 
 pub use widgets::truncate;
+
+pub mod input;
+pub mod terminal;
 
 use std::sync::atomic::Ordering;
 
@@ -27,7 +32,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Mode, StatusLevel, Tab};
 use crate::process::human_bytes;
-use widgets::{muted, ratio, ACCENT, BAD, OK, TEXT_DIM, WARN};
+use widgets::{muted, ACCENT, BAD, OK, TEXT_DIM, WARN};
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let size = frame.area();
@@ -37,9 +42,32 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         return;
     }
 
-    let [title, body, hints] =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(5), Constraint::Length(1)]).areas(size);
-    draw_title(frame, app, title);
+    if app.boot.phase != crate::app::boot::BootPhase::Monitoring {
+        boot::draw(frame, app);
+        if let Mode::Settings { cursor } = app.mode {
+            settings::draw(frame, app, size, cursor);
+        }
+        if matches!(app.mode, Mode::Input { .. }) {
+            investigate::input(frame, app, size);
+        }
+        return;
+    }
+    // Room for the alarm lamp and its messages when the screen allows.
+    let tall = size.height >= 20 && size.width >= 70;
+    let [title, messages, body, hints] = Layout::vertical([Constraint::Length(1), Constraint::Length(if tall { 2 } else { 0 }), Constraint::Min(5), Constraint::Length(1)]).areas(size);
+    let host_shown = draw_title(frame, app, if tall { Rect { width: title.width.saturating_sub(19), ..title } } else { title });
+    if tall {
+        const LAMP: u16 = 18;
+        let mut room = messages.width.saturating_sub(LAMP + 1);
+        // The tabs took the row above: it goes beside the lamp instead.
+        if !host_shown {
+            let host = host_span();
+            let width = (host.width() as u16 + 1).min(room);
+            room -= width;
+            frame.render_widget(Paragraph::new(host), Rect { x: messages.x + room, y: messages.y, width, height: 1 });
+        }
+        boot::banner(frame, app, Rect { width: room, ..messages });
+    }
 
     app.hit.menus.clear();
     app.hit.pane_tabs.clear();
@@ -47,6 +75,31 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     app.hit.search = Rect::default();
     app.hit.view_toggle = Rect::default();
     app.hit.pane_body = Rect::default();
+    if !app.tab_on(app.tab) {
+        let text = "No modules with a page are loaded. Press M to load one.";
+        frame.render_widget(Paragraph::new(Span::styled(text, Style::new().fg(Color::Gray))).alignment(ratatui::layout::Alignment::Center), Rect { y: body.y + body.height / 2, height: 1.min(body.height), ..body });
+    } else {
+        draw_page(frame, app, body);
+    }
+    draw_hints(frame, app, hints);
+    // Always in sight, and clickable: nobody should need to know a key.
+    const BUTTON: &str = " ⚙ Settings , ";
+    let width = BUTTON.width() as u16;
+    if hints.width > width * 3 && matches!(app.mode, Mode::Normal) {
+        let rect = Rect { x: hints.right() - width, width, ..hints };
+        frame.render_widget(Paragraph::new(Span::styled(BUTTON, Style::new().fg(Color::Black).bg(Color::Gray))), rect);
+        app.hit.settings = rect;
+    } else {
+        app.hit.settings = Rect::default();
+    }
+    if tall {
+        const LAMP: u16 = 18;
+        boot::lamp(frame, app, Rect { x: size.width - LAMP, y: 0, width: LAMP, height: 3 });
+    }
+    draw_overlays(frame, app, size, body);
+}
+
+fn draw_page(frame: &mut Frame, app: &mut App, body: Rect) {
     match app.tab {
         Tab::Processes => processes::draw(frame, app, body),
         Tab::Performance => pages::performance(frame, app, body),
@@ -55,6 +108,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Tab::Persistence if app.ir.persist_changes_view => analysis::changes(frame, app, body),
         Tab::Persistence => investigate::persistence(frame, app, body),
         Tab::Timeline => investigate::timeline(frame, app, body),
+        Tab::Activity => investigate::activity(frame, app, body),
+        Tab::Defense => investigate::defense(frame, app, body),
         Tab::Logs if app.ir.artifacts_view => pivot::artifacts(frame, app, body),
         Tab::Logs => investigate::logs(frame, app, body),
         Tab::Trace => analysis::trace(frame, app, body),
@@ -62,8 +117,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Tab::Alerts => analysis::alerts(frame, app, body),
         Tab::Case => investigate::case(frame, app, body),
     }
-    draw_hints(frame, app, hints);
+}
 
+fn draw_overlays(frame: &mut Frame, app: &mut App, size: Rect, body: Rect) {
     if app.find.is_some() {
         overlays::find_results(frame, app, body);
     }
@@ -80,20 +136,34 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Mode::Graph => pivot::graph(frame, app, size),
         Mode::Clusters => pivot::clusters(frame, app, size),
         Mode::Health => pivot::health(frame, app, size),
+        Mode::ActivitySummary => investigate::activity_summary(frame, app, size),
+        Mode::ActivityDetail => investigate::activity_detail(frame, app, size),
+        Mode::ThreatDetail => investigate::threat_detail(frame, app, size),
+        Mode::Alarms { cursor } => boot::alarms(frame, app, size, *cursor),
+        Mode::Settings { cursor } => settings::draw(frame, app, size, *cursor),
+        Mode::Modules { cursor } => pivot::modules(frame, app, size, *cursor),
         Mode::StateAt => pivot::state_at(frame, app, size),
         Mode::Workspace => workspace::draw(frame, app, size),
+        Mode::LaunchConfirm(_) => overlays::launch_confirm(frame, app, size),
+        Mode::Palette { .. } => overlays::palette(frame, app, size),
         _ => {}
     }
 }
 
-fn draw_title(frame: &mut Frame, app: &mut App, area: Rect) {
-    let mut spans = vec![Span::styled(" procwatch ", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))];
+/// True if the host name fitted on this row.
+fn draw_title(frame: &mut Frame, app: &mut App, area: Rect) -> bool {
+    let mut spans = vec![if app.ir.replay.is_some() {
+        Span::styled(" REPLAY ", Style::new().fg(Color::Black).bg(WARN).add_modifier(Modifier::BOLD))
+    } else {
+        Span::styled(" procwatch ", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))
+    }];
     let mut x = area.x + spans[0].content.width() as u16;
     app.hit.tabs.clear();
     // Full names when they fit next to the summary, short ones otherwise.
-    let full: usize = Tab::ALL.iter().map(|t| t.title().width() + 4).sum::<usize>() + 60;
+    let tabs: Vec<Tab> = Tab::ALL.into_iter().filter(|t| app.tab_on(*t)).collect();
+    let full: usize = tabs.iter().map(|t| t.title().width() + 4).sum::<usize>() + 60;
     let compact = (area.width as usize) < full;
-    for t in Tab::ALL.iter() {
+    for t in tabs.iter() {
         let text = format!(" {} {} ", t.key(), if compact { t.short() } else { t.title() });
         let w = text.width() as u16;
         let style = if *t == app.tab {
@@ -122,33 +192,41 @@ fn draw_title(frame: &mut Frame, app: &mut App, area: Rect) {
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 
-    // Live summary on the right.
-    let s = &app.stats;
-    let level = |r: f64| if r >= 0.85 { BAD } else if r >= 0.6 { WARN } else { OK };
-    let mem = ratio(s.mem_used, s.mem_total);
-    let mut right = vec![
-        muted("CPU "),
-        Span::styled(format!("{:>3.0}%", s.cpu_pct), Style::new().fg(level(s.cpu_pct as f64 / 100.0))),
-        muted("   Memory "),
-        Span::styled(format!("{} / {}", human_bytes(s.mem_used), human_bytes(s.mem_total)), Style::new().fg(level(mem))),
-        Span::raw("   "),
-    ];
+    // On the right: which machine this is, and anything wrong with the view.
+    if app.ir.replay.is_some() {
+        let line = Line::from(vec![Span::styled("recorded session · live system not sampled ", Style::new().fg(WARN))]);
+        let w = line.width() as u16;
+        if w + 1 < area.width.saturating_sub(x - area.x) {
+            frame.render_widget(Paragraph::new(line), Rect { x: area.right() - w, width: w, ..area });
+        }
+        return true;
+    }
+    let mut right = Vec::new();
     if app.ctl.paused.load(Ordering::Relaxed) {
         right.push(Span::styled(" PAUSED ", Style::new().fg(Color::Black).bg(WARN)));
-    } else if app.is_stale() {
+        right.push(Span::raw("  "));
+    } else if app.module_on("process") && app.is_stale() {
         right.push(Span::styled("● not updating", Style::new().fg(BAD)));
-    } else if !app.loaded {
-        right.push(muted("○ starting"));
-    } else {
-        right.push(Span::styled("●", Style::new().fg(OK)));
-        right.push(muted(format!(" {:.1}s", app.ctl.interval().as_secs_f64())));
+        right.push(Span::raw("  "));
     }
-    right.push(Span::raw(" "));
+    let host = host_span();
+    let free = area.width.saturating_sub(x - area.x);
+    let wanted = right.iter().map(Span::width).sum::<usize>() + host.width() + 2;
+    let on_this_row = wanted < free as usize;
+    if on_this_row {
+        right.push(host);
+        right.push(Span::raw(" "));
+    }
     let line = Line::from(right);
     let w = line.width() as u16;
-    if w + 1 < area.width.saturating_sub(x - area.x) {
+    if w > 0 && w + 1 < free {
         frame.render_widget(Paragraph::new(line), Rect { x: area.right() - w, width: w, ..area });
     }
+    on_this_row
+}
+
+fn host_span() -> Span<'static> {
+    Span::styled(crate::kernel::model::identity().host.to_string(), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))
 }
 
 /// Context hints on the left, latest status message on the right.
@@ -177,7 +255,13 @@ fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
         Mode::Sweep => vec![h("↑↓", "select"), h("enter", "go to process"), h("m", "record all as findings"), h("r", "re-run"), h("esc", "close")],
         Mode::Graph => vec![h("↑↓", "select"), h("enter →", "pivot"), h("←", "back"), h("t", "timeline of this"), h("g", "go to page"), h("esc", "close")],
         Mode::Clusters => vec![h("↑↓", "select"), h("enter", "show cluster in timeline"), h("esc", "close")],
-        Mode::Health => vec![h("any key", "close")],
+        Mode::Health | Mode::ActivitySummary => vec![h("any key", "close")],
+        Mode::ActivityDetail | Mode::ThreatDetail => vec![h("↑↓", "scroll"), h("any key", "close")],
+        Mode::Alarms { .. } => vec![h("enter", "acknowledge"), h("!", "all"), h("@", "pause sound"), h("any key", "close")],
+        Mode::Settings { .. } => vec![h("↑↓", "select"), h("enter", "change"), h("esc", "close")],
+        Mode::Modules { .. } => vec![h("↑↓", "select"), h("space", "enable / disable"), h("esc", "close")],
+        Mode::LaunchConfirm(_) => vec![h("y", "run it under trace"), h("esc", "cancel")],
+        Mode::Palette { .. } => vec![h("type", "filter"), h("↑↓", "choose"), h("enter", "run"), h("esc", "close")],
         Mode::StateAt => vec![h("↑↓ PgUp PgDn", "scroll"), h("esc", "close")],
         Mode::Workspace if app.ir.ws.tab == 1 => vec![h("←→", "step"), h("PgUp PgDn", "×10"), h("tab 1-6", "views"), h("D", "deep trace"), h("e", "quick report"), h("esc", "close")],
         Mode::Workspace => vec![h("tab 1-6", "views"), h("↑↓", "scroll"), h("D", "deep trace"), h("e", "quick report"), h("r", "refresh"), h("esc", "close")],
@@ -207,7 +291,7 @@ fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
                     h("z", if app.order_frozen { "unfreeze order" } else { "freeze order" }),
                     h("d", if app.pane_visible { "hide details" } else { "details" }),
                     h("f", "find port/file"),
-                    h("o", "options"),
+                    h(":", "commands"),
                     h("?", "help"),
                     h("q", "quit"),
                 ];
@@ -224,6 +308,8 @@ fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
             Tab::Persistence if app.ir.persist_changes_view && app.baseline.is_none() => vec![h("b", "save baseline"), h("c", "autostart entries"), h("?", "help")],
             Tab::Persistence if app.ir.persist_changes_view => vec![h("↑↓", "select"), h("enter", "go to process"), h("b", "new baseline"), h("c", "autostart entries"), h("/", "filter")],
             Tab::Persistence => vec![h("↑↓", "select"), h("enter", "analyze target"), h("Q", "quarantine"), h("m", "finding"), h("c", "changes since baseline"), h("r", "rescan"), h("/", "filter")],
+            Tab::Defense => vec![h("↑↓", "select"), h("enter", "details and attack"), h("P", "go to process"), h("x", "clear"), h("/", "filter")],
+            Tab::Activity => vec![h("c", "start / stop capture"), h("enter", "details and stack"), h("s", "summary"), h("e", "save to case"), h("x", "clear"), h("/", "filter")],
             Tab::Timeline => vec![
                 h("↑↓", "select"),
                 h("enter", "process"),
@@ -239,8 +325,8 @@ fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
             Tab::Logs if app.ir.artifacts_view => vec![h("↑↓", "select"), h("enter", "analyze file"), h("A", "import folder…"), h("r", "re-collect"), h("x", "event log"), h("/", "filter"), h("l", "graph")],
             Tab::Logs => vec![h("x", "artifacts"),h("↑↓", "select"), h("enter", "process"), h("w", "time window"), h("a", "important/all"), h("r", "reload"), h("m", "finding"), h("/", "filter")],
             Tab::Case if app.ir.case.is_none() => vec![h("n", "new case"), h("?", "help")],
-            Tab::Case => vec![h("I", "IOC sweep"), h("Y", "content scan"), h("c", "collect"), h("s", "seal"), h("v", "verify"), h("a", "note"), h("C", "conclusion"), h("i", "isolation plan"), h("e", "export report"), h("tab", "findings/quarantine")],
-            Tab::Performance => vec![h("1-9 0", "pages"), h("p", "pause"), h("?", "help"), h("q", "quit")],
+            Tab::Case => vec![h("I", "IOC sweep"), h("Y", "content scan"), h("X", "STIX/MISP/ECS"), h("c", "collect"), h("s", "seal"), h("v", "verify"), h("a", "note"), h("C", "conclusion"), h("i", "isolation plan"), h("e", "export report"), h("tab", "findings/quarantine")],
+            Tab::Performance => vec![h("m", "charts / metrics / services"), h("↑↓", "scroll"), h("p", "pause"), h("?", "help"), h("q", "quit")],
             Tab::Trace if app.trace.is_none() => vec![h("1", "processes"), h("?", "help"), h("q", "quit")],
             Tab::Trace => {
                 let running = app.trace.as_ref().is_some_and(|t| t.is_running());
@@ -254,6 +340,7 @@ fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
                 h("enter", "go to subject"),
                 h("l", "graph"),
                 h("S", "suppress…"),
+                h("T", "trust publisher…"),
                 h("u", if app.ir.det.show_suppressed { "hide suppressed" } else { "show suppressed" }),
                 h("m", "finding"),
                 h("R", "reload rules"),
@@ -265,7 +352,8 @@ fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let mut spans: Vec<Span> = lead.into_iter().collect();
-    for (k, d) in items {
+    // A hint is a promise: nothing is offered that wouldn't work.
+    for (k, d) in items.into_iter().filter(|(k, _)| app.key_on(k)) {
         spans.push(Span::styled(format!(" {k}"), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)));
         spans.push(Span::styled(format!(" {d} "), Style::new().fg(TEXT_DIM)));
     }

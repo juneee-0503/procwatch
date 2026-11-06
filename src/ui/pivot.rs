@@ -12,7 +12,7 @@ use ratatui::{
 use super::spinner;
 use super::widgets::*;
 use crate::app::App;
-use crate::model::Severity;
+use crate::common::model::Severity;
 
 fn bold(s: impl Into<String>) -> Span<'static> {
     Span::styled(s.into(), Style::new().add_modifier(Modifier::BOLD))
@@ -55,7 +55,7 @@ pub fn detections(frame: &mut Frame, app: &mut App, area: Rect) {
         muted(format!("   {active} active · {suppressed} suppressed{}", if det.show_suppressed { " (shown)" } else { "" })),
         muted(format!(
             "   rules: {} host + {} Sigma{}",
-            crate::triage::RULES.len(),
+            crate::detection::triage::RULES.len(),
             det.sigma.len(),
             if det.sigma_errors.is_empty() { String::new() } else { format!(" ({} rejected)", det.sigma_errors.len()) }
         )),
@@ -121,7 +121,7 @@ pub fn detections(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let Some(d) = app.selected_detection() else { return };
     let mut lines = vec![Line::from(vec![bold(format!(" {} ", d.rule_name)), muted(format!(" {} · {} · seen {}×", d.rule_id, d.engine, d.count))])];
-    let explanation = crate::triage::rule(&d.rule_id)
+    let explanation = crate::detection::triage::rule(&d.rule_id)
         .map(|r| r.description.to_string())
         .or_else(|| app.ir.det.sigma.iter().find(|r| r.id == d.rule_id).map(|r| r.description.clone()))
         .unwrap_or_default();
@@ -206,7 +206,7 @@ pub fn artifacts(frame: &mut Frame, app: &mut App, area: Rect) {
     app.hit.list_rows = draw_table(frame, list, &specs, rows, &mut scroll, Some(app.ir.art_selected - app.ir.art_offset));
     // What the selected kind's timestamp means and what it can support.
     let a = &app.ir.artifacts[visible[app.ir.art_selected]];
-    if let Some(k) = crate::artifacts::info(a.kind) {
+    if let Some(k) = crate::host::artifacts::info(a.kind) {
         let lines = vec![
             Line::from(vec![bold(format!(" {} ", k.kind)), muted(format!(" {} · {}", k.source, k.platforms))]),
             Line::from(vec![muted(" time: "), Span::raw(k.time_meaning)]),
@@ -327,7 +327,7 @@ pub fn health(frame: &mut Frame, app: &mut App, screen: Rect) {
         Line::default(),
     ];
     for s in &sources {
-        use crate::health::Status::*;
+        use crate::engine::health::Status::*;
         let st = match s.status {
             Available => Style::new().fg(OK),
             Partial | NotLoaded => Style::new().fg(WARN),
@@ -379,5 +379,48 @@ pub fn state_at(frame: &mut Frame, app: &mut App, screen: Rect) {
     let max = lines.len().saturating_sub(inner.height as usize);
     app.ir.state_scroll = app.ir.state_scroll.min(max);
     let lines: Vec<Line> = lines.into_iter().skip(app.ir.state_scroll).collect();
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// What runs, how it's doing, and what each module can do on this system.
+pub fn modules(frame: &mut Frame, app: &mut App, screen: Rect, cursor: usize) {
+    use crate::kernel::{ModuleState, Support};
+    let inner = overlay(frame, screen, " Modules ".to_string());
+    let Some(k) = &app.kernel else {
+        frame.render_widget(Paragraph::new(muted(" No modules: this session is a replay.")), inner);
+        return;
+    };
+    let list = k.status();
+    let mut lines = Vec::new();
+    for (i, s) in list.iter().enumerate() {
+        let color = match s.state {
+            ModuleState::Running => OK,
+            ModuleState::Crashed | ModuleState::Failed => BAD,
+            ModuleState::Unavailable => WARN,
+            _ => TEXT_DIM,
+        };
+        let marker = if i == cursor { "▸ " } else { "  " };
+        lines.push(Line::from(vec![
+            Span::raw(format!("{marker}{:<13}", s.name)),
+            Span::styled(format!("{:<13}", s.state.label()), Style::new().fg(color)),
+            muted(if s.restarts > 0 { format!("{} restarts  ", s.restarts) } else { String::new() }),
+            muted(s.description),
+        ]));
+        if let Some(e) = &s.last_error {
+            lines.push(Line::from(Span::styled(format!("      {e}"), Style::new().fg(WARN))));
+        }
+        if i == cursor {
+            for c in &s.capabilities {
+                let (color, why) = match &c.support {
+                    Support::Yes => (OK, String::new()),
+                    Support::Partly(w) => (WARN, format!(" — {w}")),
+                    Support::No(w) => (TEXT_DIM, format!(" — {w}")),
+                };
+                lines.push(Line::from(vec![muted(format!("      {:<34}", c.name)), Span::styled(c.support.label(), Style::new().fg(color)), muted(why)]));
+            }
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(muted(format!(" Event bus: {} published, {} dropped", k.bus().published(), k.bus().dropped()))));
     frame.render_widget(Paragraph::new(lines), inner);
 }
