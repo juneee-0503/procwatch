@@ -11,9 +11,9 @@ use ratatui::{
 use super::spinner;
 use super::widgets::*;
 use crate::app::{App, Mode};
-use crate::baseline::ChangeKind;
+use crate::forensics::baseline::ChangeKind;
 use crate::process::{cpu_time, human_bytes};
-use crate::trace::{Category, Kind};
+use crate::process::trace::{Category, Kind};
 
 fn kind_style(k: Kind) -> Style {
     match k {
@@ -22,7 +22,8 @@ fn kind_style(k: Kind) -> Style {
         Kind::Connect | Kind::Listen => Style::new().fg(ACCENT),
         Kind::Disconnect | Kind::StopListen | Kind::FileClose => Style::new().fg(MUTED),
         Kind::FileOpen => Style::new().fg(Color::Reset),
-        Kind::CpuSpike | Kind::MemoryGrowth => Style::new().fg(WARN),
+        Kind::CpuSpike | Kind::MemoryGrowth | Kind::Exec => Style::new().fg(WARN),
+        Kind::Escape | Kind::Privilege | Kind::Burst => Style::new().fg(BAD).add_modifier(Modifier::BOLD),
         Kind::Note => Style::new().fg(TEXT_DIM).add_modifier(Modifier::ITALIC),
     }
 }
@@ -42,6 +43,8 @@ pub fn trace(frame: &mut Frame, app: &mut App, area: Rect) {
             Line::from(muted("    • network connections opened and closed, ports it listens on")),
             Line::from(muted("    • files opened and closed")),
             Line::from(muted("    • CPU spikes and memory growth")),
+            Line::from(muted("    • the whole process tree: double-forked daemons, members that leave")),
+            Line::from(muted("      the tree, user changes, image changes (exec), spawn bursts")),
             Line::default(),
             Line::from(vec![
                 Span::raw("  Start one from the Processes page: select a process and press "),
@@ -101,6 +104,17 @@ pub fn trace(frame: &mut Frame, app: &mut App, area: Rect) {
             Span::raw(human_bytes(peak_mem)),
         ]));
         lines.push(Line::from(vec![muted("  CPU time used "), Span::raw(cpu_time(t.cpu_time_used))]));
+        let flags = [(Kind::Escape, "escaped"), (Kind::Exec, "exec"), (Kind::Privilege, "user change"), (Kind::Burst, "burst")];
+        let mut f = Vec::new();
+        for (k, label) in flags {
+            let n = t.count(k);
+            if n > 0 {
+                f.push(Span::styled(format!("  {label} {n}"), kind_style(k)));
+            }
+        }
+        if !f.is_empty() {
+            lines.push(Line::from(f));
+        }
         lines.push(Line::default());
         lines.push(heading("Network"));
         let hosts = t.top_hosts(6);
@@ -122,6 +136,11 @@ pub fn trace(frame: &mut Frame, app: &mut App, area: Rect) {
             lines.push(Line::from(vec![Span::raw(format!("  {}", truncate_left(&d, 34))), muted(format!("  {n}"))]));
         }
         frame.render_widget(Paragraph::new(lines), side);
+    }
+
+    if app.trace_tree {
+        trace_tree(frame, app, timeline);
+        return;
     }
 
     // Filter bar + timeline.
@@ -169,6 +188,75 @@ pub fn trace(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut off = app.trace_offset;
     app.hit.list_rows = draw_table(frame, table, &specs, rows, &mut off, (!visible.is_empty()).then_some(app.trace_selected));
     app.trace_offset = off;
+}
+
+/// The trace's members as a lineage tree with per-subtree figures.
+fn trace_tree(frame: &mut Frame, app: &mut App, area: Rect) {
+    let Some(t) = app.trace.as_ref() else { return };
+    let st = t.stats();
+    let via = t.deep_via.map_or("sampled each refresh".to_string(), |v| format!("lifecycle by {v}"));
+    let mut head = vec![
+        muted("Tree "),
+        Span::raw(format!("{} running", st.alive)),
+        muted(format!(" / {} exited · depth {} · {} threads · CPU {:.0}% · mem {} · peak {} at once · ", st.exited, st.max_depth, st.threads, st.cpu, human_bytes(st.mem), st.peak_alive)),
+    ];
+    if st.escaped > 0 {
+        head.push(Span::styled(format!("{} escaped", st.escaped), Style::new().fg(BAD).add_modifier(Modifier::BOLD)));
+        head.push(muted(" · "));
+    }
+    head.push(muted(via));
+    frame.render_widget(Paragraph::new(Line::from(head)), Rect { height: 1, ..area });
+
+    let specs = [
+        ColSpec::new("PID", 7, true),
+        ColSpec::new("Process", 28, false),
+        ColSpec::new("User", 10, false),
+        ColSpec::new("State", 16, false),
+        ColSpec::new("CPU%", 6, true),
+        ColSpec::new("Memory", 9, true),
+        ColSpec::new("Subtree", 9, true),
+        ColSpec::new("Sub CPU", 8, true),
+        ColSpec::new("Sub mem", 9, true),
+        ColSpec::new("Command", 0, false),
+    ];
+    let lineage = t.lineage();
+    let rows: Vec<Vec<Vec<Span<'static>>>> = lineage
+        .iter()
+        .filter_map(|l| {
+            let p = t.procs.get(&l.pid)?;
+            let live = t.live.get(&l.pid).copied();
+            let indent = if l.depth == 0 { String::new() } else { format!("{}└ ", "  ".repeat(l.depth - 1)) };
+            let (state, style) = match (p.exited_at, p.escaped) {
+                (Some(x), _) => (format!("exited +{x:.1}s"), Style::new().fg(MUTED)),
+                (None, true) => {
+                    let now = live.and_then(|l| l.ppid).map(|pp| format!("escaped → {pp}")).unwrap_or_else(|| "escaped".into());
+                    (now, Style::new().fg(BAD).add_modifier(Modifier::BOLD))
+                }
+                (None, false) => ("running".into(), Style::new().fg(OK)),
+            };
+            let (cpu, mem) = live.map_or((String::new(), String::new()), |l| (format!("{:.0}", l.cpu), human_bytes(l.mem)));
+            let sub = if l.subtree > 1 { format!("{}/{}", l.subtree_alive, l.subtree) } else { String::new() };
+            let (scpu, smem) = if l.subtree > 1 { (format!("{:.0}%", l.subtree_cpu), human_bytes(l.subtree_mem)) } else { (String::new(), String::new()) };
+            Some(vec![
+                vec![Span::raw(l.pid.to_string())],
+                vec![muted(indent), Span::raw(p.name.clone())],
+                vec![muted(p.user.clone().unwrap_or_default())],
+                vec![Span::styled(state, style)],
+                vec![Span::raw(cpu)],
+                vec![Span::raw(mem)],
+                vec![muted(sub)],
+                vec![muted(scpu)],
+                vec![muted(smem)],
+                vec![muted(p.command.clone())],
+            ])
+        })
+        .collect();
+    let n = rows.len();
+    let table = Rect { y: area.y + 2, height: area.height.saturating_sub(2), ..area };
+    app.trace_tree_selected = app.trace_tree_selected.min(n.saturating_sub(1));
+    let mut off = app.trace_tree_offset;
+    app.hit.list_rows = draw_table(frame, table, &specs, rows, &mut off, (n > 0).then_some(app.trace_tree_selected));
+    app.trace_tree_offset = off;
 }
 
 pub fn alerts(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -260,7 +348,7 @@ pub fn rule_input(frame: &mut Frame, app: &mut App, screen: Rect) {
             Span::styled(" ", Style::new().add_modifier(Modifier::REVERSED)),
         ]),
     ];
-    match (error, crate::rules::Rule::parse(input)) {
+    match (error, crate::detection::rules::Rule::parse(input)) {
         (Some(e), _) => lines.push(Line::from(Span::styled(format!("  {e}"), Style::new().fg(BAD)))),
         (None, Ok(r)) if !input.trim().is_empty() => lines.push(Line::from(Span::styled(format!("  → alert when {}", r.describe()), Style::new().fg(OK)))),
         _ => lines.push(Line::default()),

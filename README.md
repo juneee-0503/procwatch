@@ -4,11 +4,16 @@
 Process Explorer 的精简终端版。附带一个 Linux 后端作为"自检用的第三平台",
 方便在任何开发机上先把整体架构跑通。
 
+## 文档
+
+完整文档在 [docs/](docs/README.md):[快速开始](docs/getting-started.md)、[用户指南](docs/user-guide.md)、[命令行参考](docs/cli.md)、[系统指标](docs/metrics.md)、[模块与微内核](docs/modules.md)、[活动采集](docs/activity-capture.md)、[拦截与策略](docs/enforcement.md)、[检测](docs/detection.md)、[调查与证据](docs/investigation.md)、[与专业工具对比](docs/comparison.md)、[故障排查](docs/troubleshooting.md)、[架构](docs/architecture.md)、[开发](docs/development.md)。
+
 ## 构建状态
 
 macOS(aarch64)上 `cargo build` / `cargo test` / `cargo clippy --all-targets` 零警告,并在真实终端中
-逐屏驱动验证;Windows(`x86_64-pc-windows-msvc`)与 Linux(`x86_64-unknown-linux-gnu`)目标通过
-`cargo clippy --target …` 零警告类型检查。Windows 上的原生调用与 PowerShell 脚本尚未在 Windows 真机运行过。
+逐屏驱动验证。Linux 与 Windows 在 GitHub Actions 上实际运行:clippy、单元测试、解析器模糊测试、`--selftest`、
+`--soak 2` 和规则校验全部通过(提交 `1160a9e`,CI 运行 41842370540)。这两个平台只在 CI 的无界面环境里跑过,
+尚未在真实系统上交互使用;Windows 上是 Windows Server 虚拟机,不是桌面系统。
 
 ## 界面
 
@@ -121,46 +126,23 @@ API**:
 
 ## 项目结构
 
+微内核加插件模块。结构、依赖规则和新增模块的方法见 [docs/architecture.md](docs/architecture.md) 和 [docs/modules.md](docs/modules.md)。
+
 ```
 src/
-├── main.rs              入口、事件循环、按键/鼠标处理、终端恢复
-├── app.rs               应用状态:页面、视图、行/分组、菜单与确认、详情、活动日志、查找
-├── columns.rs           进程表列定义
-├── config.rs            设置文件(key = value,原子写入)
-├── export.rs            CSV 导出
-├── filter.rs          统一过滤语法(字段、排除、端口简写)
-├── intel.rs           可执行文件签名/哈希缓存(4 个后台线程)
-├── triage.rs          风险评分与理由
-├── ioc.rs             IOC 指标解析与扫描
-├── binfmt.rs          可执行文件头解析、熵值、字符串指标
-├── persistence.rs     自启动项枚举与可疑标记(三平台)
-├── fileinfo.rs        文件哈希、类型、元数据、签名、下载来源
-├── fswatch.rs         文件变更监控
-├── dns.rs             反向解析、DNS 服务器、DNS 缓存
-├── logs.rs            系统事件日志
-├── memory.rs          内存布局与异常模块(不读取内存内容)
-├── case.rs            案件、取证链、证据清单与校验、报告导出
-├── contain.rs         文件隔离/恢复、网络隔离脚本生成
-├── app_ir.rs          调查状态:时间线、证据、发现、隔离
-├── baseline.rs        基线快照、对比、命令行文本输出
-├── trace.rs           行为追踪:时间线、汇总、Markdown/JSON 报告
-├── rules.rs           告警规则解析与求值、内存增长斜率
-├── os.rs                剪贴板、在文件管理器中显示、查找打开某文件的进程
-├── sampler.rs           后台线程:采样 / GPU / 深度检查 / 批量操作 / 查找
-├── network.rs           每进程网络连接
-├── gpu.rs               GPU 占用(macOS 如实标注不可用)
-├── process/
-│   ├── mod.rs           进程快照、系统统计、进程树展开
-│   ├── native.rs        原生调用:线程、nice、CPU 时间、内存 footprint、线程列表、改优先级
-│   └── actions.rs       信号 / 挂起恢复 / 优先级
-├── inspect/             深度检查(线程、打开文件、环境变量、模块、签名),模块列表按需读取
-└── ui/
-    ├── mod.rs           标题栏、提示栏
-    ├── processes.rs     工具栏、进程表(响应式列)
-    ├── details.rs       详情面板 / 全屏详情
-    ├── pages.rs         Performance / Network / Activity 页
-    ├── overlays.rs      操作菜单、确认框、选项、帮助、查找
-    └── widgets.rs       主题、表格、曲线、文本工具
+├── kernel/        微内核:总线、生命周期、看门狗、数据模型、配置、告警
+├── common/        路径、命令运行器、文本、节奏控制
+├── process/       进程、检查、深度追踪、句柄
+├── network/       连接、DNS、流量
+├── files/         文件监视、分析、内容规则
+├── host/          自启动项、日志、工件
+├── performance/   系统指标、服务、GPU
+├── activity/      操作级采集
+├── detection/     检测引擎
+├── forensics/     案件、证据、历史、导出
+├── response/      拦截
+├── engine/        模块注册、到界面的桥接
+├── app/  ui/  cli/
 ```
 
 ## 构建
@@ -175,6 +157,12 @@ cargo build --release
 ./target/release/procwatch --offline procwatch-case-…  --artifacts ./copied-evidence   # 离线分析
 ./target/release/procwatch --check-rules        # 校验 Sigma 规则
 ./target/release/procwatch --selftest           # 测量捕获率、PID 复用保护等质量指标
+./target/release/procwatch --soak 10            # 10 分钟无界面稳定性测试
+./target/release/procwatch --monitor --output events.jsonl   # 无界面持续采集,输出 ECS JSON 行
+./target/release/procwatch --coverage           # 规则覆盖的 MITRE ATT&CK 技术
+./target/release/procwatch --enforce-check rules/policy/example.yml   # 检查拦截策略,不做改变
+./target/release/procwatch --replay             # 回放本机记录的事件历史
+./target/release/procwatch --run -- ./sample    # 仅限隔离分析虚拟机:启动并从第一条指令开始追踪
 ./target/release/procwatch --case procwatch-case-20261102-101500   # 继续已有案件
 ```
 
@@ -186,7 +174,7 @@ cargo build --release
 | 键 | 作用 |
 |---|---|
 | `↑↓` `PgUp` `PgDn` `Home` `End` | 移动 |
-| `1`–`9`、`0` | Processes / Performance / Network / Files / Persistence / Timeline / Logs / Trace / Alerts / Case |
+| `1`–`9`、`0`、`` ` `` | Processes / Performance / Network / Files / Persistence / Timeline / Logs / Trace / Alerts / Case / Activity |
 | `m` | 把当前选中项记录为调查发现 |
 | 操作菜单 → Investigate | 分析可执行文件 / 采集进程证据(可复制可执行文件)/ 记录发现 / 隔离可执行文件 |
 | Files 页 | `a` 分析选中文件,`A` 输入路径分析,`Q` 隔离,`w` 切换"打开的文件 / 文件变更" |
@@ -273,6 +261,114 @@ cargo build --release
 - **质量指标**:`procwatch --selftest [--json]` 在本机用无害负载测量短生命周期进程捕获率、事件顺序、PID 复用保护、文件事件延迟(本机 12 ms)和自身开销(本机约 5% CPU、16 MB);采集健康度(`H`)显示当前平台的实际验证状态。
 
 平台验证状态:macOS 已在真实系统上交互与自动测试;Linux 与 Windows 仅编译通过并通过单元测试,深度追踪的 Linux/Windows 实现尚未在真机运行。
+
+## 可信度、底层能力与特色功能(本轮)
+
+### 可信度
+- **持续集成**:`.github/workflows/ci.yml` 在 Linux、macOS、Windows 三个平台上执行:`clippy -D warnings`、全部单元测试、解析器模糊测试、`--selftest`、`--soak 2`、规则校验。三平台实测结果见下表(提交 `1160a9e`,CI 虚拟机上的单次运行,不代表所有环境)。
+
+  | | macOS | Linux | Windows |
+  |---|---|---|---|
+  | 单元测试(另有 5 个模糊测试) | 98 | 96 | 93 |
+  | 深度追踪方式 | kqueue | procfs 轮询(20 ms) | ETW 或 ToolHelp(100 ms) |
+  | 抓到最短命进程 | 0 ms 档 4/4 | 0 ms 档 1/4(上一轮 0/4),50 ms 档 4/4 | ~30 ms 档 4/4(同档采样 0/4) |
+  | 事件顺序错误 | 0 | 0 | 0 |
+  | PID 复用保护 | 全部正确 | 全部正确 | 全部正确 |
+  | 文件变化通知延迟 | 18 ms | <1 ms | <1 ms |
+  | soak 2 分钟:最终内存 / 预热后增长 | 41.5 MB / +1.7 MB | 22.8 MB / +2.0 MB | 31.4 MB / +2.4 MB |
+  | soak 消息处理占比 | 1% | 0% | 9% |
+  | soak 单次快照处理最长 | 32.6 ms | 14.9 ms | **2222 ms** |
+
+  测试数量不同是因为部分测试只在对应平台编译(Unix 进程测试、Mach-O、codesign 等)。延迟 `<1 ms` 是取整后显示 0 的结果。
+- **解析器模糊测试**(`src/fuzz.rs`):对所有读取不可信数据的解析器(PE/Mach-O/ELF、Prefetch/Xpress、ShimCache、注册表 hive、EVTX、YARA/Sigma 规则、IOC、shell 历史、base64)做确定性变异测试,要求不崩溃、单个输入 2 秒内完成。已发现并修复两个真实问题:YARA 转义序列遇到多字节 UTF-8 时崩溃;universal Mach-O 的 slice 指回自身时无限递归。运行:`cargo test --release fuzz_ -- --ignored`(`PW_FUZZ_ITERATIONS` 控制次数)。
+- **长时间稳定性**:`procwatch --soak MINUTES` 无界面运行完整流水线(采样、检测、深度追踪、时间线重建、离屏渲染所有页面),在无害的进程更替负载下记录内存、CPU 和缓冲区大小;内存持续增长、后台线程崩溃、消息处理占用超过运行时间 80% 或超过结束时间仍未退出,都判为失败;输出里列出各类消息的数量和耗时。本机 3 分钟:常驻内存约 60–70 MB,预热后增长 ≤10 MB(深度追踪缓冲区填充至上限前)。
+
+### 底层能力
+- **持久事件历史**:所有观测到的事件(进程启动/退出、网络、文件、深度追踪、模块/文件快照差异、检测、自启动项变化,以及每 10 分钟一次的进程表快照)按天写入 JSON Lines,位于用户数据目录(macOS `~/Library/Application Support/procwatch/events`,Linux `~/.local/share/procwatch/events`,Windows `%LOCALAPPDATA%\\procwatch\\events`),上限 256 MB / 14 天,设置文件 `history = off` 可关闭。案件采集时会把本次会话的历史复制为 `evidence/events.jsonl`。
+- **回放**:`procwatch --replay [历史目录|案件目录|events.jsonl] [--from 时间] [--to 时间]` 在不接触现场系统的情况下打开记录,时间线、调查工作台与行为回放、图谱、某一时刻状态、检测全部可用;结束进程、隔离、采集等会作用于现场的操作在回放中被禁用。
+- **按程序建立行为基线**:按 SHA-256 记住每个程序在本机的连接目的地、子程序、非系统模块、监听端口;运行 ≥3 次且累计观察 ≥1 小时后基线成立,此后出现从未有过的行为即报 **PW-018**(低严重度,注明"在 N 次运行中首次出现")。目的地很多的程序(浏览器等)和回环地址不报新目的地。
+- **自启动项实时监控**:自启动目录有变化时 3 秒后自动重扫(另外启动 30 秒后首扫、之后每 15 分钟),新增/修改/删除进入时间线并报 **PW-019**;若当时有被深度追踪的进程打开着该配置文件,则标出写入者。
+- **更真实的事件来源**:
+  - Windows 深度追踪优先使用 ETW Microsoft-Windows-Kernel-Process(需管理员),否则每 100 ms 快照。
+  - 文件操作归属到进程:Linux 以 root 运行时使用 fanotify;macOS 以 root 运行时对被追踪进程运行 `fs_usage`。普通权限下仍按打开文件快照推断,并在采集健康度中说明。
+  - DNS 查询与连接关联:有 Sysmon(事件 22)时,把连接的地址对应到"哪个进程查询了哪个域名",优先同一进程;否则主机名来自反向解析并明确标注。
+
+### 特色功能
+- **启动并追踪**:`procwatch --run -- 程序 [参数…]` —— 程序在第一条指令前被挂起,深度追踪同步挂接后才放行(Unix:fork 后 SIGSTOP 再 exec;Windows:CREATE_SUSPENDED),程序输出写入案件日志并登记为证据,退出状态记入取证链。启动前有确认界面:**只应在可重置的隔离分析虚拟机中使用**,procwatch 观察程序,但不隔离它。
+- **行为序列规则**(`rules/behavior/*.yml`,用户规则放在设置目录的 `behavior/`):多步骤、带时间窗口和范围(同一进程树 / 同一进程 / 任意)、可捕获字段并在后续步骤引用、可计数去重。内置 7 条:写入后执行、写入脚本后由解释器执行、下载工具后从临时目录运行、移除隔离属性后运行程序、新增自启动项且其程序随后外连、短时间内大量侦察命令、shell 启动后外连。均已用无害负载实测触发。
+- **可信发布者**:在 Detect 页对检测按 `T`,只对弱信号(未签名、可写目录、外连、监听、基线新行为)信任该发布者;签名无效、攻击模式、Sigma/YARA/行为规则永不被这样屏蔽。
+- **签名信任链**:文件报告显示 macOS Gatekeeper/公证结论;Windows 显示签名类型(嵌入 / 目录)与证书链及吊销状态。
+- **标准格式导出**(Case 页 `X`):STIX 2.1 bundle(已用官方 `stix2` 库和模式校验器验证)、MISP 事件、ECS 字段的时间线 JSON Lines。
+- **命令面板**:`:` 或 `ctrl+k`,按名称模糊搜索并执行任何操作。
+
+### 代码审查修复
+
+一次针对主线程阻塞、不可信输入、子进程和资源上限的审查修复了以下问题,均有回归测试或已在三平台类型检查:
+
+- **安全**:Windows 验签把可执行文件路径放进 PowerShell 单引号字符串时只转义了 `'`,而 PowerShell 也把 `‘ ’ ‚ ‛` 当作单引号,攻击者可用文件名注入命令;现在全部转义。隔离脚本的管理地址必须是合法 IP/CIDR。隔离区恢复不再信任记录文件:校验路径在隔离区内、哈希一致、原路径为绝对路径。
+- **崩溃**:路径首字符为多字节字符时的字节切片 panic;过短的 `sha256` 字段导致的 panic。
+- **卡死**:孙进程继承管道时 `run_command` 的超时会失效;主线程同步运行 PowerShell 取 DNS 信息(最坏约 35 秒);健康页每次绘制都启动 `journalctl`;主线程读取可执行文件(最多 32 MB)。这些都已移到后台。
+- **数据**:内容相同的两个文件进入隔离区时记录互相覆盖,第一个无法恢复;`write_atomic` 未落盘且临时文件名固定;事件历史的 256 MB 上限只在启动时检查,长期运行不会清理;自启动项写入者记录满后丢弃的是最新而非最旧的;规则捕获的路径含 `{}`(Windows 常见的 GUID 目录)时永远匹配不上。
+- **性能与积压**:规则引擎按步骤分桶,事件只接触等待该类型的序列;证据链追加不再重新哈希整个日志;界面绘制时缓存链校验结果;sysinfo 改为两阶段刷新,读不到的受保护进程最多重试 3 次;界面处理不过来时采样线程暂停,不再堆积快照;文件事件每秒上限 2000 条,丢弃数量显示在采集健康页。
+
+第二轮审查针对上一轮未覆盖的模块:
+
+- **进程操作**:`start_time` 读不到时不再盲目执行动作,PID 复用保护没有缺口;Windows 上被拒绝访问的受保护进程不再被误报为已退出;拒绝向 init 或 Windows 内核进程发信号。
+- **规则解析**:Sigma/YARA 条件限制嵌套深度和长度(栈溢出无法捕获),十六进制模式的回溯有步数上限。
+- **不可信文件**:`--scan` 不跟随子目录符号链接;哈希、YARA 和格式分析都拒绝 FIFO 和设备文件;工件解析拒绝超过 1 GB 的文件;畸形 `authorized_keys` 不再让整个持久化扫描崩溃。
+- **数据准确性**:socket 表读取失败时保留上次结果,不再产生"全部关闭、全部新建"的假事件;Linux 僵尸进程不再被误报为 exec;告警状态按进程实例记录,删除规则后不再错位。
+- **证据**:重新采集时旧文件移到 `evidence/earlier/`,不再被覆盖;重复复制同一文件不再失败。
+- **其他**:Windows `--run` 的参数引号遵循 `CommandLineToArgvW` 规则;ETW 事件循环在高负载下不再饥饿;启动失败时不留下停止状态的子进程。
+
+新增测试:所有页面和浮层在 1×1 到 200×60 的终端下渲染、两万次随机导航按键、构造的恶意规则。这两项 UI 测试没有发现崩溃。
+
+### 对比专业工具后新增
+
+- **Linux 内核进程事件**:以 root 运行时用 netlink proc connector 取得精确的 fork/exec/exit,失败时回退轮询;`--selftest` 和采集健康页显示实际方式。
+- **安全上下文**(进程详情):Linux 的 capabilities、seccomp、no-new-privs、setuid、容器和独立命名空间;Windows 的完整性级别、提权状态和进程承载的服务。
+- **新检测**:PW-020 通过环境变量预加载库(检查进程时触发);PW-021 从 memfd 运行、磁盘上没有文件。
+- **自启动项**:Windows 增加 LSA 包、BootExecute、Netsh 助手、打印监视器;macOS 增加 periodic 脚本和 at 作业。
+- **`--monitor`**:无界面运行完整流水线,持续输出 ECS JSON 行,读取端关闭时正常退出。
+- **`--coverage`**:列出各引擎规则覆盖的 ATT&CK 技术。它只说明规则关注什么,不代表检出率。
+
+### 进程活动、句柄与流量
+
+**Activity 页**(按 `` ` ``,`c` 开始或停止采集)按 Process Monitor 的方式列出带进程的文件、注册表和网络操作,使用通用过滤语法,如 `source:registry name:powershell`。`--monitor --activity` 把同样的事件以 ECS JSON 行输出。
+
+| 能力 | Windows | Linux | macOS |
+|---|---|---|---|
+| 文件操作 | ETW Kernel-File(管理员):打开、创建、读、写、删除、重命名 | fanotify(root):打开、写、关闭;5.9 起含创建、删除、移动 | fs_usage(root) |
+| 注册表 | ETW Kernel-Registry:创建键、删除键、写值、删值 | 不适用 | 不适用 |
+| 网络操作 | ETW Kernel-Network:连接、接受、断开 | 采样差分 | 采样差分 |
+| 每进程流量(Net 列) | ETW,TCP 和 UDP(管理员) | sock_diag,**仅 TCP** | nettop |
+| 句柄与打开的文件 | 原生句柄表枚举 | /proc | lsof |
+
+与 Procmon 的差别,使用前应当知道:
+
+- 这些来源都不用内核驱动,所以拿不到驱动才有的返回状态、调用栈和进程启动前的事件。
+- 注册表**只记录写操作**:读取量比写入高几个数量级。
+- 相同操作在 250 ms 内合并,显示为 `×n`;每秒超过 2 万条的部分被丢弃,丢弃数显示在页面和采集健康页,不会悄悄丢失。
+- 缓冲区保留最近 20 万条。开启采集有实际开销,默认关闭。
+- 只有被深度追踪的进程的文件操作进入时间线,其余只在 Activity 页。
+- Linux 流量只统计 TCP,且只能归属到有权读取 `/proc/<pid>/fd` 的进程;已关闭的套接字只计入最后一次采样时的数字。
+- 句柄枚举只把句柄复制到本进程查询,不读目标进程内存;其他用户的进程需要管理员权限,受保护进程无法打开。命名管道不查询名称,因为这类调用可能永久挂起。
+
+向自启动注册表位置写入时触发 PW-022,并且能指出是哪个进程写的。
+
+### 拦截
+
+`--enforce POLICY` 按策略阻止操作:Linux 上事前阻止执行和打开文件(fanotify 权限事件),Windows 上事前阻止程序联网(WFP),三平台都能在进程启动后结束它。默认只审计;会匹配系统必需文件的规则直接拒绝;procwatch 退出后所有拦截自动消失。Windows 的文件和注册表拦截需要内核驱动,没有实现。详见 [docs/enforcement.md](docs/enforcement.md)。
+
+与专业工具相比仍然没有的:Windows 文件和注册表拦截、调用栈、完整的 YARA 语法。内存取证和在线信誉查询是有意不做的。
+
+### 仍未完成 / 未验证
+- Windows 上 sysinfo 的进程列表刷新不稳定:同样的代码在不同 CI 运行里平均 70 ms 到 1.2 秒,最长约 5 秒,原因未定位。它在模块线程里,不影响界面。
+- Windows 上 soak 早先多次跑不到终点。为消息循环加上时间预算、优化 `cluster` 后跑通,但两项改动是一起上线的,没有单独验证究竟是哪一项解决了问题。
+- Linux 的精确进程事件(netlink)需要 root 或 CAP_NET_ADMIN。CI 以 root 实测 0 ms 档为 4/4,普通用户回退轮询时为 0–1/4。
+- Windows 上自测输出没有标明实际用的是 ETW 还是 ToolHelp;~30 ms 进程 4/4 被抓到说明很可能是 ETW,但这是推断。
+- Windows 的 `--run`、Amcache/BAM/Prefetch 实时采集,以及 Linux 的 fanotify,仅通过类型检查和单元测试,CI 没有运行这些路径。
+- macOS 的 `fs_usage` 归属需要 root,本轮只测了输出解析,没有以 root 实际运行。
+- Endpoint Security 需要苹果签发的授权,未接入;macOS 上 DNS 查询日志的域名被系统脱敏,无法做进程级 DNS 关联。
 
 ## 已知的简化之处
 

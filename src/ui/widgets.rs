@@ -1,6 +1,7 @@
 //! Shared building blocks: theme, hand-laid-out tables (exact column
 //! alignment), history charts, and display-width-aware text helpers.
 
+pub use crate::common::text::truncate;
 use std::collections::VecDeque;
 
 use ratatui::{
@@ -269,26 +270,6 @@ pub fn fit(s: &str, width: usize, right: bool) -> String {
     if right { format!("{}{t}", " ".repeat(pad)) } else { format!("{t}{}", " ".repeat(pad)) }
 }
 
-pub fn truncate(s: &str, max: usize) -> String {
-    if s.width() <= max {
-        return s.to_string();
-    }
-    if max == 0 {
-        return String::new();
-    }
-    let mut out = String::new();
-    let mut w = 0;
-    for c in s.chars() {
-        let cw = c.width().unwrap_or(0);
-        if w + cw > max - 1 {
-            break;
-        }
-        out.push(c);
-        w += cw;
-    }
-    out.push('…');
-    out
-}
 
 /// Keep the end of `s` (`…/lib/foo`) when it doesn't fit.
 pub fn truncate_left(s: &str, max: usize) -> String {

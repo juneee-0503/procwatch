@@ -1,0 +1,57 @@
+; Minifilter install file. Test machines only until signed; see README.md.
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = "ActivityMonitor"
+ClassGuid   = {b86dff51-a31e-4bac-b3cf-e8cfe75c9fc2}
+Provider    = %ManufacturerName%
+DriverVer   = 11/05/2026,0.1.0.0
+CatalogFile = procwatch.cat
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+[DefaultInstall.NTamd64]
+CopyFiles = Driver.Files
+
+[DefaultInstall.NTamd64.Services]
+AddService = %ServiceName%,,Service.Add
+
+[DefaultUninstall.NTamd64]
+LegacyUninstall = 1
+DelFiles = Driver.Files
+
+[DefaultUninstall.NTamd64.Services]
+DelService = %ServiceName%,0x200
+
+[Service.Add]
+DisplayName    = %ServiceName%
+ServiceBinary  = %12%\procwatch.sys
+ServiceType    = 2
+StartType      = 3
+ErrorControl   = 1
+LoadOrderGroup = "FSFilter Activity Monitor"
+AddReg         = Service.AddReg
+
+[Service.AddReg]
+HKR,"Instances","DefaultInstance",0x00000000,%DefaultInstance%
+HKR,"Instances\"%DefaultInstance%,"Altitude",0x00000000,%Altitude%
+HKR,"Instances\"%DefaultInstance%,"Flags",0x00010001,0x0
+
+[Driver.Files]
+procwatch.sys
+
+[SourceDisksFiles]
+procwatch.sys = 1
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[Strings]
+ManufacturerName = "procwatch"
+ServiceName      = "procwatch"
+DiskName         = "procwatch driver"
+DefaultInstance  = "procwatch instance"
+; 360000-389999 is the Activity Monitor range. A released driver must request
+; its own altitude from Microsoft; this value is for test machines.
+Altitude         = "370030"

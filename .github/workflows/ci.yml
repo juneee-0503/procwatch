@@ -1,0 +1,146 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Tests must never touch a developer's real settings.
+  XDG_CONFIG_HOME: ${{ github.workspace }}/.ci-config
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked
+      - name: Clippy (warnings are errors)
+        run: cargo clippy --release --locked --all-targets -- -D warnings
+      - name: Unit tests
+        run: cargo test --release --locked
+      - name: Parser fuzzing (smoke, fixed seed)
+        run: cargo test --release --locked fuzz_ -- --ignored
+        env:
+          PW_FUZZ_ITERATIONS: "3000"
+      - name: Compile the Windows driver (only if the WDK is installed)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $head = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Include" -Recurse -Filter fltKernel.h -ErrorAction SilentlyContinue | Select-Object -Last 1
+          if (-not $head) { "WDK not installed: the driver was not compiled"; exit 0 }
+          $km = $head.Directory.FullName
+          $root = Split-Path $km
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" && cl /nologo /c /kernel /W4 /WX /GS /D_AMD64_ /DAMD64 /D_WIN64 /DNTDDI_VERSION=0x0A000000 /I`"$km`" /I`"$root\shared`" /I`"$root\crt`" driver\windows\procwatch.c"
+          if ($LASTEXITCODE -ne 0) { throw "driver failed to compile" }
+          "The driver compiled. It has still never been loaded."
+      - name: Benchmarks (fail on regressions)
+        run: cargo test --release --locked bench_ -- --ignored --nocapture
+      - name: Self-test (measured capture rates etc.)
+        timeout-minutes: 5
+        env:
+          PW_SELFTEST_URL: https://raw.githubusercontent.com/juneee-0503/procwatch/${{ github.sha }}/Cargo.lock
+        run: ./target/release/procwatch --selftest
+        shell: bash
+      - name: Self-test as root (kernel process events, blocking)
+        if: runner.os == 'Linux'
+        timeout-minutes: 5
+        env:
+          PW_SELFTEST_URL: https://raw.githubusercontent.com/juneee-0503/procwatch/${{ github.sha }}/Cargo.lock
+        run: sudo -E ./target/release/procwatch --selftest
+        shell: bash
+      - name: Soak test as root (activity capture running)
+        if: runner.os == 'Linux'
+        timeout-minutes: 4
+        run: sudo -E ./target/release/procwatch --soak 1
+        shell: bash
+      - name: Soak test (2 minutes, headless)
+        timeout-minutes: 8
+        run: ./target/release/procwatch --soak 2
+        shell: bash
+      - name: Content rules and Sigma rules parse
+        run: ./target/release/procwatch --check-rules rules/sigma
+        shell: bash
+
+  # Only a real kernel's verifier can accept the eBPF programs, so this runs
+  # them on several kernels without waiting for the full build.
+  ebpf:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --locked
+      - name: Kernel
+        run: uname -r
+      - name: Load the sensor
+        run: sudo -E ./target/debug/procwatch --ebpf-check
+      - name: Self-test as root
+        timeout-minutes: 5
+        run: sudo -E ./target/debug/procwatch --selftest | sed -n '/Attack detection/,/^$/p'
+
+  # The protections in docs/security.md, against a real installed service.
+  acceptance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked
+      - name: T-01 to T-13
+        timeout-minutes: 10
+        run: sudo tests/acceptance.sh target/release/procwatch
+
+  windows-service:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked
+      - name: Install and exercise the service
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          .\deploy\windows\install.ps1 -Binary target\release\procwatch.exe
+          Start-Sleep 8
+          if ((Get-Service procwatch).Status -ne 'Running') { throw "the service isn't running" }
+          $p = (Get-CimInstance Win32_Service -Filter "Name='procwatch'").ProcessId
+          Stop-Process -Id $p -Force
+          Start-Sleep 10
+          if ((Get-Service procwatch).Status -ne 'Running') { throw "the service wasn't restarted" }
+          Stop-Service procwatch
+          sc.exe delete procwatch
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans licenses sources

@@ -163,7 +163,7 @@ pub fn options(frame: &mut Frame, app: &mut App, screen: Rect) {
     // Keep the cursor visible on short terminals.
     let cursor_line = lines.iter().position(|l| l.style == sel_style()).unwrap_or(0);
     let scroll = cursor_line.saturating_sub(inner.height.saturating_sub(2) as usize);
-    let footer = crate::config::path().map(|p| format!(" Saved to {}", p.display())).unwrap_or_default();
+    let footer = crate::common::paths::config_path().map(|p| format!(" Saved to {}", p.display())).unwrap_or_default();
     frame.render_widget(Paragraph::new(lines).scroll((scroll as u16, 0)), Rect { height: inner.height.saturating_sub(1), ..inner });
     frame.render_widget(Paragraph::new(muted(footer)), Rect { y: inner.bottom().saturating_sub(1), height: 1, ..inner });
 }
@@ -176,6 +176,8 @@ pub fn help(frame: &mut Frame, screen: Rect) {
             ("right-click", "same, with the mouse"),
             ("double-click  i", "open full details"),
             ("1–9, 0", "pages: Procs Perf Net Files Persist Timeline Logs Trace Alerts Case"),
+            (",", "settings"),
+            ("!  @  #", "acknowledge alarms, pause sound, alarm list"),
         ]),
         ("Finding things", &[
             ("/", "search by name, PID, path, user"),
@@ -221,16 +223,18 @@ pub fn help(frame: &mut Frame, screen: Rect) {
             ("Persist: c  r", "changes since baseline · rescan autostart"),
             ("Logs: w  a", "time window · important/all"),
             ("Case: c s v e", "collect · seal · verify · export report"),
+            ("Case: X", "export STIX 2.1, MISP event, ECS timeline"),
             ("Case: a C i", "note · conclusion · isolation scripts"),
         ]),
         ("Detect page (9)", &[
             ("S", "suppress the selected rule for a program (with a reason)"),
+            ("T", "trust the program's publisher (weak signals only)"),
             ("u", "show / hide suppressed detections"),
             ("R", "reload Sigma rules and suppressions from disk"),
             ("m  enter", "record as finding · go to the subject"),
             ("tab", "detections → alerts → alert rules"),
         ]),
-        ("Other", &[("p", "pause all updates"), ("e", "export list to CSV"), ("o", "options: columns, refresh rate"), ("q", "quit")]),
+        ("Other", &[(": ctrl+k", "command palette: every action by name"), ("p", "pause all updates"), ("e", "export list to CSV"), ("o", "options: columns, refresh rate"), ("q", "quit")]),
     ];
     let render = |groups: &[(&str, &[(&str, &str)])]| {
         let mut lines: Vec<Line> = Vec::new();
@@ -338,4 +342,44 @@ pub fn find_results(frame: &mut Frame, app: &mut App, area: Rect) {
         Paragraph::new(muted(format!("{} result(s) · enter goes to the process", hits.len()))),
         Rect { y: inner.bottom().saturating_sub(1), height: 1, ..inner },
     );
+}
+
+/// `--run` confirmation: this executes the program for real.
+pub fn launch_confirm(frame: &mut Frame, app: &mut App, screen: Rect) {
+    let crate::app::Mode::LaunchConfirm(argv) = &app.mode else { return };
+    let rect = centered(screen, 84, 13);
+    frame.render_widget(Clear, rect);
+    let lines = vec![
+        Line::default(),
+        Line::from(Span::styled("  This will RUN the program on this computer:", Style::new().add_modifier(Modifier::BOLD))),
+        Line::default(),
+        Line::from(Span::styled(format!("    {}", truncate(&argv.join(" "), 76)), Style::new().fg(WARN))),
+        Line::default(),
+        Line::from("  Only do this inside an isolated analysis VM or sandbox you can reset."),
+        Line::from("  procwatch observes it from its first instruction; it does not contain it."),
+        Line::from(muted("  Output goes to a log in a new case; every step is in the custody log.")),
+        Line::default(),
+        Line::from(vec![Span::styled("  y", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)), Span::raw(" run under trace    "), Span::styled("esc", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)), Span::raw(" cancel")]),
+    ];
+    frame.render_widget(Paragraph::new(lines).block(frame_block("Launch and trace", BAD)), rect);
+}
+
+/// Command palette.
+pub fn palette(frame: &mut Frame, app: &mut App, screen: Rect) {
+    let crate::app::Mode::Palette { input, cursor } = &app.mode else { return };
+    let list = app.palette_entries(input);
+    let h = (list.len() as u16 + 4).clamp(6, screen.height.saturating_sub(6));
+    let rect = Rect { y: screen.y + 3, ..centered(screen, 80, h) };
+    frame.render_widget(Clear, rect);
+    let mut lines = vec![Line::from(vec![Span::styled(" : ", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)), Span::raw(input.clone()), Span::styled(" ", Style::new().add_modifier(Modifier::REVERSED))]), Line::default()];
+    let rows = (h as usize).saturating_sub(4);
+    let off = cursor.saturating_sub(rows.saturating_sub(1));
+    for (i, e) in list.iter().enumerate().skip(off).take(rows) {
+        let line = Line::from(pad_line(vec![Span::raw(format!(" {:<60}", e.label)), muted(format!("{:>14}", e.hint))], 78));
+        lines.push(if i == *cursor { line.style(sel_style()) } else { line });
+    }
+    if list.is_empty() {
+        lines.push(Line::from(muted(" no matching action")));
+    }
+    frame.render_widget(Paragraph::new(lines).block(frame_block("Commands", ACCENT)), rect);
 }

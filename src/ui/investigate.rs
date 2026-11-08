@@ -12,7 +12,7 @@ use ratatui::{
 use super::spinner;
 use super::widgets::*;
 use crate::app::{App, Mode};
-use crate::case::Check;
+use crate::forensics::case::Check;
 
 fn heading(t: &str) -> Span<'static> {
     Span::styled(t.to_string(), Style::new().add_modifier(Modifier::BOLD))
@@ -205,7 +205,7 @@ pub fn timeline(frame: &mut Frame, app: &mut App, area: Rect) {
         .map(|i| {
             let e = &app.ir.timeline[*i];
             let text = if e.source == "file" { truncate_left(&e.detail, detail_w) } else { e.detail.clone() };
-            let approx = if e.basis == crate::model::Basis::Observed { "~" } else { " " };
+            let approx = if e.basis == crate::common::model::Basis::Observed { "~" } else { " " };
             let mark = match (&e.tag, e.cluster) {
                 (Some(_), _) => Span::styled("★", Style::new().fg(WARN).add_modifier(Modifier::BOLD)),
                 (None, Some(c)) => Span::styled(format!("{c}"), Style::new().fg(BAD)),
@@ -227,7 +227,7 @@ pub fn timeline(frame: &mut Frame, app: &mut App, area: Rect) {
     // Selected event: id, time semantics, links, bookmark.
     let e = &app.ir.timeline[visible[app.ir.tl_selected]];
     let mut l1 = vec![
-        Span::styled(format!(" {} ", crate::model::short_id(e.id)), Style::new().fg(ACCENT)),
+        Span::styled(format!(" {} ", crate::common::model::short_id(e.id)), Style::new().fg(ACCENT)),
         muted(format!("{} time {}", e.basis.label(), e.time.to_rfc3339())),
     ];
     if let Some(o) = e.observed {
@@ -246,13 +246,245 @@ pub fn timeline(frame: &mut Frame, app: &mut App, area: Rect) {
 
 // ── logs ───────────────────────────────────────────────────────────────
 
+/// Per-process operations, in the manner of Process Monitor.
+pub fn activity(frame: &mut Frame, app: &mut App, area: Rect) {
+    app.refresh_activity_view();
+    let total = app.visible_activity().len();
+    let mut extra: Vec<Span> = vec![muted("   ")];
+    match (app.ir.capture_method, &app.ir.capture_error) {
+        (Some(m), _) => extra.push(Span::styled(format!("● capturing via {m}"), Style::new().fg(BAD))),
+        (None, Some(e)) => extra.push(Span::styled(format!("can't capture: {e}"), Style::new().fg(WARN))),
+        (None, None) => extra.push(muted("stopped — press c to capture")),
+    }
+    let dropped = crate::activity::dropped();
+    if dropped > 0 {
+        extra.push(Span::styled(format!("  {dropped} events dropped"), Style::new().fg(WARN)));
+    }
+    frame.render_widget(Paragraph::new(search_bar(app, "operations", total, extra)), Rect { height: 1, ..area });
+    app.hit.search = Rect { height: 1, width: area.width / 3, ..area };
+    frame.render_widget(
+        Paragraph::new(muted(" Newest first; ×n = n identical operations merged. Filter e.g. source:registry  name:powershell  kind:write  path:\\\\Run")),
+        Rect { y: area.y + 1, height: 1, ..area },
+    );
+    let table = Rect { y: area.y + 3, height: area.height.saturating_sub(3), ..area };
+    if total == 0 {
+        frame.render_widget(Paragraph::new(muted(" Nothing captured. Windows needs administrator rights; Linux and macOS need root.")), table);
+        return;
+    }
+    let specs = [
+        ColSpec::new("Time", 12, false),
+        ColSpec::new("Process", 18, false),
+        ColSpec::new("PID", 7, true),
+        ColSpec::new("Class", 8, false),
+        ColSpec::new("Operation", 16, false),
+        ColSpec::new("Size", 9, true),
+        ColSpec::new("Result", 16, false),
+        ColSpec::new("Target", 0, false),
+    ];
+    let height = table.height.saturating_sub(1) as usize;
+    app.ir.ac_selected = app.ir.ac_selected.min(total - 1);
+    app.ir.ac_offset = scroll_window(app.ir.ac_offset, app.ir.ac_selected, height, total);
+    let target_w = (table.width as usize).saturating_sub(93);
+    let rows = app
+        .visible_activity()
+        .iter()
+        .skip(app.ir.ac_offset)
+        .take(height)
+        .filter_map(|seq| app.activity_at(*seq))
+        .map(|e| {
+            let op = if e.count > 1 { format!("{} ×{}", e.op, e.count) } else { e.op.to_string() };
+            vec![
+                vec![muted(e.time.format("%H:%M:%S%.3f").to_string())],
+                vec![Span::raw(e.name.to_string())],
+                vec![muted(e.pid.to_string())],
+                vec![Span::styled(e.class.label(), source_style(e.class.label()))],
+                vec![Span::raw(op)],
+                vec![muted(if e.bytes > 0 { crate::ui::human_bytes(e.bytes) } else { String::new() })],
+                vec![match e.status.as_deref() {
+                    Some("SUCCESS") | None => muted(e.status.clone().unwrap_or_default()),
+                    Some(s) => Span::styled(s.to_string(), Style::new().fg(WARN)),
+                }],
+                vec![Span::raw(truncate_left(&e.path, target_w))],
+            ]
+        })
+        .collect();
+    let mut scroll = 0;
+    app.hit.list_rows = draw_table(frame, table, &specs, rows, &mut scroll, Some(app.ir.ac_selected - app.ir.ac_offset));
+}
+
+fn severity_style(s: crate::common::model::Severity) -> Style {
+    use crate::common::model::Severity::{Critical, High, Medium};
+    match s {
+        Critical | High => Style::new().fg(BAD),
+        Medium => Style::new().fg(WARN),
+        _ => Style::new().fg(MUTED),
+    }
+}
+
+/// Attacks in progress and every finding behind them.
+pub fn defense(frame: &mut Frame, app: &mut App, area: Rect) {
+    let total = app.visible_threats().len();
+    let extra = vec![muted(format!("   {} attacks", app.ir.incidents.len()))];
+    frame.render_widget(Paragraph::new(search_bar(app, "findings", total, extra)), Rect { height: 1, ..area });
+    app.hit.search = Rect { height: 1, width: area.width / 3, ..area };
+    let shown = app.ir.incidents.len().min(4) as u16;
+    let lines: Vec<Line> = app
+        .ir
+        .incidents
+        .iter()
+        .take(4)
+        .map(|i| Line::from(vec![Span::styled(format!(" {:<9}", i.severity.label()), severity_style(i.severity)), Span::raw(i.summary())]))
+        .collect();
+    let head = Rect { y: area.y + 1, height: shown.min(area.height.saturating_sub(1)), ..area };
+    frame.render_widget(Paragraph::new(lines), head);
+    let table = Rect { y: head.bottom() + 1, height: area.height.saturating_sub(shown + 2), ..area };
+    if total == 0 {
+        let note = if cfg!(target_os = "linux") { " No findings. Reading logs and packets needs root." } else { " No findings. Most sources here are Linux only: see docs/defense.md." };
+        frame.render_widget(Paragraph::new(muted(note)), table);
+        return;
+    }
+    let specs = [
+        ColSpec::new("Time", 12, false),
+        ColSpec::new("Severity", 9, false),
+        ColSpec::new("Stage", 12, false),
+        ColSpec::new("Source", 20, false),
+        ColSpec::new("Finding", 0, false),
+    ];
+    let height = table.height.saturating_sub(1) as usize;
+    app.ir.th_selected = app.ir.th_selected.min(total - 1);
+    app.ir.th_offset = scroll_window(app.ir.th_offset, app.ir.th_selected, height, total);
+    let rows = app
+        .visible_threats()
+        .iter()
+        .skip(app.ir.th_offset)
+        .take(height)
+        .filter_map(|i| app.ir.threats.get(*i))
+        .map(|t| {
+            vec![
+                vec![muted(t.time.format("%H:%M:%S").to_string())],
+                vec![Span::styled(t.severity.label(), severity_style(t.severity))],
+                vec![muted(t.stage.label())],
+                vec![Span::raw(t.source.map_or_else(String::new, |s| s.to_string()))],
+                vec![Span::raw(t.title.clone())],
+            ]
+        })
+        .collect();
+    let mut scroll = 0;
+    app.hit.list_rows = draw_table(frame, table, &specs, rows, &mut scroll, Some(app.ir.th_selected - app.ir.th_offset));
+}
+
+/// One finding, and the attack it's part of.
+pub fn threat_detail(frame: &mut Frame, app: &mut App, screen: Rect) {
+    let rect = centered(screen, screen.width.saturating_sub(6), screen.height.saturating_sub(4));
+    frame.render_widget(Clear, rect);
+    let block = Block::bordered().title(Span::styled(" Finding ", Style::new().fg(ACCENT)));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let Some(t) = app.selected_threat() else { return };
+    let row = |k: &str, v: String| Line::from(vec![muted(format!(" {k:<10}")), Span::raw(v)]);
+    let mut lines = vec![
+        row("Time", t.time.format("%Y-%m-%d %H:%M:%S").to_string()),
+        row("Finding", t.title.clone()),
+        row("Rule", t.rule.to_string()),
+        row("Severity", t.severity.label().to_string()),
+        row("Stage", t.stage.label().to_string()),
+    ];
+    if let Some(s) = t.source {
+        lines.push(row("Source", s.to_string()));
+    }
+    if let Some(u) = &t.user {
+        lines.push(row("User", u.clone()));
+    }
+    if let Some(p) = t.pid {
+        lines.push(row("Process", p.to_string()));
+    }
+    if !t.evidence.is_empty() {
+        lines.push(row("Evidence", t.evidence.clone()));
+    }
+    let incident = app.ir.incidents.iter().find(|i| i.steps.iter().any(|s| s.time == t.time && s.rule == t.rule));
+    if let Some(i) = incident {
+        lines.push(Line::from(""));
+        lines.push(Line::from(heading(&format!(" {}", i.summary()))));
+        for s in &i.steps {
+            lines.push(Line::from(muted(format!(" {} {:<12} {}", s.time.format("%H:%M:%S"), s.stage.label(), s.title))));
+        }
+        if i.more > 0 {
+            lines.push(Line::from(muted(format!(" … and {} more", i.more))));
+        }
+        if i.joined_by_time {
+            lines.push(Line::from(muted(" Findings with no source joined this attack by timing alone: check them.")));
+        }
+    }
+    let scroll = app.perf_scroll.min(lines.len().saturating_sub(1)) as u16;
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)).wrap(ratatui::widgets::Wrap { trim: false }), inner);
+}
+
+/// One operation in full, with its call stack.
+pub fn activity_detail(frame: &mut Frame, app: &mut App, screen: Rect) {
+    let rect = centered(screen, screen.width.saturating_sub(6), screen.height.saturating_sub(4));
+    frame.render_widget(Clear, rect);
+    let block = Block::bordered().title(Span::styled(" Operation ", Style::new().fg(ACCENT)));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let Some(e) = app.visible_activity().get(app.ir.ac_selected).and_then(|s| app.activity_at(*s)) else { return };
+    let row = |k: &str, v: String| Line::from(vec![muted(format!(" {k:<10}")), Span::raw(v)]);
+    let mut lines = vec![
+        row("Time", e.time.format("%Y-%m-%d %H:%M:%S%.3f").to_string()),
+        row("Process", format!("{} ({})", e.name, e.pid)),
+        row("Operation", format!("{} {}", e.class.label(), e.op)),
+        row("Target", e.path.clone()),
+    ];
+    if let Some(s) = &e.status {
+        lines.push(row("Result", s.clone()));
+    }
+    if e.count > 1 {
+        lines.push(row("Repeated", format!("{} times", e.count)));
+    }
+    if e.bytes > 0 {
+        lines.push(row("Size", crate::ui::human_bytes(e.bytes)));
+    }
+    if !e.detail.is_empty() {
+        lines.push(row("Detail", e.detail.clone()));
+    }
+    lines.push(Line::from(""));
+    match &e.stack {
+        Some(stack) => {
+            lines.push(Line::from(heading(" Call stack (innermost first)")));
+            lines.extend(stack.iter().enumerate().map(|(i, f)| Line::from(muted(format!(" {i:>3}  {f}")))));
+        }
+        None => lines.push(Line::from(muted(" No call stack: Windows only, with `stacks: true` in capture.yml."))),
+    }
+    let scroll = app.perf_scroll.min(lines.len().saturating_sub(1)) as u16;
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
+}
+
+/// What the shown operations add up to, like Procmon's Count Occurrences.
+pub fn activity_summary(frame: &mut Frame, app: &mut App, screen: Rect) {
+    let rect = centered(screen, screen.width.saturating_sub(6), screen.height.saturating_sub(4));
+    frame.render_widget(Clear, rect);
+    let block = Block::bordered().title(Span::styled(" Activity summary (current filter) ", Style::new().fg(ACCENT)));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let width = (inner.width as usize).saturating_sub(24);
+    let mut lines = Vec::new();
+    for (title, rows) in app.activity_summary() {
+        lines.push(Line::from(heading(&format!(" {title}"))));
+        for (count, bytes, name) in rows {
+            let size = if bytes > 0 { crate::ui::human_bytes(bytes) } else { String::new() };
+            lines.push(Line::from(vec![muted(format!("  {count:>8}  {size:>9}  ")), Span::raw(truncate_left(&name, width))]));
+        }
+        lines.push(Line::from(""));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 pub fn logs(frame: &mut Frame, app: &mut App, area: Rect) {
     let visible = app.visible_logs();
     let window = match app.ir.log_minutes {
         m if m >= 60 => format!("last {} h", m / 60),
         m => format!("last {m} min"),
     };
-    let scope = if app.ir.log_scope == crate::logs::Scope::Important { "errors, warnings & security sources" } else { "all messages" };
+    let scope = if app.ir.log_scope == crate::host::logs::Scope::Important { "errors, warnings & security sources" } else { "all messages" };
     let status = match &app.ir.logs {
         Some(l) if l.pending => format!("   {} reading system log…", spinner(app)),
         Some(l) => format!("   read {} ago", age(l.fetched.elapsed().as_secs())),
@@ -351,10 +583,10 @@ pub fn case(frame: &mut Frame, app: &mut App, area: Rect) {
             if case.conclusion.is_empty() { muted("none yet — press C") } else { Span::raw(case.conclusion.clone()) },
         ]),
         {
-            let chain = case.chain_status();
+            let chain = case.chain_status_cached();
             let reg = case.register();
-            let partial = reg.iter().filter(|r| r.status == crate::case::Status::Partial).count();
-            let failed = reg.iter().filter(|r| r.status == crate::case::Status::Failed).count();
+            let partial = reg.iter().filter(|r| r.status == crate::forensics::case::Status::Partial).count();
+            let failed = reg.iter().filter(|r| r.status == crate::forensics::case::Status::Failed).count();
             let chain_span = match &chain.broken {
                 Some((l, why)) => Span::styled(format!(" Custody chain BROKEN at line {l}: {why}"), Style::new().fg(BAD).add_modifier(Modifier::BOLD)),
                 None if chain.head.is_empty() => muted(" Custody chain: no chained records yet"),
@@ -538,6 +770,10 @@ pub fn file_report(frame: &mut Frame, app: &mut App, screen: Rect) {
         }
         let sig_style = if r.signature.starts_with("valid") { Style::new().fg(OK) } else { Style::new().fg(WARN) };
         lines.push(Line::from(vec![Span::styled(format!(" {:<14}", "Signature"), Style::new().fg(TEXT_DIM)), Span::styled(r.signature.clone(), sig_style)]));
+        if let Some(g) = &r.gatekeeper {
+            let st = if g.starts_with("REJECTED") { Style::new().fg(BAD) } else if g.starts_with("accepted") { Style::new().fg(OK) } else { Style::new().fg(TEXT_DIM) };
+            lines.push(Line::from(vec![Span::styled(format!(" {:<14}", "Gatekeeper"), Style::new().fg(TEXT_DIM)), Span::styled(g.clone(), st)]));
+        }
         for (k, v) in &r.signature_details {
             lines.push(kv(&format!("  {k}"), v.clone()));
         }
@@ -548,7 +784,7 @@ pub fn file_report(frame: &mut Frame, app: &mut App, screen: Rect) {
         if !r.origin.is_empty() {
             lines.push(Line::from(vec![Span::styled(format!(" {:<14}", "Origin"), Style::new().fg(TEXT_DIM)), Span::styled(r.origin.join(" · "), Style::new().fg(WARN))]));
         }
-        if crate::persistence::risky_location(&r.path) {
+        if crate::common::paths::risky_location(&r.path) {
             lines.push(Line::from(Span::styled(" ! located in a temporary or user-writable folder", Style::new().fg(BAD))));
         }
     }
@@ -621,7 +857,7 @@ pub fn file_report(frame: &mut Frame, app: &mut App, screen: Rect) {
         lines.push(Line::default());
         lines.push(Line::from(heading(&format!(" Entitlements ({})", r.entitlements.len()))));
         for e in &r.entitlements {
-            let style = if crate::fileinfo::risky_entitlement(e) { Style::new().fg(BAD) } else { Style::new() };
+            let style = if crate::files::info::risky_entitlement(e) { Style::new().fg(BAD) } else { Style::new() };
             lines.push(Line::from(vec![Span::raw("   "), Span::styled(e.clone(), style)]));
         }
     }
