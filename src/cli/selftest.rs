@@ -640,6 +640,9 @@ fn ebpf_probe(r: &mut Report) {
         }
     };
     r.defense.push(format!("eBPF: {} tracepoints attached, not on this kernel: {:?}", sensor.attached.len(), sensor.missing));
+    for p in &sensor.partly {
+        r.defense.push(format!("eBPF: failed: {p}"));
+    }
     const SHORT: u32 = 500;
     let quiet = |c: &mut Command| {
         let _ = c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();

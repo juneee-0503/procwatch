@@ -325,6 +325,10 @@ impl Module for DefenseModule {
         {
             self.sniffer = sniff::Sniffer::start().ok();
             match ebpf::Sensor::start() {
+                Ok(s) if !s.partly.is_empty() => {
+                    self.sensor_problem = Some(format!("blind on some CPUs: {}", s.partly.join("; ")));
+                    self.sensor = Some(s);
+                }
                 Ok(s) => self.sensor = Some(s),
                 Err(e) => self.sensor_problem = Some(e),
             }

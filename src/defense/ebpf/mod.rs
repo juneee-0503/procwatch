@@ -64,6 +64,9 @@ pub fn check() -> i32 {
     if !sensor.missing.is_empty() {
         println!("not on this kernel: {}", sensor.missing.join(", "));
     }
+    for p in &sensor.partly {
+        println!("failed: {p}");
+    }
     let mark = "/bin/true";
     // Attaching takes effect at once on some kernels and not on others.
     std::thread::sleep(Duration::from_millis(300));
@@ -86,5 +89,5 @@ pub fn check() -> i32 {
     println!("saw {seen} of 3 test programs start; {} records read, {execs} execs, {} lost", sensor.seen.load(std::sync::atomic::Ordering::Relaxed), sensor.lost());
     samples.iter().for_each(|s| println!("  {s}"));
     let every_cpu = per_cpu(&sensor);
-    i32::from(seen != 3 || !every_cpu)
+    i32::from(seen != 3 || !every_cpu || !sensor.partly.is_empty())
 }

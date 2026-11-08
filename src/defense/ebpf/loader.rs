@@ -13,6 +13,8 @@ use super::program::{self, Kind, Maps, RECORD};
 
 const MAP_CREATE: i32 = 0;
 const MAP_LOOKUP: i32 = 1;
+const LINK_CREATE: i32 = 28;
+const ATTACH_PERF_EVENT: u32 = 41;
 const PROG_LOAD: i32 = 5;
 const MAP_ARRAY: u32 = 2;
 const MAP_RINGBUF: u32 = 27;
@@ -82,7 +84,8 @@ fn tracepoint(name: &str) -> Option<u64> {
     ["/sys/kernel/tracing", "/sys/kernel/debug/tracing"].iter().find_map(|root| std::fs::read_to_string(format!("{root}/events/syscalls/{name}/id")).ok()?.trim().parse().ok())
 }
 
-fn attach_on(id: u64, program: &OwnedFd, cpu: i32) -> std::io::Result<OwnedFd> {
+/// The perf event a tracepoint program hangs on, for one CPU.
+fn perf_event(id: u64, cpu: i32) -> std::io::Result<OwnedFd> {
     let mut attr = [0u64; 16];
     attr[0] = u64::from(PERF_TYPE_TRACEPOINT) | u64::from(PERF_ATTR_SIZE) << 32;
     attr[1] = id;
@@ -91,35 +94,59 @@ fn attach_on(id: u64, program: &OwnedFd, cpu: i32) -> std::io::Result<OwnedFd> {
     if n < 0 {
         return Err(std::io::Error::last_os_error());
     }
-    let event = fd(n);
-    unsafe {
-        if libc::ioctl(event.as_raw_fd(), PERF_SET_BPF, program.as_raw_fd()) != 0 || libc::ioctl(event.as_raw_fd(), PERF_ENABLE, 0) != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-    }
-    Ok(event)
+    Ok(fd(n))
 }
 
-/// Once per CPU. One event used to be enough, but on newer kernels (seen on
-/// 7.0) a program attached on CPU 0 only runs there. Older kernels then run
-/// it once per attachment, which `Dedup` undoes. The kernel allows a
-/// tracepoint 64 programs, and offline CPUs refuse: neither stops the rest.
-fn attach(id: u64, program: &OwnedFd) -> std::io::Result<Vec<OwnedFd>> {
-    let cpus = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_CONF) }.clamp(1, MAX_ATTACHMENTS);
-    let mut events = Vec::new();
-    let mut first_error = None;
-    for cpu in 0..cpus as i32 {
-        match attach_on(id, program, cpu) {
-            Ok(e) => events.push(e),
-            Err(e) => {
-                first_error.get_or_insert(e);
+/// Attach with a BPF link, the kernel's current interface: the link owns the
+/// attachment, and closing it detaches. Kernels before 5.15 lack it for perf
+/// events and fall back to the older ioctl.
+fn attach_on(id: u64, program: &OwnedFd, cpu: i32) -> std::io::Result<Vec<OwnedFd>> {
+    let event = perf_event(id, cpu)?;
+    let mut attr = [0u64; 16];
+    attr[0] = program.as_raw_fd() as u64 | (event.as_raw_fd() as u64) << 32;
+    attr[1] = u64::from(ATTACH_PERF_EVENT);
+    let held = match bpf(LINK_CREATE, &mut attr) {
+        Ok(link) => vec![fd(link), event],
+        Err(e) if e.raw_os_error() == Some(libc::EINVAL) => {
+            if unsafe { libc::ioctl(event.as_raw_fd(), PERF_SET_BPF, program.as_raw_fd()) } != 0 {
+                return Err(std::io::Error::last_os_error());
             }
+            vec![event]
+        }
+        Err(e) => return Err(e),
+    };
+    if unsafe { libc::ioctl(held[held.len() - 1].as_raw_fd(), PERF_ENABLE, 0) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(held)
+}
+
+/// One program per CPU. The kernel won't attach the same program to one
+/// tracepoint twice (EEXIST), and newer kernels (seen on 7.0) run a program
+/// only on the CPU its event is for. Older kernels run every copy on every
+/// CPU, which `Dedup` undoes. A tracepoint takes at most 64 programs.
+/// Programs, what holds them attached, and the CPUs that refused.
+type Attached = (Vec<OwnedFd>, Vec<OwnedFd>, Vec<String>);
+
+fn attach(name: &str, id: u64, code: &[u8]) -> Result<Attached, String> {
+    let cpus = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_CONF) }.clamp(1, MAX_ATTACHMENTS);
+    let (mut programs, mut held, mut problems) = (Vec::new(), Vec::new(), Vec::new());
+    for cpu in 0..cpus as i32 {
+        let p = load(name, code)?;
+        match attach_on(id, &p, cpu) {
+            Ok(fds) => {
+                held.extend(fds);
+                programs.push(p);
+            }
+            // Offline CPUs refuse; anything else is worth knowing about.
+            Err(e) if e.raw_os_error() == Some(libc::ENODEV) => {}
+            Err(e) => problems.push(format!("{name} on CPU {cpu}: {e}")),
         }
     }
-    match (events.is_empty(), first_error) {
-        (true, Some(e)) => Err(e),
-        _ => Ok(events),
+    if programs.is_empty() {
+        return Err(problems.first().cloned().unwrap_or_else(|| format!("{name}: no CPU took it")));
     }
+    Ok((programs, held, problems))
 }
 
 /// The shared memory of a ring buffer.
@@ -197,6 +224,8 @@ pub struct Sensor {
     pub rx: Receiver<Event>,
     pub attached: Vec<&'static str>,
     pub missing: Vec<&'static str>,
+    /// Attachments that failed on some CPUs: there, nothing is seen.
+    pub partly: Vec<String>,
     pub dropped: Arc<AtomicU64>,
     pub seen: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
@@ -217,15 +246,16 @@ impl Sensor {
         let ring = map(MAP_RINGBUF, 0, 0, RING_SIZE as u32).map_err(|e| format!("ring buffer: {e} ({hint})"))?;
         let lost_map = map(MAP_ARRAY, 4, 8, 1).map_err(|e| format!("counter: {e} ({hint})"))?;
         let maps = Maps { ring: ring.as_raw_fd(), lost: lost_map.as_raw_fd() };
-        let (mut programs, mut events, mut attached, mut missing) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let (mut programs, mut events, mut attached, mut missing, mut partly) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for (name, code) in program::all(maps)? {
             let Some(id) = tracepoint(name) else {
                 missing.push(name);
                 continue;
             };
-            let p = load(name, &code)?;
-            events.extend(attach(id, &p).map_err(|e| format!("{name}: {e}"))?);
-            programs.push(p);
+            let (p, held, problems) = attach(name, id, &code)?;
+            programs.extend(p);
+            events.extend(held);
+            partly.extend(problems);
             attached.push(name);
         }
         if attached.is_empty() {
@@ -259,7 +289,7 @@ impl Sensor {
             })
             .map_err(|e| e.to_string())?;
         debug_assert_eq!(RECORD % 8, 0);
-        Ok(Sensor { rx, attached, missing, dropped, seen, stop, lost_map, _programs: programs, _events: events })
+        Ok(Sensor { rx, attached, missing, partly, dropped, seen, stop, lost_map, _programs: programs, _events: events })
     }
 
     /// Records lost because the ring or queue was full.
