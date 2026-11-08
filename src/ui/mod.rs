@@ -330,7 +330,11 @@ fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
             Tab::Trace if app.trace.is_none() => vec![h("1", "processes"), h("?", "help"), h("q", "quit")],
             Tab::Trace => {
                 let running = app.trace.as_ref().is_some_and(|t| t.is_running());
-                let mut v = vec![h("↑↓", "browse"), h("enter", "go to process"), h("c", "filter type"), h("/", "search")];
+                let mut v = if app.trace_tree {
+                    vec![h("↑↓", "browse"), h("enter", "go to process"), h("v", "timeline")]
+                } else {
+                    vec![h("↑↓", "browse"), h("enter", "go to process"), h("v", "process tree"), h("c", "filter type"), h("/", "search")]
+                };
                 v.push(if running { h("x", "stop") } else { h("T", "trace again") });
                 v.extend([h("e", "export report"), h("?", "help")]);
                 v

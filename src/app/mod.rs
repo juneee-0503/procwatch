@@ -660,6 +660,10 @@ pub struct App {
     pub trace_offset: usize,
     /// Keep the newest trace event selected as events arrive.
     pub trace_follow: bool,
+    /// Trace page shows the process tree instead of the timeline.
+    pub trace_tree: bool,
+    pub trace_tree_selected: usize,
+    pub trace_tree_offset: usize,
 
     // Details.
     pub pane_visible: bool,
@@ -787,6 +791,9 @@ impl App {
             trace_selected: 0,
             trace_offset: 0,
             trace_follow: true,
+            trace_tree: false,
+            trace_tree_selected: 0,
+            trace_tree_offset: 0,
             pane_visible: cfg.details_pane,
             detail_full: false,
             pane_tab: PaneTab::Overview,

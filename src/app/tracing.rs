@@ -18,7 +18,7 @@ impl App {
             return;
         }
         self.stop_trace();
-        let Some(t) = Trace::new(pid, &self.tree, &self.connections) else {
+        let Some(mut t) = Trace::new(pid, &self.tree, &self.connections) else {
             self.set_status(StatusLevel::Error, format!("Process {pid} is no longer running"));
             return;
         };
@@ -28,7 +28,20 @@ impl App {
         let stop = Arc::new(AtomicBool::new(false));
         self.trace_stop = stop.clone();
         crate::engine::jobs::spawn_trace_poller(self.tx.clone(), self.trace_targets.clone(), stop);
-        self.set_status(StatusLevel::Success, format!("Tracing {} ({pid}) and its child processes", t.root_name));
+        // Event-driven lifecycle for the whole tree: the deep-trace watcher
+        // sees children that live (or leave the tree) between refreshes.
+        let precise = if self.deep_enrolled(pid) {
+            self.ir.deep.traced
+        } else {
+            t.deep = self.deep_enrolled(pid) || self.deep_enroll(pid, "process-tree trace".into(), false);
+            if !t.deep {
+                // Nothing follows it: don't leave a dead enrollment behind.
+                self.ir.deep.enrolled.remove(&self.proc_key(pid));
+            }
+            t.deep
+        };
+        let how = if precise { format!("lifecycle by {}", crate::process::deeptrace::method()) } else { "sampled each refresh".into() };
+        self.set_status(StatusLevel::Success, format!("Tracing the process tree of {} ({pid}) — {how}", t.root_name));
         self.trace = Some(t);
         // A leftover search from the Processes page would hide events.
         self.query.clear();
@@ -43,11 +56,20 @@ impl App {
     pub fn stop_trace(&mut self) {
         self.trace_stop.store(true, Ordering::Relaxed);
         let mut stopped = None;
+        let mut deep_root = None;
         if let Some(t) = self.trace.as_mut() {
             if t.is_running() {
                 t.stop();
                 stopped = Some(t.elapsed().as_secs_f64());
+                if std::mem::take(&mut t.deep) {
+                    let start = t.procs.get(&t.root).map_or(0, |p| p.start);
+                    deep_root = Some(crate::common::model::ProcKey { pid: t.root, start });
+                }
             }
+        }
+        // End the deep trace this trace started (not one the analyst had).
+        if let Some(root) = deep_root {
+            self.deep_stop_key(root);
         }
         if let Some(secs) = stopped {
             self.set_status(StatusLevel::Info, format!("Trace stopped after {secs:.0}s — press e to export a report"));

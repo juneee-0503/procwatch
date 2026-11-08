@@ -283,6 +283,10 @@ impl App {
                 let n = self.ir.case.as_ref().map_or(0, |c| c.findings.len());
                 self.ir.finding_selected = step(self.ir.finding_selected, n);
             }
+            Tab::Trace if self.trace_tree => {
+                let n = self.trace.as_ref().map_or(0, |t| t.procs.len());
+                self.trace_tree_selected = step(self.trace_tree_selected, n);
+            }
             Tab::Trace => {
                 let n = self.visible_trace().len();
                 self.trace_selected = step(self.trace_selected, n);

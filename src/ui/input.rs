@@ -622,6 +622,7 @@ fn trace_key(app: &mut App, key: KeyEvent) {
             app.trace_follow = true;
         }
         KeyCode::Char('F') => app.trace_follow = !app.trace_follow,
+        KeyCode::Char('v') => app.trace_tree = !app.trace_tree,
         KeyCode::Char('T') => {
             if let Some(pid) = app.trace.as_ref().map(|t| t.root) {
                 app.start_trace(pid);
@@ -631,10 +632,11 @@ fn trace_key(app: &mut App, key: KeyEvent) {
             app.query.clear();
         }
         KeyCode::Enter => {
-            let pid = app
-                .visible_trace()
-                .get(app.trace_selected)
-                .and_then(|i| app.trace.as_ref().map(|t| t.events[*i].pid));
+            let pid = if app.trace_tree {
+                app.trace.as_ref().and_then(|t| t.lineage().get(app.trace_tree_selected).map(|l| l.pid))
+            } else {
+                app.visible_trace().get(app.trace_selected).and_then(|i| app.trace.as_ref().map(|t| t.events[*i].pid))
+            };
             if let Some(pid) = pid {
                 app.focus_pid(pid);
             }

@@ -7,8 +7,17 @@
 //! sockets, every couple of seconds for files), the same data the rest of
 //! procwatch shows. Very short-lived activity between samples can be
 //! missed; the report says so.
+//!
+//! When deep trace is available the trace is also fed the watcher's
+//! lifecycle events (kqueue / 20 ms procfs / 100 ms ToolHelp). That is what
+//! makes it a process-tree monitor rather than a parent-pid walk: a child
+//! that forks a grandchild and exits before the next refresh (the classic
+//! double-fork daemon) is adopted from the spawn event, and a member that
+//! is re-parented away from the tree stays a member and is reported as an
+//! escape. Members are identified by PID *and* start time, so a recycled
+//! PID never joins the tree.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local};
@@ -16,12 +25,20 @@ use serde::Serialize;
 
 use crate::process::inspect::OpenFile;
 use crate::network::{ConnState, Connection};
+use crate::process::deeptrace::{DtEvent, DtKind};
 use crate::process::{human_bytes, ProcessInfo, ProcessTree};
 
 const MAX_EVENTS: usize = 50_000;
 const CPU_SPIKE_PCT: f32 = 80.0;
 /// Memory growth (since the trace started) worth an event, per process.
 const MEM_STEP: u64 = 100 << 20;
+/// Spawns within `BURST_WINDOW` seconds that make a burst (fork bomb,
+/// brute-force loop, worm fan-out).
+const BURST_COUNT: usize = 30;
+const BURST_WINDOW: f64 = 10.0;
+/// How long a member known only from a spawn event may be missing from
+/// snapshots before it counts as gone.
+const ADOPT_GRACE: f64 = 10.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Kind {
@@ -35,6 +52,14 @@ pub enum Kind {
     FileClose,
     CpuSpike,
     MemoryGrowth,
+    /// The process replaced its image.
+    Exec,
+    /// A member left the tree's parent chain (re-parented, daemonized).
+    Escape,
+    /// A member runs as a different user than its parent.
+    Privilege,
+    /// Many processes started in a short time.
+    Burst,
     Note,
 }
 
@@ -51,13 +76,17 @@ impl Kind {
             Kind::FileClose => "close",
             Kind::CpuSpike => "cpu",
             Kind::MemoryGrowth => "memory",
+            Kind::Exec => "exec",
+            Kind::Escape => "escape",
+            Kind::Privilege => "user",
+            Kind::Burst => "burst",
             Kind::Note => "note",
         }
     }
 
     pub fn category(self) -> Category {
         match self {
-            Kind::ProcessStart | Kind::ProcessExit => Category::Process,
+            Kind::ProcessStart | Kind::ProcessExit | Kind::Exec | Kind::Escape | Kind::Privilege | Kind::Burst => Category::Process,
             Kind::Connect | Kind::Disconnect | Kind::Listen | Kind::StopListen => Category::Network,
             Kind::FileOpen | Kind::FileClose => Category::File,
             Kind::CpuSpike | Kind::MemoryGrowth => Category::Resource,
@@ -115,7 +144,16 @@ fn ser_time<S: serde::Serializer>(t: &DateTime<Local>, s: S) -> Result<S::Ok, S:
 #[derive(Debug, Clone, Serialize)]
 pub struct Tracked {
     pub pid: u32,
+    /// Parent when it joined the trace (the lineage parent; it stays even
+    /// after the process is re-parented).
     pub ppid: Option<u32>,
+    /// Start time (s since the epoch, 0 = unknown): with the PID, the
+    /// process's identity.
+    pub start: u64,
+    /// Left the tree's parent chain while running.
+    pub escaped: bool,
+    /// How it was first seen: "snapshot" or the deep-trace method.
+    pub seen_by: &'static str,
     pub name: String,
     pub exe: Option<String>,
     pub command: String,
@@ -130,6 +168,44 @@ pub struct Tracked {
     mem_reported: u64,
     #[serde(skip)]
     spiking: bool,
+    #[serde(skip)]
+    user_checked: bool,
+}
+
+/// A member's state at the last refresh.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Live {
+    pub cpu: f32,
+    pub mem: u64,
+    pub threads: u32,
+    pub ppid: Option<u32>,
+}
+
+/// One row of the lineage tree, depth first.
+#[derive(Debug, Clone, Serialize)]
+pub struct Lineage {
+    pub pid: u32,
+    pub depth: usize,
+    /// Members in this subtree (itself included), alive or not.
+    pub subtree: usize,
+    pub subtree_alive: usize,
+    pub subtree_cpu: f32,
+    pub subtree_mem: u64,
+}
+
+/// Whole-tree figures.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct TreeStats {
+    pub alive: usize,
+    pub exited: usize,
+    pub escaped: usize,
+    pub max_depth: usize,
+    pub cpu: f32,
+    pub mem: u64,
+    pub threads: u32,
+    pub peak_alive: usize,
+    /// Most spawns seen within `BURST_WINDOW`.
+    pub peak_spawn_rate: usize,
 }
 
 pub struct Trace {
@@ -153,6 +229,27 @@ pub struct Trace {
     pending_file_errors: HashMap<u32, String>,
     cpu_time_start: f64,
     pub cpu_time_used: f64,
+    /// Members known from spawn events but not yet in a snapshot.
+    adopted: HashMap<u32, u64>,
+    spawns: VecDeque<f64>,
+    burst: bool,
+    pub live: HashMap<u32, Live>,
+    pub peak_alive: usize,
+    pub peak_spawn_rate: usize,
+    root_gone_noted: bool,
+    /// The trace enrolled the root in deep trace itself (and so ends it).
+    pub deep: bool,
+    /// Lifecycle events came from the deep-trace watcher.
+    pub deep_via: Option<&'static str>,
+    /// procwatch itself: never a member, nor are its helpers (tracing an
+    /// ancestor of procwatch would otherwise record its own lsof calls).
+    skip: u32,
+}
+
+/// Same process? Start times of 0 are unknown and match anything; the
+/// sources round differently, so allow one second.
+fn same_start(a: u64, b: u64) -> bool {
+    a == 0 || b == 0 || a.abs_diff(b) <= 1
 }
 
 impl Trace {
@@ -179,11 +276,25 @@ impl Trace {
             pending_file_errors: HashMap::new(),
             cpu_time_start: 0.0,
             cpu_time_used: 0.0,
+            adopted: HashMap::new(),
+            spawns: VecDeque::new(),
+            burst: false,
+            live: HashMap::new(),
+            peak_alive: 0,
+            peak_spawn_rate: 0,
+            root_gone_noted: false,
+            deep: false,
+            deep_via: None,
+            skip: std::process::id(),
         };
         let pids = t.family(tree);
         for pid in &pids {
             if let Some(n) = tree.get(*pid) {
                 t.track(&n.info, 0.0);
+                if let Some(p) = t.procs.get_mut(pid) {
+                    // The baseline's users are not news.
+                    p.user_checked = true;
+                }
                 t.cpu_time_start += n.info.cpu_time_secs.unwrap_or(0.0);
             }
             for c in conns.get(pid).into_iter().flatten() {
@@ -217,18 +328,33 @@ impl Trace {
     }
 
     /// PIDs the trace follows: the root and all live descendants, plus
-    /// anything already tracked that is still alive (re-parented children
-    /// stay followed after their parent exits).
+    /// every live member already known — tracked or adopted from a spawn
+    /// event — and their descendants, so re-parented and double-forked
+    /// members stay followed after their parent exits. A PID whose start
+    /// time no longer matches is a different process and is left out.
     pub fn family(&self, tree: &ProcessTree) -> Vec<u32> {
         let mut set: BTreeSet<u32> = BTreeSet::new();
-        if tree.nodes.contains_key(&self.root) {
+        let alive = |pid: u32, start: u64| tree.get(pid).is_some_and(|n| same_start(start, n.info.start_time_secs));
+        let root_start = self.procs.get(&self.root).map_or(0, |p| p.start);
+        if alive(self.root, root_start) {
             set.insert(self.root);
             set.extend(tree.descendants(self.root));
         }
-        for pid in self.procs.keys() {
-            if self.procs[pid].exited_at.is_none() && tree.nodes.contains_key(pid) {
-                set.insert(*pid);
-                set.extend(tree.descendants(*pid));
+        let known: Vec<(u32, u64)> = self
+            .procs
+            .values()
+            .filter(|p| p.exited_at.is_none())
+            .map(|p| (p.pid, p.start))
+            .chain(self.adopted.iter().map(|(p, s)| (*p, *s)))
+            .collect();
+        for (pid, start) in known {
+            if alive(pid, start) && set.insert(pid) {
+                set.extend(tree.descendants(pid));
+            }
+        }
+        if set.remove(&self.skip) {
+            for d in tree.descendants(self.skip) {
+                set.remove(&d);
             }
         }
         set.into_iter().collect()
@@ -243,6 +369,9 @@ impl Trace {
         self.procs.entry(info.pid).or_insert_with(|| Tracked {
             pid: info.pid,
             ppid: info.ppid,
+            start: info.start_time_secs,
+            escaped: false,
+            seen_by: "snapshot",
             name: info.name.clone(),
             exe: info.exe_path.clone(),
             command: info.cmd.join(" "),
@@ -254,7 +383,158 @@ impl Trace {
             start_mem: info.mem(),
             mem_reported: info.mem(),
             spiking: false,
+            user_checked: false,
         });
+    }
+
+    /// Count a spawn towards the burst detector.
+    fn spawned(&mut self, at: f64, pid: u32) {
+        self.spawns.push_back(at);
+        while self.spawns.front().is_some_and(|t| *t < at - BURST_WINDOW) {
+            self.spawns.pop_front();
+        }
+        let n = self.spawns.len();
+        self.peak_spawn_rate = self.peak_spawn_rate.max(n);
+        if n >= BURST_COUNT && !self.burst {
+            self.burst = true;
+            let name = self.name(pid);
+            self.push(Kind::Burst, pid, &name, format!("{n} processes started in the tree within {BURST_WINDOW:.0} s — fork bomb, brute-force loop or fan-out"));
+        } else if n < BURST_COUNT / 2 {
+            self.burst = false;
+        }
+    }
+
+    /// Fold in lifecycle events from the deep-trace watcher. Spawns whose
+    /// parent is a live member join the tree at once, even if they (or
+    /// their parent) are gone before the next refresh.
+    pub fn on_deep(&mut self, evs: &[DtEvent]) {
+        if !self.is_running() {
+            return;
+        }
+        for e in evs {
+            let at = self.offset();
+            let member = |t: &Self, pid: u32| t.procs.get(&pid).is_some_and(|p| p.exited_at.is_none()) || t.adopted.contains_key(&pid);
+            match e.kind {
+                DtKind::Spawn => {
+                    let Some(pp) = e.ppid.filter(|pp| *pp != self.skip && e.pid != self.skip && member(self, *pp)) else { continue };
+                    if self.procs.get(&e.pid).is_some_and(|p| p.exited_at.is_none()) {
+                        continue;
+                    }
+                    self.deep_via = Some(e.via);
+                    self.adopted.insert(e.pid, e.start);
+                    let path = e.path.clone().unwrap_or_default();
+                    let base = path.rsplit(['/', '\\']).next().filter(|b| !b.is_empty()).map(str::to_string);
+                    let mut info = ProcessInfo::bare(e.pid, Some(pp), base.unwrap_or_else(|| e.pid.to_string()));
+                    info.exe_path = e.path.clone();
+                    info.start_time_secs = e.start;
+                    info.cmd = e.args.iter().cloned().collect();
+                    // A recycled PID: the old instance is over.
+                    self.procs.remove(&e.pid);
+                    self.track(&info, at);
+                    if let Some(p) = self.procs.get_mut(&e.pid) {
+                        p.seen_by = e.via;
+                    }
+                    let cmd = e.args.clone().or(e.path.clone()).unwrap_or_default();
+                    let detail = format!("started by {} ({pp}): {cmd} · seen by {}", self.name(pp), e.via);
+                    let name = self.name(e.pid);
+                    self.push(Kind::ProcessStart, e.pid, &name, detail);
+                    self.spawned(at, e.pid);
+                    if e.start == 0 {
+                        // Gone before it could be read; nothing more will come.
+                        self.adopted.remove(&e.pid);
+                        if let Some(p) = self.procs.get_mut(&e.pid) {
+                            p.exited_at = Some(at);
+                        }
+                    }
+                }
+                DtKind::Exec => {
+                    let Some(p) = self.procs.get_mut(&e.pid).filter(|p| p.exited_at.is_none()) else { continue };
+                    let path = e.path.clone().unwrap_or_default();
+                    if path.is_empty() || p.exe.as_deref() == Some(path.as_str()) {
+                        continue;
+                    }
+                    let was = p.exe.replace(path.clone()).unwrap_or_else(|| p.name.clone());
+                    if let Some(a) = &e.args {
+                        p.command = a.clone();
+                    }
+                    if let Some(b) = path.rsplit(['/', '\\']).next().filter(|b| !b.is_empty()) {
+                        p.name = b.to_string();
+                    }
+                    let name = p.name.clone();
+                    let now = e.args.clone().filter(|a| !a.is_empty()).unwrap_or(path);
+                    self.push(Kind::Exec, e.pid, &name, format!("{was} → {now}"));
+                }
+                DtKind::Exit => {
+                    let Some(p) = self.procs.get_mut(&e.pid).filter(|p| p.exited_at.is_none() && same_start(p.start, e.start)) else { continue };
+                    p.exited_at = Some(at);
+                    let lifetime = at - p.first_seen;
+                    let name = p.name.clone();
+                    self.adopted.remove(&e.pid);
+                    self.files.remove(&e.pid);
+                    self.push(Kind::ProcessExit, e.pid, &name, format!("exited after {lifetime:.3}s in trace · seen by {}", e.via));
+                }
+            }
+        }
+    }
+
+    /// The trace's members as a lineage tree (parents as they were when
+    /// each member joined), depth first, with per-subtree figures.
+    pub fn lineage(&self) -> Vec<Lineage> {
+        let mut children: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+        for p in self.procs.values() {
+            if p.pid == self.root {
+                continue;
+            }
+            let parent = p.ppid.filter(|pp| *pp != p.pid && self.procs.contains_key(pp)).unwrap_or(self.root);
+            children.entry(parent).or_default().push(p.pid);
+        }
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+        self.walk(self.root, 0, &children, &mut seen, &mut out);
+        // Anything unreachable (a parent cycle) still gets a row.
+        for pid in self.procs.keys() {
+            if !seen.contains(pid) {
+                self.walk(*pid, 1, &children, &mut seen, &mut out);
+            }
+        }
+        out
+    }
+
+    fn walk(&self, pid: u32, depth: usize, children: &BTreeMap<u32, Vec<u32>>, seen: &mut HashSet<u32>, out: &mut Vec<Lineage>) -> (usize, usize, f32, u64) {
+        if !self.procs.contains_key(&pid) || !seen.insert(pid) {
+            return (0, 0, 0.0, 0);
+        }
+        let at = out.len();
+        out.push(Lineage { pid, depth, subtree: 0, subtree_alive: 0, subtree_cpu: 0.0, subtree_mem: 0 });
+        let alive = self.procs.get(&pid).is_some_and(|p| p.exited_at.is_none());
+        let live = if alive { self.live.get(&pid).copied().unwrap_or_default() } else { Live::default() };
+        let mut sum = (1, usize::from(alive), live.cpu, live.mem);
+        for c in children.get(&pid).into_iter().flatten() {
+            let (n, a, cpu, mem) = self.walk(*c, depth + 1, children, seen, out);
+            sum = (sum.0 + n, sum.1 + a, sum.2 + cpu, sum.3 + mem);
+        }
+        if let Some(row) = out.get_mut(at) {
+            (row.subtree, row.subtree_alive, row.subtree_cpu, row.subtree_mem) = sum;
+        }
+        sum
+    }
+
+    pub fn stats(&self) -> TreeStats {
+        let mut s = TreeStats { peak_alive: self.peak_alive, peak_spawn_rate: self.peak_spawn_rate, ..TreeStats::default() };
+        for p in self.procs.values() {
+            if p.exited_at.is_none() {
+                s.alive += 1;
+                let l = self.live.get(&p.pid).copied().unwrap_or_default();
+                s.cpu += l.cpu;
+                s.mem += l.mem;
+                s.threads += l.threads;
+            } else {
+                s.exited += 1;
+            }
+            s.escaped += usize::from(p.escaped);
+        }
+        s.max_depth = self.lineage().iter().map(|l| l.depth).max().unwrap_or(0);
+        s
     }
 
     fn push(&mut self, kind: Kind, pid: u32, process: &str, detail: String) {
@@ -299,6 +579,52 @@ impl Trace {
             let parent = info.ppid.map(|p| format!(" by {} ({p})", self.name(p))).unwrap_or_default();
             let cmd = if info.cmd.is_empty() { info.name.clone() } else { info.cmd.join(" ") };
             self.push(Kind::ProcessStart, *pid, &info.name, format!("started{parent}: {cmd}"));
+            self.spawned(at, *pid);
+        }
+        for pid in &family {
+            self.adopted.remove(pid);
+        }
+
+        // Identity and lineage: fill in what spawn events couldn't know,
+        // flag user changes and members that left the parent chain.
+        let mut lineage_events = Vec::new();
+        for pid in &family {
+            let Some(n) = tree.get(*pid) else { continue };
+            let lineage_parent = self.procs.get(pid).and_then(|p| p.ppid);
+            let parent_user = lineage_parent.and_then(|pp| self.procs.get(&pp)).and_then(|pp| pp.user.clone());
+            let parent_name = lineage_parent.map(|pp| self.name(pp)).unwrap_or_default();
+            let now_parent = n.info.ppid.map(|pp| (pp, tree.get(pp).map(|x| x.info.name.clone()).unwrap_or_else(|| pp.to_string())));
+            let root = self.root;
+            let Some(p) = self.procs.get_mut(pid) else { continue };
+            if p.user.is_none() {
+                p.user = n.info.user.clone();
+            }
+            if p.start == 0 {
+                p.start = n.info.start_time_secs;
+            }
+            if !p.user_checked && p.user.is_some() {
+                p.user_checked = true;
+                if let (Some(u), Some(pu)) = (&p.user, &parent_user) {
+                    if u != pu {
+                        lineage_events.push((Kind::Privilege, *pid, p.name.clone(), format!("runs as {u} — its parent ran as {pu}")));
+                    }
+                }
+            }
+            if *pid != root && !p.escaped {
+                if let Some((pp, pname)) = now_parent.filter(|(pp, _)| !family_set.contains(pp)) {
+                    p.escaped = true;
+                    let from = if parent_name.is_empty() { String::new() } else { format!(" of {parent_name}") };
+                    lineage_events.push((
+                        Kind::Escape,
+                        *pid,
+                        p.name.clone(),
+                        format!("left the tree{from}: now a child of {pname} ({pp}) — re-parented (double-fork, daemon or parent exit); still followed"),
+                    ));
+                }
+            }
+        }
+        for (k, pid, name, detail) in lineage_events {
+            self.push(k, pid, &name, detail);
         }
 
         // Exits.
@@ -306,8 +632,14 @@ impl Trace {
             .procs
             .values()
             .filter(|p| p.exited_at.is_none() && !family_set.contains(&p.pid))
+            // Seen by a spawn event after this snapshot was taken: give the
+            // next refreshes a chance to show it.
+            .filter(|p| !(self.adopted.contains_key(&p.pid) && at - p.first_seen < ADOPT_GRACE))
             .map(|p| p.pid)
             .collect();
+        for pid in &gone {
+            self.adopted.remove(pid);
+        }
         for pid in gone {
             let name = self.name(pid);
             let lifetime = self.procs.get(&pid).map(|p| at - p.first_seen).unwrap_or(0.0);
@@ -321,9 +653,11 @@ impl Trace {
         // Resource peaks and spikes.
         let mut cpu_total = 0.0;
         let mut resource_events = Vec::new();
+        self.live.clear();
         for pid in &family {
             let Some(n) = tree.get(*pid) else { continue };
             let i = &n.info;
+            self.live.insert(*pid, Live { cpu: i.cpu_usage_pct, mem: i.mem(), threads: i.threads.unwrap_or(1), ppid: i.ppid });
             cpu_total += i.cpu_time_secs.unwrap_or(0.0);
             let Some(p) = self.procs.get_mut(pid) else { continue };
             p.peak_cpu = p.peak_cpu.max(i.cpu_usage_pct);
@@ -388,8 +722,16 @@ impl Trace {
             }
         }
 
+        let alive = self.procs.values().filter(|p| p.exited_at.is_none()).count();
+        self.peak_alive = self.peak_alive.max(alive);
+        if !self.root_gone_noted && self.procs.get(&self.root).is_some_and(|p| p.exited_at.is_some()) && alive > 0 {
+            self.root_gone_noted = true;
+            let name = self.root_name.clone();
+            self.push(Kind::Note, self.root, &name, format!("root exited; {alive} member(s) of its tree still running and still followed"));
+        }
+
         // Nothing left to watch: finish on our own.
-        if self.procs.values().all(|p| p.exited_at.is_some()) {
+        if self.adopted.is_empty() && self.procs.values().all(|p| p.exited_at.is_some()) {
             let name = self.root_name.clone();
             self.push(Kind::Note, self.root, &name, "all traced processes have exited".into());
             self.stop();
@@ -477,8 +819,34 @@ impl Trace {
         s.push_str(&format!("- Processes observed: {}\n", self.procs.len()));
         s.push_str(&format!("- Events: {}{}\n", self.events.len(), if self.dropped > 0 { format!(" ({} dropped)", self.dropped) } else { String::new() }));
         s.push_str(&format!("- CPU time used by the tree: {:.1} s\n\n", self.cpu_time_used));
-        s.push_str("> Sampled observation: process and socket state every refresh, open files every ~2 s. ");
-        s.push_str("Activity shorter than the sampling interval may not appear.\n\n");
+        match self.deep_via {
+            Some(via) => s.push_str(&format!("> Process lifecycle from deep trace ({via}); sockets every refresh, open files every ~2 s.\n\n")),
+            None => {
+                s.push_str("> Sampled observation: process and socket state every refresh, open files every ~2 s. ");
+                s.push_str("Activity shorter than the sampling interval may not appear.\n\n");
+            }
+        }
+        let st = self.stats();
+        s.push_str(&format!(
+            "## Process tree\n\n- Members: {} ({} running, {} exited), peak {} running at once\n- Deepest level: {}\n- Escaped the parent chain: {}\n- Most spawns within {BURST_WINDOW:.0} s: {}\n\n```\n",
+            self.procs.len(),
+            st.alive,
+            st.exited,
+            st.peak_alive,
+            st.max_depth,
+            st.escaped,
+            st.peak_spawn_rate
+        ));
+        for l in self.lineage() {
+            let Some(p) = self.procs.get(&l.pid) else { continue };
+            let state = match (p.exited_at, p.escaped) {
+                (Some(x), _) => format!("exited +{x:.1}s"),
+                (None, true) => "running, escaped".into(),
+                (None, false) => "running".into(),
+            };
+            s.push_str(&format!("{}{} ({}) [{state}] {}\n", "  ".repeat(l.depth), p.name.replace('`', "'"), p.pid, p.user.as_deref().unwrap_or("")));
+        }
+        s.push_str("```\n\n");
 
         s.push_str("## Processes\n\n| PID | Parent | Name | First seen | Exited | Peak CPU | Peak memory | Command |\n|---|---|---|---|---|---|---|---|\n");
         for p in self.procs.values() {
@@ -535,6 +903,9 @@ impl Trace {
             duration_secs: f64,
             cpu_time_used_secs: f64,
             processes: Vec<&'a Tracked>,
+            tree: TreeStats,
+            lineage: Vec<Lineage>,
+            lifecycle_source: &'a str,
             remote_hosts: &'a BTreeMap<String, usize>,
             listening: &'a BTreeSet<String>,
             files_touched: &'a BTreeSet<String>,
@@ -548,6 +919,9 @@ impl Trace {
             duration_secs: self.elapsed().as_secs_f64(),
             cpu_time_used_secs: self.cpu_time_used,
             processes: self.procs.values().collect(),
+            tree: self.stats(),
+            lineage: self.lineage(),
+            lifecycle_source: self.deep_via.unwrap_or("snapshot"),
             remote_hosts: &self.remote_hosts,
             listening: &self.listen_ports,
             files_touched: &self.files_touched,
@@ -614,5 +988,117 @@ mod tests {
         let md = t.to_markdown();
         assert!(md.contains("Behavior trace") && md.contains("/tmp/x.log"));
         assert!(t.to_json().contains("\"root_pid\": 2"));
+    }
+
+    fn ev(kind: DtKind, pid: u32, ppid: Option<u32>, start: u64, path: &str) -> DtEvent {
+        DtEvent { at: Local::now(), kind, pid, ppid, start, path: Some(path.into()), args: None, via: "kqueue" }
+    }
+
+    fn node(tree: &mut ProcessTree, pid: u32, ppid: u32, start: u64) {
+        let mut i = info(pid, Some(ppid));
+        i.start_time_secs = start;
+        tree.nodes.insert(pid, TreeNode { info: i, children: vec![] });
+        if let Some(p) = tree.nodes.get_mut(&ppid) {
+            p.children.push(pid);
+        }
+    }
+
+    /// The double-fork: 2 starts 10, 10 starts 11 and exits, 11 is
+    /// re-parented to init — all between two refreshes.
+    #[test]
+    fn double_forked_daemon_stays_in_the_tree() {
+        let mut tree = sample();
+        let mut t = Trace::new(2, &tree, &HashMap::new()).unwrap();
+        t.on_deep(&[
+            ev(DtKind::Spawn, 10, Some(2), 100, "/bin/sh"),
+            ev(DtKind::Spawn, 11, Some(10), 100, "/tmp/.x/miner"),
+            ev(DtKind::Exit, 10, None, 100, ""),
+        ]);
+        assert!(t.procs.contains_key(&11) && t.procs[&10].exited_at.is_some());
+        node(&mut tree, 11, 1, 100);
+        t.on_snapshot(&tree, &HashMap::new());
+        assert!(t.family(&tree).contains(&11), "re-parented daemon dropped");
+        assert_eq!(t.count(Kind::ProcessStart), 2);
+        assert_eq!(t.count(Kind::Escape), 1);
+        assert!(t.procs[&11].escaped);
+        // Its own children are members too.
+        node(&mut tree, 12, 11, 101);
+        t.on_snapshot(&tree, &HashMap::new());
+        assert!(t.procs.contains_key(&12));
+        // Lineage keeps the original parent chain: 2 → 10 → 11 → 12.
+        let l = t.lineage();
+        let depth = |pid| l.iter().find(|r| r.pid == pid).map(|r| r.depth);
+        assert_eq!((depth(2), depth(10), depth(11), depth(12)), (Some(0), Some(2 - 1), Some(2), Some(3)));
+        assert_eq!(l[0].subtree, t.procs.len());
+        assert_eq!(t.stats().escaped, 1);
+        assert!(t.to_markdown().contains("## Process tree"));
+    }
+
+    /// A member known only from a spawn event isn't declared gone by a
+    /// snapshot taken just before it started.
+    #[test]
+    fn spawn_seen_before_the_snapshot_is_not_an_exit() {
+        let tree = sample();
+        let mut t = Trace::new(2, &tree, &HashMap::new()).unwrap();
+        t.on_deep(&[ev(DtKind::Spawn, 20, Some(2), 100, "/bin/true")]);
+        t.on_snapshot(&tree, &HashMap::new());
+        assert!(t.procs[&20].exited_at.is_none());
+        assert_eq!(t.count(Kind::ProcessExit), 0);
+    }
+
+    /// A recycled PID with a different start time is someone else.
+    #[test]
+    fn recycled_pid_is_not_a_member() {
+        let mut tree = sample();
+        tree.nodes.get_mut(&4).unwrap().info.start_time_secs = 50;
+        let mut t = Trace::new(2, &tree, &HashMap::new()).unwrap();
+        tree.nodes.remove(&4);
+        tree.nodes.get_mut(&2).unwrap().children.clear();
+        t.on_snapshot(&tree, &HashMap::new());
+        assert!(t.procs[&4].exited_at.is_some());
+        // pid 4 comes back as an unrelated process under init.
+        node(&mut tree, 4, 1, 900);
+        t.on_snapshot(&tree, &HashMap::new());
+        assert!(!t.family(&tree).contains(&4));
+    }
+
+    #[test]
+    fn user_change_exec_and_burst_are_reported() {
+        let mut tree = sample();
+        tree.nodes.get_mut(&2).unwrap().info.user = Some("alice".into());
+        let mut t = Trace::new(2, &tree, &HashMap::new()).unwrap();
+        node(&mut tree, 30, 2, 100);
+        tree.nodes.get_mut(&30).unwrap().info.user = Some("root".into());
+        t.on_snapshot(&tree, &HashMap::new());
+        assert_eq!(t.count(Kind::Privilege), 1);
+        t.on_deep(&[ev(DtKind::Exec, 30, Some(2), 100, "/usr/bin/curl")]);
+        assert_eq!(t.count(Kind::Exec), 1);
+        assert_eq!(t.procs[&30].name, "curl");
+        let burst: Vec<DtEvent> = (100..100 + BURST_COUNT as u32).map(|p| ev(DtKind::Spawn, p, Some(30), 100, "/bin/sh")).collect();
+        t.on_deep(&burst);
+        assert_eq!(t.count(Kind::Burst), 1, "one burst, not one per spawn");
+        assert!(t.stats().peak_spawn_rate >= BURST_COUNT);
+    }
+
+    /// procwatch and its helpers never join a trace of its ancestor.
+    #[test]
+    fn procwatch_is_not_its_own_subject() {
+        let mut tree = sample();
+        let me = std::process::id();
+        node(&mut tree, me, 2, 0);
+        node(&mut tree, me + 1, me, 0);
+        let mut t = Trace::new(2, &tree, &HashMap::new()).unwrap();
+        assert!(!t.procs.contains_key(&me) && !t.procs.contains_key(&(me + 1)));
+        t.on_deep(&[ev(DtKind::Spawn, me + 2, Some(me), 100, "/usr/sbin/lsof")]);
+        assert!(!t.procs.contains_key(&(me + 2)));
+    }
+
+    /// Spawns from outside the tree are ignored.
+    #[test]
+    fn foreign_spawns_are_not_adopted() {
+        let tree = sample();
+        let mut t = Trace::new(2, &tree, &HashMap::new()).unwrap();
+        t.on_deep(&[ev(DtKind::Spawn, 40, Some(3), 100, "/bin/sh")]);
+        assert!(!t.procs.contains_key(&40));
     }
 }

@@ -137,19 +137,21 @@ impl App {
     }
 
     /// Enroll a process (and its current descendants) in deep trace.
-    pub fn deep_enroll(&mut self, pid: u32, reason: String, auto: bool) {
+    /// True when the watcher was asked to follow all of them.
+    pub fn deep_enroll(&mut self, pid: u32, reason: String, auto: bool) -> bool {
         if self.replaying() {
             self.set_status(StatusLevel::Info, "Not available while replaying a recording — this would act on the live system".into());
-            return;
+            return false;
         }
         let me = std::process::id();
         if pid == me || self.tree.get(pid).is_some_and(|n| self.is_own_helper(&n.info)) {
-            return;
+            return false;
         }
         let root = self.proc_key(pid);
         if self.ir.deep.enrolled.contains_key(&root) {
-            return;
+            return true;
         }
+        let mut watched = true;
         let mut pids = vec![pid];
         pids.extend(self.tree.descendants(pid));
         let now = Local::now();
@@ -157,7 +159,7 @@ impl App {
             let key = self.proc_key(p);
             let why = if p == pid { reason.clone() } else { format!("descendant of {} ({pid})", self.name_of(pid)) };
             self.ir.deep.enrolled.entry(key).or_insert(Enrolled { reason: why, since: now, root, auto, ended: None });
-            self.trace_request(crate::process::trace_module::Request::Watch(p));
+            watched &= self.trace_request(crate::process::trace_module::Request::Watch(p));
         }
         if let Some(c) = &self.ir.case {
             let _ = c.log("deep trace", &format!("{} ({pid}) enrolled: {reason}", self.name_of(pid)));
@@ -165,10 +167,17 @@ impl App {
         if !auto {
             self.set_status(StatusLevel::Success, format!("Deep trace on {} ({pid}) and its descendants", self.name_of(pid)));
         }
+        watched
     }
 
     pub fn deep_stop(&mut self, pid: u32) {
         let root = self.proc_key(pid);
+        self.deep_stop_key(root);
+    }
+
+    /// Stop deep trace of an instance (which may have exited already).
+    pub fn deep_stop_key(&mut self, root: ProcKey) {
+        let pid = root.pid;
         let keys: Vec<ProcKey> = self.ir.deep.enrolled.iter().filter(|(k, e)| **k == root || e.root == root).map(|(k, _)| *k).collect();
         for k in keys {
             self.ir.deep.enrolled.remove(&k);
@@ -271,7 +280,19 @@ impl App {
     }
 
     pub(super) fn deep_on_events(&mut self, evs: Vec<DtEvent>) {
+        if let Some(t) = self.trace.as_mut() {
+            t.on_deep(&evs);
+            if let Ok(mut targets) = self.trace_targets.lock() {
+                *targets = if t.is_running() { t.live_pids() } else { Vec::new() };
+            }
+        }
+        let me = std::process::id();
         for e in evs {
+            // procwatch's own helpers, seen when an ancestor of procwatch is
+            // traced, are not evidence about the subject.
+            if e.pid == me || e.ppid == Some(me) {
+                continue;
+            }
             match e.kind {
                 DtKind::Spawn => {
                     let key = ProcKey { pid: e.pid, start: e.start };
